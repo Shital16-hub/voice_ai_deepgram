@@ -1,0 +1,64 @@
+# Core dependencies
+aiohttp
+aiohttp-retry
+asyncio
+fastapi
+uvicorn
+flask
+flask-sockets
+gevent
+gevent-websocket
+simple-websocket
+
+# Audio processing
+audioread
+librosa
+soundfile
+numpy
+scipy
+pywhispercpp
+
+# AI/ML components
+llama-index
+llama-index-core
+llama-index-embeddings-huggingface
+llama-index-vector-stores-chroma
+llama-index-llms-ollama
+llama-index-readers-file
+chromadb
+ollama
+sentence-transformers
+transformers
+torch
+
+# Language processing
+langchain-core
+langgraph
+langsmith
+spacy
+nltk
+langdetect
+
+# Twilio integration
+twilio
+
+# Document processing
+beautifulsoup4
+pdfplumber
+PyMuPDF
+pypdf
+python-docx
+openpyxl
+lxml
+
+# Utilities
+pydantic
+pydantic-settings
+python-dotenv
+requests
+websockets
+websocket-client
+pandas
+pytest
+pytest-asyncio
+typing-extensions
