@@ -62,7 +62,7 @@ class DeepgramStreamingSTT:
         if not self.api_key:
             raise ValueError("Deepgram API key is required. Set it in .env file or pass directly.")
         
-        self.model_name = model_name or "nova-2"  # Updated to use nova-2 as default
+        self.model_name = model_name or "general"  # Hardcoded to "general" model which is available
         self.language = language or config.language
         self.sample_rate = sample_rate or config.sample_rate
         self.encoding = encoding
@@ -90,23 +90,11 @@ class DeepgramStreamingSTT:
             "filler_words": "false",  # Filter out filler words
             "profanity_filter": str(config.profanity_filter).lower(),
             "alternatives": str(config.alternatives),
-            "tier": "enhanced",  # Highest quality tier
+            "tier": config.model_options.get("tier", "enhanced"),
             "punctuate": "true",  # Add punctuation for better readability
             "diarize": "false"     # Single speaker for telephony
         }
         
-        # Add interim_results parameter for real-time processing
-        if self.interim_results:
-            params["interim_results"] = "true"
-            
-        # Telephony optimization
-        params["domain"] = "telephony"
-        
-        # If using nova-2, add model-specific optimizations
-        if self.model_name == "nova-2":
-            params["detect_topics"] = "false"  # Save processing time
-            params["numerals"] = "true"  # Better handling of numbers for business context
-            
         return params
     
     async def start_streaming(
@@ -130,7 +118,7 @@ class DeepgramStreamingSTT:
         self.utterance_id = 0
         self.is_streaming = True
         
-        logger.info(f"Started Deepgram session (Nova-2) for simulated streaming")
+        logger.info("Started Deepgram session (simulated streaming)")
     
     async def stop_streaming(self) -> None:
         """Stop the simulated streaming session."""

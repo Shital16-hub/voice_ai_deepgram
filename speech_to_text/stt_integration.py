@@ -72,10 +72,9 @@ class STTIntegration:
             return
             
         try:
-            # Create a new Deepgram streaming client with Nova 3
+            # Create a new Deepgram streaming client optimized for telephony
             self.speech_recognizer = DeepgramStreamingSTT(
                 api_key=api_key,
-                model_name="nova-3",  # Use Nova 3 model 
                 language=self.language,
                 sample_rate=16000,
                 encoding="linear16",
@@ -84,9 +83,9 @@ class STTIntegration:
             )
             
             self.initialized = True
-            logger.info(f"Initialized STT with Deepgram Nova 3 API and language: {self.language}")
+            logger.info(f"Initialized STT with Deepgram API and language: {self.language}")
         except Exception as e:
-            logger.error(f"Error initializing STT with Nova 3: {e}")
+            logger.error(f"Error initializing STT: {e}")
             raise
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
@@ -300,7 +299,7 @@ class STTIntegration:
                     "is_valid": self.is_valid_transcription(cleaned_text)
                 }
             else:
-                logger.warning("No transcription results obtained from Nova 3")
+                logger.warning("No transcription results obtained")
                 return {
                     "transcription": "",
                     "confidence": 0.0,
@@ -311,7 +310,7 @@ class STTIntegration:
                 }
             
         except Exception as e:
-            logger.error(f"Error transcribing audio file with Nova 3: {e}")
+            logger.error(f"Error transcribing audio file: {e}")
             return {
                 "error": str(e),
                 "processing_time": time.time() - start_time
@@ -402,7 +401,7 @@ class STTIntegration:
                     "is_valid": self.is_valid_transcription(cleaned_text)
                 }
             else:
-                logger.warning("No transcription results obtained from Nova 3")
+                logger.warning("No transcription results obtained")
                 return {
                     "transcription": "",
                     "confidence": 0.0,
@@ -413,7 +412,7 @@ class STTIntegration:
                 }
             
         except Exception as e:
-            logger.error(f"Error transcribing audio data with Nova 3: {e}")
+            logger.error(f"Error transcribing audio data: {e}")
             return {
                 "error": str(e),
                 "processing_time": time.time() - start_time
@@ -426,7 +425,7 @@ class STTIntegration:
             return
         
         await self.speech_recognizer.start_streaming()
-        logger.debug("Started Nova 3 streaming transcription session")
+        logger.debug("Started streaming transcription session")
     
     async def process_stream_chunk(
         self,
@@ -482,7 +481,7 @@ class STTIntegration:
                 if result.text and self.is_valid_transcription(result.text) and callback:
                     await callback(result)
         
-        # Process the audio chunk with Nova 3
+        # Process the audio chunk
         return await self.speech_recognizer.process_audio_chunk(
             audio_chunk=audio_bytes,
             callback=clean_callback
@@ -511,7 +510,7 @@ class STTIntegration:
             
             # Log what was changed if significant
             if result.text != cleaned_text:
-                logger.info(f"Cleaned final Nova 3 transcription: '{result.text}' -> '{cleaned_text}'")
+                logger.info(f"Cleaned final transcription: '{result.text}' -> '{cleaned_text}'")
             
             # Get the duration from the result if available
             duration = (result.end_time - result.start_time) if result.end_time > 0 else 0
@@ -542,7 +541,7 @@ class STTIntegration:
             yield {"error": "STT integration not initialized"}
             return
         
-        # Start streaming with Nova 3
+        # Start streaming
         await self.speech_recognizer.start_streaming()
         
         # Track state
@@ -572,7 +571,7 @@ class STTIntegration:
                     if callback:
                         await callback(result)
                 
-                # Process the audio chunk with Nova 3
+                # Process the audio chunk
                 await self.speech_recognizer.process_audio_chunk(
                     audio_chunk=audio_bytes,
                     callback=process_result
@@ -586,7 +585,7 @@ class STTIntegration:
                     if has_speech:
                         is_speaking = True
                         silence_frames = 0
-                        logger.info("Speech detected, beginning Nova 3 transcription")
+                        logger.info("Speech detected, beginning transcription")
                 else:
                     # Check for end of utterance (silence after speech)
                     has_speech = any(result.text.strip() for result in results)
@@ -600,7 +599,7 @@ class STTIntegration:
                 if is_speaking and silence_frames >= max_silence_frames:
                     is_speaking = False
                     
-                    # Get final transcription from Nova 3
+                    # Get final transcription
                     final_text, duration = await self.end_streaming()
                     
                     # Clean up the transcription
@@ -608,7 +607,7 @@ class STTIntegration:
                     
                     # Only yield if it's a valid transcription after cleaning
                     if cleaned_text and self.is_valid_transcription(cleaned_text):
-                        logger.info(f"Nova 3 utterance detected: {cleaned_text}")
+                        logger.info(f"Utterance detected: {cleaned_text}")
                         
                         # Yield the result
                         yield {
@@ -624,7 +623,7 @@ class STTIntegration:
                     silence_frames = 0
         
         except Exception as e:
-            logger.error(f"Error in real-time audio processing with Nova 3: {e}")
+            logger.error(f"Error in real-time audio processing: {e}")
             yield {"error": str(e)}
         
         finally:

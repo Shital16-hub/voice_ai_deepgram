@@ -49,8 +49,7 @@ ENABLE_NOISE_FILTERING = True  # Enable enhanced noise filtering
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
-# STT Optimization Settings for Nova 3
-STT_MODEL = "nova-3"  # Use Nova 3 model
+# STT Optimization Settings
 STT_INITIAL_PROMPT = "This is a clear business conversation. Transcribe the exact words spoken, ignoring background noise."
 STT_NO_CONTEXT = True      # Disable context to prevent false additions in noisy environments
 STT_TEMPERATURE = 0.0      # Use greedy decoding for less hallucination

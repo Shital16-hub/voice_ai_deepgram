@@ -112,7 +112,7 @@ class WebSocketHandler:
         )
         
         # Ensure we start with a fresh deepgram session state
-        self.deepgram_session_active = False  # Reset Deepgram Nova 3 session state
+        self.deepgram_session_active = False
         
         logger.info(f"WebSocketHandler initialized for call {call_sid} with {'Deepgram' if self.using_deepgram else 'Whisper'} STT")
     
@@ -296,7 +296,7 @@ class WebSocketHandler:
         self.conversation_active = True
         self.stop_event.clear()
         self.noise_samples = []  # Reset noise samples
-        self.deepgram_session_active = False  # Reset Deepgram Nova 3 session state  # Reset Deepgram session state
+        self.deepgram_session_active = False  # Reset Deepgram session state
         
         # Send a welcome message
         await self.send_text_response("I'm listening. How can I help you today?", ws)
@@ -306,10 +306,10 @@ class WebSocketHandler:
             try:
                 await self.pipeline.speech_recognizer.start_streaming()
                 self.deepgram_session_active = True
-                logger.info("Started Deepgram Nova 3 streaming session")
+                logger.info("Started Deepgram streaming session")
             except Exception as e:
-                logger.error(f"Error starting Deepgram Nova 3 streaming session: {e}")
-                self.deepgram_session_active = False  # Reset Deepgram Nova 3 session state
+                logger.error(f"Error starting Deepgram streaming session: {e}")
+                self.deepgram_session_active = False
     
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
         """
@@ -390,10 +390,10 @@ class WebSocketHandler:
         if self.using_deepgram and self.deepgram_session_active:
             try:
                 await self.pipeline.speech_recognizer.stop_streaming()
-                logger.info("Stopped Deepgram Nova 3 streaming session")
-                self.deepgram_session_active = False  # Reset Deepgram Nova 3 session state
+                logger.info("Stopped Deepgram streaming session")
+                self.deepgram_session_active = False
             except Exception as e:
-                logger.error(f"Error stopping Deepgram Nova 3 streaming session: {e}")
+                logger.error(f"Error stopping Deepgram streaming session: {e}")
     
     async def _handle_mark(self, data: Dict[str, Any]) -> None:
         """
@@ -495,7 +495,7 @@ class WebSocketHandler:
                     
                     # Make sure the Deepgram streaming session is active
                     if not self.deepgram_session_active:
-                        logger.info("Starting new Deepgram Nova 3 streaming session")
+                        logger.info("Starting new Deepgram streaming session")
                         await self.pipeline.speech_recognizer.start_streaming()
                         self.deepgram_session_active = True
                     
@@ -615,7 +615,7 @@ class WebSocketHandler:
                         self.deepgram_session_active = True
                     except Exception as session_error:
                         logger.error(f"Error resetting Deepgram session: {session_error}")
-                        self.deepgram_session_active = False  # Reset Deepgram Nova 3 session state
+                        self.deepgram_session_active = False
                 
         except Exception as e:
             logger.error(f"Error processing audio: {e}", exc_info=True)
