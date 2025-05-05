@@ -17,6 +17,9 @@ from google.api_core.exceptions import GoogleAPIError
 
 from telephony.audio_processor import AudioProcessor
 from telephony.config import CHUNK_SIZE, AUDIO_BUFFER_SIZE, SILENCE_THRESHOLD, SILENCE_DURATION, MAX_BUFFER_SIZE
+import concurrent.futures
+import threading
+
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +106,7 @@ class GoogleCloudSpeechHandler:
         
         # Audio streaming data
         self.audio_queue = asyncio.Queue()
-        self._stream_thread = None
+        self.stream_task = None
         self._stop_event = asyncio.Event()
         
     async def start_streaming(self):
@@ -132,8 +135,8 @@ class GoogleCloudSpeechHandler:
             single_utterance=False  # Allow multiple utterances in a stream
         )
         
-        # Create background task for recognition
-        self._stream_thread = asyncio.create_task(self._run_streaming_recognition())
+        # Start the streaming task
+        self.stream_task = asyncio.create_task(self._stream_recognition())
         
         logger.info("Started Google Cloud Speech streaming session")
         
@@ -150,7 +153,11 @@ class GoogleCloudSpeechHandler:
         """
         if not self.is_streaming:
             logger.warning("Called process_audio_chunk but streaming is not active")
-            return None
+            try:
+                await self.start_streaming()
+            except Exception as e:
+                logger.error(f"Error starting streaming session: {e}")
+                return None
             
         # Convert numpy array to bytes if needed
         if isinstance(audio_chunk, np.ndarray):
@@ -164,8 +171,9 @@ class GoogleCloudSpeechHandler:
         # Add callback if provided
         if callback and callback not in self.result_callbacks:
             self.result_callbacks.append(callback)
+            
         # Add audio chunk to the queue
-        if not self._stop_event.is_set():
+        if self.is_streaming and not self._stop_event.is_set():
             await self.audio_queue.put(audio_bytes)
             
         return None  # Results come via callback
@@ -179,15 +187,19 @@ class GoogleCloudSpeechHandler:
             # Signal that we're done adding audio
             self._stop_event.set()
             
-            # Wait for the streaming thread to complete
-            if self._stream_thread:
+            # Cancel the stream task if it's running
+            if self.stream_task and not self.stream_task.done():
                 try:
-                    await asyncio.wait_for(self._stream_thread, timeout=3.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    logger.warning("Timeout waiting for streaming thread to complete")
-                    if self._stream_thread:
-                        self._stream_thread.cancel()
-                    
+                    # Give it a moment to complete gracefully
+                    await asyncio.wait_for(self.stream_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    # Cancel if it takes too long
+                    self.stream_task.cancel()
+                    try:
+                        await self.stream_task
+                    except asyncio.CancelledError:
+                        pass
+                        
             # Cleanup
             self.is_streaming = False
             self.result_callbacks = []
@@ -200,46 +212,89 @@ class GoogleCloudSpeechHandler:
             self.is_streaming = False
             return "", 0.0
     
-    async def _run_streaming_recognition(self):
-        """Run streaming recognition in the background."""
+    async def _stream_recognition(self):
+        """Main function to handle the streaming recognition."""
         try:
-            # Define the generator that yields requests
-            async def request_generator():
-                # First request must contain only the streaming config
+            # Create a generator that yields requests
+            def generate_requests():
+                # First request contains only the config
                 yield speech.StreamingRecognizeRequest(
                     streaming_config=self.streaming_config
                 )
                 
-                # Subsequent requests contain audio data
-                while not self._stop_event.is_set():
+                # Create a buffer for audio data
+                audio_buffer = []
+                
+                # Set up a signal for stopping
+                stop_event = threading.Event()
+                
+                # Thread function to collect audio data from the queue
+                def audio_collector():
                     try:
-                        audio_data = await asyncio.wait_for(
-                            self.audio_queue.get(), 
-                            timeout=2.0
-                        )
-                        
-                        yield speech.StreamingRecognizeRequest(
-                            audio_content=audio_data
-                        )
-                        
-                        self.audio_queue.task_done()
-                    except asyncio.TimeoutError:
-                        continue
+                        while not stop_event.is_set() and not self._stop_event.is_set():
+                            try:
+                                # Get audio from queue with timeout
+                                loop = asyncio.get_event_loop()
+                                future = asyncio.run_coroutine_threadsafe(
+                                    self.audio_queue.get(), loop
+                                )
+                                # Wait with timeout
+                                audio_data = future.result(timeout=0.5)
+                                
+                                # Add to buffer
+                                audio_buffer.append(audio_data)
+                                
+                                # Mark as done
+                                loop.call_soon_threadsafe(self.audio_queue.task_done)
+                            except concurrent.futures.TimeoutError:
+                                # No data available yet
+                                continue
+                            except Exception as e:
+                                logger.error(f"Error in audio collector: {e}")
+                                break
                     except Exception as e:
-                        logger.error(f"Error in request generator: {e}")
-                        break
+                        logger.error(f"Error in audio collector thread: {e}")
+                
+                # Start the collector thread
+                collector_thread = threading.Thread(target=audio_collector)
+                collector_thread.daemon = True
+                collector_thread.start()
+                
+                try:
+                    # Yield audio data as it becomes available
+                    while not self._stop_event.is_set():
+                        # Check if we have audio data to send
+                        if audio_buffer:
+                            # Get the next audio chunk
+                            audio_chunk = audio_buffer.pop(0)
+                            
+                            # Create and yield the request
+                            req = speech.StreamingRecognizeRequest(
+                                audio_content=audio_chunk
+                            )
+                            yield req
+                        else:
+                            # No audio available, wait a bit
+                            time.sleep(0.1)
+                finally:
+                    # Signal thread to stop
+                    stop_event.set()
+                    collector_thread.join(timeout=1.0)
             
-            # Get request generator
-            requests = request_generator()
+            # Create the requests
+            request_generator = generate_requests()
             
-            # Call the streaming recognize method with the request generator
-            responses = self.client.streaming_recognize(requests)
+            # Start streaming recognition
+            responses = self.client.streaming_recognize(request_generator)
             
-            # Process responses as they come in
+            # Process responses
             for response in responses:
                 if self._stop_event.is_set():
                     break
-                
+                    
+                if not response.results:
+                    continue
+                    
                 for result in response.results:
                     # Convert Google result to our format
                     streaming_result = StreamingRecognitionResult.from_google_result(result)
@@ -247,16 +302,18 @@ class GoogleCloudSpeechHandler:
                     # Call all registered callbacks
                     for callback in self.result_callbacks:
                         try:
-                            await callback(streaming_result)
-                        except Exception as callback_error:
-                            logger.error(f"Error in result callback: {callback_error}")
-                            
+                            # Create a task for each callback
+                            loop = asyncio.get_event_loop()
+                            loop.create_task(callback(streaming_result))
+                        except Exception as e:
+                            logger.error(f"Error in callback: {e}")
+            
         except Exception as e:
             logger.error(f"Error in streaming recognition: {e}")
-            
         finally:
-            # Ensure we clean up
             self.is_streaming = False
+    
+    
 
 class WebSocketHandler:
     """
