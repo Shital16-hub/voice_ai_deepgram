@@ -1,16 +1,19 @@
+# voice_ai_agent.py
+
 """
-Voice AI Agent main class that coordinates all components with Deepgram STT integration.
+Voice AI Agent main class that coordinates all components with Google Cloud STT integration.
 Generic version that works with any knowledge base.
 """
 import os
 import logging
 import asyncio
+import time
 from typing import Optional, Dict, Any, Union, Callable, Awaitable
 import numpy as np
 from scipy import signal
 
-# Deepgram STT imports
-from speech_to_text.deepgram_stt import DeepgramStreamingSTT
+# Google Cloud STT imports
+from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 from speech_to_text.stt_integration import STTIntegration
 from knowledge_base.conversation_manager import ConversationManager
 from knowledge_base.llama_index.document_store import DocumentStore
@@ -21,34 +24,34 @@ from text_to_speech import DeepgramTTS
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """Main Voice AI Agent class that coordinates all components with Deepgram STT."""
+    """Main Voice AI Agent class that coordinates all components with Google Cloud STT."""
     
     def __init__(
         self,
         storage_dir: str = './storage',
         model_name: str = 'mistral:7b-instruct-v0.2-q4_0',
-        api_key: Optional[str] = None,
         llm_temperature: float = 0.7,
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with Deepgram STT.
+        Initialize the Voice AI Agent with Google Cloud STT.
         
         Args:
             storage_dir: Directory for persistent storage
             model_name: LLM model name for knowledge base
-            api_key: Deepgram API key (defaults to env variable)
             llm_temperature: LLM temperature for response generation
             **kwargs: Additional parameters for customization
         """
         self.storage_dir = storage_dir
         self.model_name = model_name
-        self.api_key = api_key
         self.llm_temperature = llm_temperature
         
         # STT Parameters
         self.stt_language = kwargs.get('language', 'en-US')
         self.stt_keywords = kwargs.get('keywords', ['price', 'plan', 'cost', 'subscription', 'service'])
+        
+        # Whether to use enhanced model for telephony
+        self.enhanced_model = kwargs.get('enhanced_model', True)
         
         # Component placeholders
         self.speech_recognizer = None
@@ -132,17 +135,18 @@ class VoiceAIAgent:
                 )
         
     async def init(self):
-        """Initialize all components with Deepgram STT."""
-        logger.info("Initializing Voice AI Agent components with Deepgram STT...")
+        """Initialize all components with Google Cloud STT."""
+        logger.info("Initializing Voice AI Agent components with Google Cloud STT...")
         
-        # Initialize speech recognizer with Deepgram
-        self.speech_recognizer = DeepgramStreamingSTT(
-            api_key=self.api_key,
+        # Initialize speech recognizer with Google Cloud
+        self.speech_recognizer = GoogleCloudStreamingSTT(
             language=self.stt_language,
             sample_rate=16000,
-            encoding="linear16",
+            encoding="LINEAR16",
             channels=1,
-            interim_results=True
+            interim_results=True,
+            speech_context_phrases=self.stt_keywords,
+            enhanced_model=self.enhanced_model
         )
         
         # Initialize STT integration 
@@ -177,7 +181,7 @@ class VoiceAIAgent:
         # Initialize TTS client
         self.tts_client = DeepgramTTS()
         
-        logger.info("Voice AI Agent initialization complete with Deepgram STT")
+        logger.info("Voice AI Agent initialization complete with Google Cloud STT")
         
     async def process_audio(
         self,
@@ -185,7 +189,7 @@ class VoiceAIAgent:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        Process audio data with Deepgram STT.
+        Process audio data with Google Cloud STT.
         
         Args:
             audio_data: Audio data as numpy array or bytes
@@ -201,7 +205,7 @@ class VoiceAIAgent:
         if isinstance(audio_data, np.ndarray):
             audio_data = self._process_audio(audio_data)
         
-        # Use STT integration for processing with Deepgram
+        # Use STT integration for processing with Google Cloud
         result = await self.stt_integration.transcribe_audio_data(audio_data, callback=callback)
         
         # Only process valid transcriptions
@@ -260,13 +264,7 @@ class VoiceAIAgent:
                 if isinstance(chunk, np.ndarray):
                     chunk = self._process_audio(chunk)
                 
-                # Convert to bytes for Deepgram if needed
-                if isinstance(chunk, np.ndarray):
-                    audio_bytes = (chunk * 32767).astype(np.int16).tobytes()
-                else:
-                    audio_bytes = chunk
-                    
-                # Process through Deepgram
+                # Process through Google Cloud STT
                 async def process_result(result):
                     # Only handle final results
                     if result.is_final:
@@ -294,7 +292,7 @@ class VoiceAIAgent:
                                 await result_callback(result_data)
                 
                 # Process chunk
-                await self.speech_recognizer.process_audio_chunk(audio_bytes, process_result)
+                await self.speech_recognizer.process_audio_chunk(chunk, process_result)
                 
             # Stop streaming session
             await self.speech_recognizer.stop_streaming()
@@ -332,7 +330,7 @@ class VoiceAIAgent:
         """Shut down all components properly."""
         logger.info("Shutting down Voice AI Agent...")
         
-        # Close Deepgram streaming session if active
+        # Close Google Cloud streaming session if active
         if self.speech_recognizer and hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming:
             await self.speech_recognizer.stop_streaming()
         

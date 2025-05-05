@@ -2,7 +2,7 @@
 End-to-end pipeline orchestration for Voice AI Agent.
 
 This module provides high-level functions for running the complete
-STT -> Knowledge Base -> TTS pipeline with Deepgram STT integration.
+STT -> Knowledge Base -> TTS pipeline with Google Cloud STT integration.
 """
 import os
 import asyncio
@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, AsyncIterator, Union, List, Callable, Aw
 
 import numpy as np
 
-from speech_to_text.deepgram_stt import DeepgramStreamingSTT
+from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 from speech_to_text.stt_integration import STTIntegration
 from knowledge_base.conversation_manager import ConversationManager
 from knowledge_base.llama_index.query_engine import QueryEngine
@@ -29,12 +29,12 @@ class VoiceAIAgentPipeline:
     End-to-end pipeline orchestration for Voice AI Agent.
     
     Provides a high-level interface for running the complete
-    STT -> Knowledge Base -> TTS pipeline with Deepgram STT.
+    STT -> Knowledge Base -> TTS pipeline with Google Cloud STT.
     """
     
     def __init__(
         self,
-        speech_recognizer: Union[DeepgramStreamingSTT, Any],
+        speech_recognizer: Union[GoogleCloudStreamingSTT, Any],
         conversation_manager: ConversationManager,
         query_engine: QueryEngine,
         tts_integration: TTSIntegration
@@ -43,7 +43,7 @@ class VoiceAIAgentPipeline:
         Initialize the pipeline with existing components.
         
         Args:
-            speech_recognizer: Initialized STT component (Deepgram or other)
+            speech_recognizer: Initialized STT component (Google Cloud or other)
             conversation_manager: Initialized conversation manager
             query_engine: Initialized query engine
             tts_integration: Initialized TTS integration
@@ -56,9 +56,9 @@ class VoiceAIAgentPipeline:
         # Create a helper for filtering out non-speech transcriptions
         self.stt_helper = STTIntegration(speech_recognizer)
         
-        # Determine if we're using Deepgram STT
-        self.using_deepgram = isinstance(speech_recognizer, DeepgramStreamingSTT)
-        logger.info(f"Pipeline initialized with {'Deepgram' if self.using_deepgram else 'Whisper'} STT")
+        # Determine if we're using Google Cloud STT
+        self.using_google_cloud = isinstance(speech_recognizer, GoogleCloudStreamingSTT)
+        logger.info(f"Pipeline initialized with {'Google Cloud' if self.using_google_cloud else 'Other'} STT")
     
     async def _is_valid_transcription(self, transcription: str) -> bool:
         """
@@ -400,7 +400,7 @@ class VoiceAIAgentPipeline:
     
     async def _transcribe_audio(self, audio: np.ndarray) -> tuple[str, float]:
         """
-        Transcribe audio data using either Deepgram or Whisper.
+        Transcribe audio data using Google Cloud STT.
         
         Args:
             audio: Audio data as numpy array
@@ -410,16 +410,16 @@ class VoiceAIAgentPipeline:
         """
         logger.info(f"Transcribing audio: {len(audio)} samples")
         
-        # Check if we're using Deepgram STT
-        if self.using_deepgram:
-            return await self._transcribe_audio_deepgram(audio)
+        # Check if we're using Google Cloud STT
+        if self.using_google_cloud:
+            return await self._transcribe_audio_google_cloud(audio)
         else:
-            # Fallback to original Whisper approach if not using Deepgram
-            return await self._transcribe_audio_whisper(audio)
+            # Fallback to a more generic approach for other STT systems
+            return await self._transcribe_audio_generic(audio)
     
-    async def _transcribe_audio_deepgram(self, audio: np.ndarray) -> tuple[str, float]:
+    async def _transcribe_audio_google_cloud(self, audio: np.ndarray) -> tuple[str, float]:
         """
-        Transcribe audio using Deepgram STT.
+        Transcribe audio using Google Cloud STT.
         
         Args:
             audio: Audio data as numpy array
@@ -453,116 +453,62 @@ class VoiceAIAgentPipeline:
                     final_results.append(result)
             
             # Stop streaming
-            await self.speech_recognizer.stop_streaming()
+            transcription, duration = await self.speech_recognizer.stop_streaming()
             
-            # Get best final result based on confidence
-            if final_results:
+            # If we didn't get a transcription from stop_streaming but have final results
+            if not transcription and final_results:
+                # Get best final result based on confidence
                 best_result = max(final_results, key=lambda r: r.confidence)
-                text = best_result.text
+                transcription = best_result.text
                 # Calculate duration
                 duration = best_result.end_time - best_result.start_time if best_result.end_time > 0 else len(audio) / 16000
-            else:
-                text = ""
-                duration = len(audio) / 16000
             
             # Clean up the transcription
-            transcription = self.stt_helper.cleanup_transcription(text)
+            transcription = self.stt_helper.cleanup_transcription(transcription)
             
             return transcription, duration
             
         except Exception as e:
-            logger.error(f"Error in Deepgram transcription: {e}", exc_info=True)
+            logger.error(f"Error in Google Cloud transcription: {e}", exc_info=True)
             return "", len(audio) / 16000
     
-    async def _transcribe_audio_whisper(self, audio: np.ndarray) -> tuple[str, float]:
+    async def _transcribe_audio_generic(self, audio: np.ndarray) -> tuple[str, float]:
         """
-        Transcribe audio using Whisper STT (original implementation).
+        Generic transcription method for any STT system.
         """
-        # Save original VAD setting
-        original_vad = self.speech_recognizer.vad_enabled
-        
-        # Set VAD based on audio length
-        is_short_audio = len(audio) < self.speech_recognizer.sample_rate * 1.0  # Less than 1 second
-        self.speech_recognizer.vad_enabled = not is_short_audio  # Disable VAD for short audio
-        
-        transcription = ""
-        duration = 0
-        
         try:
-            # Reset any existing streaming session
-            if hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming:
-                await self.speech_recognizer.stop_streaming()
+            # Save original VAD setting if available
+            original_vad = getattr(self.speech_recognizer, 'vad_enabled', None)
             
-            # Handle short audio
-            min_audio_length = self.speech_recognizer.sample_rate * 1.0  # 1 second
-            if len(audio) < min_audio_length:
-                # Pad with silence if too short
-                logger.info(f"Audio too short ({len(audio)/self.speech_recognizer.sample_rate:.2f}s), padding to {min_audio_length/self.speech_recognizer.sample_rate:.2f}s")
-                padding = np.zeros(min_audio_length - len(audio), dtype=np.float32)
-                audio = np.concatenate([audio, padding])
+            # Start streaming
+            if hasattr(self.speech_recognizer, 'start_streaming'):
+                self.speech_recognizer.start_streaming()
             
-            # Start a new streaming session
-            self.speech_recognizer.start_streaming()
-            logger.info("Started streaming session for transcription")
-            
-            # Process audio data
-            await self.speech_recognizer.process_audio_chunk(audio)
-            logger.info("Processed audio chunk, getting final transcription")
+            # Process audio chunk
+            if hasattr(self.speech_recognizer, 'process_audio_chunk'):
+                await self.speech_recognizer.process_audio_chunk(audio)
             
             # Get final transcription
-            transcription, duration = await self.speech_recognizer.stop_streaming()
+            if hasattr(self.speech_recognizer, 'stop_streaming'):
+                transcription, duration = await self.speech_recognizer.stop_streaming()
+            else:
+                # If stop_streaming not available, use a default approach
+                transcription = ""
+                duration = len(audio) / 16000
             
-            # Clean up transcription
-            transcription = self.stt_helper.cleanup_transcription(transcription)
+            # Clean up transcription if helper available
+            if hasattr(self.stt_helper, 'cleanup_transcription'):
+                transcription = self.stt_helper.cleanup_transcription(transcription)
             
-            # Check if we got a valid transcription
-            if not transcription or transcription.strip() == "" or transcription == "[BLANK_AUDIO]":
-                logger.warning("First transcription attempt returned empty result, trying again with higher temperature")
-                
-                # Try again with different parameters
-                self.speech_recognizer.start_streaming()
-                self.speech_recognizer.update_parameters(temperature=0.2)  # Try with higher temperature
-                await self.speech_recognizer.process_audio_chunk(audio)
-                raw_transcription, duration = await self.speech_recognizer.stop_streaming()
-                transcription = self.stt_helper.cleanup_transcription(raw_transcription)
-                self.speech_recognizer.update_parameters(temperature=0.0)  # Reset temperature
-                
-                # If still no result, try one more time with more padding
-                if not transcription or transcription.strip() == "" or transcription == "[BLANK_AUDIO]":
-                    logger.warning("Second transcription attempt returned empty result, trying with more padding")
-                    
-                    # Add more padding (2 seconds total)
-                    more_padding = np.zeros(self.speech_recognizer.sample_rate * 1.0, dtype=np.float32)
-                    padded_audio = np.concatenate([audio, more_padding])
-                    
-                    self.speech_recognizer.start_streaming()
-                    self.speech_recognizer.update_parameters(temperature=0.4)  # Even higher temperature
-                    await self.speech_recognizer.process_audio_chunk(padded_audio)
-                    raw_transcription, duration = await self.speech_recognizer.stop_streaming()
-                    transcription = self.stt_helper.cleanup_transcription(raw_transcription)
-                    self.speech_recognizer.update_parameters(temperature=0.0)  # Reset temperature
+            # Restore original VAD setting if applicable
+            if original_vad is not None and hasattr(self.speech_recognizer, 'vad_enabled'):
+                self.speech_recognizer.vad_enabled = original_vad
+            
+            return transcription, duration
+            
         except Exception as e:
-            logger.error(f"Error in transcription: {e}", exc_info=True)
-            # Try one more time with basic parameters
-            try:
-                logger.info("Trying transcription one more time after error")
-                self.speech_recognizer.start_streaming()
-                await self.speech_recognizer.process_audio_chunk(audio)
-                raw_transcription, duration = await self.speech_recognizer.stop_streaming()
-                transcription = self.stt_helper.cleanup_transcription(raw_transcription)
-            except Exception as e2:
-                logger.error(f"Second transcription attempt also failed: {e2}", exc_info=True)
-        finally:
-            # Restore original VAD setting
-            self.speech_recognizer.vad_enabled = original_vad
-        
-        # Log the result
-        if transcription:
-            logger.info(f"Transcription result: '{transcription}'")
-        else:
-            logger.warning("No transcription generated")
-        
-        return transcription, duration
+            logger.error(f"Error in generic transcription: {e}", exc_info=True)
+            return "", len(audio) / 16000
     
     async def process_realtime_stream(
         self,
@@ -600,25 +546,21 @@ class VoiceAIAgentPipeline:
         start_time = time.time()
         
         try:
-            # Initialize the appropriate speech recognizer
-            if self.using_deepgram:
+            # Initialize the speech recognizer
+            if hasattr(self.speech_recognizer, 'start_streaming'):
                 await self.speech_recognizer.start_streaming()
-            else:
-                self.speech_recognizer.start_streaming()
             
-            # Define result collecting callback
+            # Track results
             results = []
             
+            # Define result callback
             async def result_callback(result):
                 results.append(result)
-                
-                # For Deepgram, check if this is a final result
-                if hasattr(result, 'is_final') and result.is_final:
-                    logger.info(f"Final transcription from callback: {result.text}")
+                logger.debug(f"Received transcription result: {result.text if hasattr(result, 'text') else str(result)}")
             
             # Process incoming audio chunks
             async for audio_chunk in audio_chunk_generator:
-                # Add to accumulated audio
+                # Convert if needed
                 if isinstance(audio_chunk, bytes):
                     audio_chunk = np.frombuffer(audio_chunk, dtype=np.float32)
                 
@@ -630,31 +572,27 @@ class VoiceAIAgentPipeline:
                 else:
                     silence_frames = 0
                 
-                # Process the audio chunk through appropriate STT
-                if self.using_deepgram:
-                    # Convert for Deepgram
-                    audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+                # Process the audio chunk
+                if hasattr(self.speech_recognizer, 'process_audio_chunk'):
                     result = await self.speech_recognizer.process_audio_chunk(
-                        audio_bytes, callback=result_callback
+                        audio_chunk=audio_chunk,
+                        callback=result_callback
                     )
                     
-                    # If we get a final result, process it
+                    # Check for final result
                     if result and hasattr(result, 'is_final') and result.is_final:
-                        # Clean up the transcription
+                        # Clean up transcription
                         transcription = self.stt_helper.cleanup_transcription(result.text)
                         
-                        # Only process if we have a valid transcription
-                        if (transcription and 
-                            len(transcription.split()) >= MIN_VALID_WORDS and
-                            transcription != last_transcription):
-                            
+                        # Validate transcription
+                        if transcription and await self._is_valid_transcription(transcription) and transcription != last_transcription:
                             # Yield status update
                             yield {
                                 "status": "transcribed",
                                 "transcription": transcription
                             }
                             
-                            # Generate response if not already processing
+                            # Generate response
                             if not processing:
                                 processing = True
                                 try:
@@ -681,32 +619,17 @@ class VoiceAIAgentPipeline:
                                         last_transcription = transcription
                                 finally:
                                     processing = False
-                else:
-                    # Original Whisper approach
-                    await self.speech_recognizer.process_audio_chunk(
-                        audio_chunk=audio_chunk,
-                        callback=result_callback
-                    )
                 
                 # If we have enough silence frames and it's time to process
                 if silence_frames >= max_silence_frames and not processing:
-                    # Clear results for next utterance
-                    results.clear()
-                    
-                    if self.using_deepgram:
-                        # Check for final result from Deepgram
-                        await self.speech_recognizer.stop_streaming()
-                        await self.speech_recognizer.start_streaming()
-                    else:
-                        # Get final transcription from Whisper
+                    # Get final transcription if available
+                    if hasattr(self.speech_recognizer, 'stop_streaming'):
                         transcription, _ = await self.speech_recognizer.stop_streaming()
                         
                         # Clean up and validate
                         transcription = self.stt_helper.cleanup_transcription(transcription)
                         
-                        if (transcription and 
-                            len(transcription.split()) >= MIN_VALID_WORDS and 
-                            transcription != last_transcription):
+                        if transcription and await self._is_valid_transcription(transcription) and transcription != last_transcription:
                             # Process response
                             processing = True
                             try:
@@ -735,48 +658,37 @@ class VoiceAIAgentPipeline:
                                 processing = False
                         
                         # Reset for next utterance
-                        if not self.using_deepgram:
-                            self.speech_recognizer.start_streaming()
+                        if hasattr(self.speech_recognizer, 'start_streaming'):
+                            await self.speech_recognizer.start_streaming()
                     
                     # Reset silence counter
                     silence_frames = 0
             
             # Process any final audio
-            if self.using_deepgram:
-                await self.speech_recognizer.stop_streaming()
-                # See if we have any final results in the collected results
-                final_results = [r for r in results if hasattr(r, 'is_final') and r.is_final]
-                if final_results:
-                    best_result = max(final_results, key=lambda r: getattr(r, 'confidence', 0))
-                    final_transcription = self.stt_helper.cleanup_transcription(best_result.text)
-                else:
-                    final_transcription = ""
-            else:
+            if hasattr(self.speech_recognizer, 'stop_streaming'):
                 final_transcription, _ = await self.speech_recognizer.stop_streaming()
                 final_transcription = self.stt_helper.cleanup_transcription(final_transcription)
-            
-            if (final_transcription and 
-                len(final_transcription.split()) >= MIN_VALID_WORDS and 
-                final_transcription != last_transcription):
-                # Generate final response
-                query_result = await self.query_engine.query(final_transcription)
-                final_response = query_result.get("response", "")
                 
-                if final_response:
-                    # Convert to speech
-                    final_speech = await self.tts_integration.text_to_speech(final_response)
+                if final_transcription and await self._is_valid_transcription(final_transcription) and final_transcription != last_transcription:
+                    # Generate final response
+                    query_result = await self.query_engine.query(final_transcription)
+                    final_response = query_result.get("response", "")
                     
-                    # Send through callback
-                    await audio_output_callback(final_speech)
-                    
-                    # Yield final response
-                    yield {
-                        "status": "final",
-                        "transcription": final_transcription,
-                        "response": final_response,
-                        "audio_size": len(final_speech),
-                        "total_time": time.time() - start_time
-                    }
+                    if final_response:
+                        # Convert to speech
+                        final_speech = await self.tts_integration.text_to_speech(final_response)
+                        
+                        # Send through callback
+                        await audio_output_callback(final_speech)
+                        
+                        # Yield final response
+                        yield {
+                            "status": "final",
+                            "transcription": final_transcription,
+                            "response": final_response,
+                            "audio_size": len(final_speech),
+                            "total_time": time.time() - start_time
+                        }
             
             # Yield completion
             yield {
@@ -791,12 +703,3 @@ class VoiceAIAgentPipeline:
                 "error": str(e),
                 "total_time": time.time() - start_time
             }
-        finally:
-            # Ensure speech recognizer is properly closed
-            try:
-                if self.using_deepgram:
-                    await self.speech_recognizer.stop_streaming()
-                else:
-                    await self.speech_recognizer.stop_streaming()
-            except:
-                pass
