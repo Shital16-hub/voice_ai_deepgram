@@ -78,10 +78,14 @@ class AudioProcessor:
             audio_level = np.mean(np.abs(audio_array)) * 100
             logger.debug(f"Converted {len(mulaw_data)} bytes to {len(audio_array)} samples. Audio level: {audio_level:.1f}%")
             
-            # Apply a gain if audio is very quiet
-            if audio_level < 1.0:  # Very quiet audio
+            # Apply a gain if audio is very quiet - FIXED DIVISION BY ZERO ERROR
+            if audio_level > 0.0001:  # Use a small threshold to avoid division by very small numbers
                 audio_array = audio_array * min(5.0, 5.0/audio_level)
                 logger.debug(f"Applied gain to quiet audio. New level: {np.mean(np.abs(audio_array)) * 100:.1f}%")
+            else:
+                # Apply a fixed gain for very quiet audio
+                audio_array = audio_array * 3.0
+                logger.debug("Applied fixed gain to very quiet audio")
             
             return audio_array
             
@@ -270,6 +274,22 @@ class AudioProcessor:
             # Check first few bytes for common patterns
             if audio_data[:4] == b'RIFF':
                 info["format"] = "wav"
+                
+                # Try to extract more details from WAV header
+                try:
+                    import wave
+                    import io
+                    with io.BytesIO(audio_data) as f:
+                        with wave.open(f, 'rb') as wav:
+                            info["channels"] = wav.getnchannels()
+                            info["sample_width"] = wav.getsampwidth()
+                            info["sample_rate"] = wav.getframerate()
+                            info["frames"] = wav.getnframes()
+                            info["duration"] = info["frames"] / info["sample_rate"]
+                except Exception as e:
+                    logger.debug(f"Error extracting WAV info: {e}")
+            elif audio_data[:3] == b'ID3' or (audio_data[0] == 0xFF and (audio_data[1] & 0xE0) == 0xE0):
+                info["format"] = "mp3"
             else:
                 # Rough guess based on values
                 sample_values = np.frombuffer(audio_data[:100], dtype=np.uint8)
@@ -320,3 +340,70 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Error converting PCM16 to float32: {e}")
             return np.array([], dtype=np.float32)
+            
+    @staticmethod
+    def prepare_for_telephony(
+        audio_data: bytes,
+        format: str = 'mp3',
+        target_sample_rate: int = 8000,
+        target_channels: int = 1
+    ) -> bytes:
+        """
+        Prepare audio data for telephony systems.
+        
+        Args:
+            audio_data: Audio data as bytes
+            format: Source format ('mp3', 'wav', etc.)
+            target_sample_rate: Target sample rate for telephony
+            target_channels: Target number of channels
+            
+        Returns:
+            Processed audio data suitable for telephony
+        """
+        try:
+            import subprocess
+            import tempfile
+            import os
+            
+            # Create temporary files
+            with tempfile.NamedTemporaryFile(suffix=f'.{format}', delete=False) as input_file:
+                input_file.write(audio_data)
+                input_path = input_file.name
+            
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as output_file:
+                output_path = output_file.name
+            
+            # Build ffmpeg command for telephony optimization
+            cmd = [
+                'ffmpeg',
+                '-i', input_path,
+                '-acodec', 'pcm_s16le',  # 16-bit PCM
+                '-ar', str(target_sample_rate),  # 8kHz for telephony
+                '-ac', str(target_channels),  # Mono
+                '-af', 'highpass=f=300,lowpass=f=3400',  # Telephony frequency range
+                '-y',  # Overwrite output if exists
+                output_path
+            ]
+            
+            # Run ffmpeg
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            # Read the output file
+            with open(output_path, 'rb') as f:
+                processed_audio = f.read()
+            
+            # Clean up temporary files
+            os.unlink(input_path)
+            os.unlink(output_path)
+            
+            logger.info(f"Prepared audio for telephony: {len(audio_data)} bytes -> {len(processed_audio)} bytes")
+            return processed_audio
+            
+        except Exception as e:
+            logger.error(f"Error preparing audio for telephony: {e}")
+            return audio_data  # Return original on error

@@ -469,12 +469,14 @@ class WebSocketHandler:
             return False
             
         # Estimate confidence based on presence of uncertainty markers
+        # MODIFIED: Don't reduce confidence for question marks, as they're legitimate in questions
         confidence_estimate = 1.0
-        if "?" in text or "[" in text or "(" in text or "<" in text:
+        if "[" in text or "(" in text or "<" in text:
             confidence_estimate = 0.6  # Lower confidence if it contains uncertainty markers
             logger.info(f"Reduced confidence due to uncertainty markers: {text}")
             
-        if confidence_estimate < 0.7:
+        # MODIFIED: Lower threshold from 0.7 to 0.5
+        if confidence_estimate < 0.5:  
             logger.info(f"Transcription confidence too low: {confidence_estimate}")
             return False
             
@@ -903,10 +905,10 @@ class WebSocketHandler:
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """
-        Send audio data to Twilio.
+        Send audio data to Twilio with proper format conversion.
         
         Args:
-            audio_data: Audio data as bytes
+            audio_data: Audio data as bytes (from TTS)
             ws: WebSocket connection
         """
         try:
@@ -920,12 +922,29 @@ class WebSocketHandler:
                 logger.warning("WebSocket connection is closed, cannot send audio")
                 return
             
+            # Debug audio format before sending
+            try:
+                audio_info = self.audio_processor.get_audio_info(audio_data)
+                logger.debug(f"Audio format before sending: {audio_info}")
+                
+                # If not already in mulaw format, convert it
+                if audio_info.get("format") != "mulaw":
+                    # For LINEAR16 (PCM) format, convert to mulaw
+                    mulaw_audio = self.audio_processor.pcm_to_mulaw(audio_data)
+                else:
+                    mulaw_audio = audio_data
+            except Exception as format_error:
+                logger.error(f"Error analyzing audio format: {format_error}")
+                # Try to convert anyway
+                mulaw_audio = self.audio_processor.pcm_to_mulaw(audio_data)
+            
             # Split audio into smaller chunks to avoid timeouts
             chunk_size = 4000  # Smaller chunks (250ms of audio at 8kHz mono)
-            chunks = [audio_data[i:i+chunk_size] for i in range(0, len(audio_data), chunk_size)]
+            chunks = [mulaw_audio[i:i+chunk_size] for i in range(0, len(mulaw_audio), chunk_size)]
             
-            logger.debug(f"Splitting {len(audio_data)} bytes into {len(chunks)} chunks")
+            logger.info(f"Sending audio response ({len(mulaw_audio)} bytes)")
             
+            # Send each chunk
             for i, chunk in enumerate(chunks):
                 try:
                     # Encode audio to base64
@@ -957,7 +976,7 @@ class WebSocketHandler:
                         logger.error(f"Error sending audio chunk {i+1}/{len(chunks)}: {e}")
                         return
             
-            logger.debug(f"Sent {len(chunks)} audio chunks ({len(audio_data)} bytes total)")
+            logger.debug(f"Sent {len(chunks)} audio chunks ({len(mulaw_audio)} bytes total)")
             
         except Exception as e:
             logger.error(f"Error sending audio: {e}", exc_info=True)

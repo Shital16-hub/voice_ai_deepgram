@@ -16,6 +16,7 @@ from simple_websocket import Server, ConnectionClosed
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from twilio.rest import Client
+from voice_ai_agent import VoiceAIAgent
 
 # Load environment variables
 load_dotenv()
@@ -57,8 +58,8 @@ async def initialize_system():
     
     # Initialize TTS integration with ElevenLabs
     tts = TTSIntegration(
-        voice_id="CwhRBWXzGAHq8TQ4Fs17",  # Roger voice
-        model_id="eleven_flash_v2_5"       # Flash model for low latency
+        voice="CwhRBWXzGAHq8TQ4Fs17",  # Roger voice
+        #model_id="eleven_flash_v2_5"       # Flash model for low latency
     )
     await tts.init()
     
