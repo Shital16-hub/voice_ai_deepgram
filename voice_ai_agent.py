@@ -5,6 +5,7 @@ Generic version that works with any knowledge base.
 import os
 import logging
 import asyncio
+import time
 from typing import Optional, Dict, Any, Union, Callable, Awaitable
 import numpy as np
 from scipy import signal
@@ -48,6 +49,7 @@ class VoiceAIAgent:
         
         # STT Parameters
         self.stt_language = kwargs.get('language', 'en-US')
+        self.stt_model = kwargs.get('stt_model', 'nova-3')  # Default to Nova 3
         self.stt_keywords = kwargs.get('keywords', ['price', 'plan', 'cost', 'subscription', 'service'])
         
         # Component placeholders
@@ -132,12 +134,13 @@ class VoiceAIAgent:
                 )
         
     async def init(self):
-        """Initialize all components with Deepgram STT."""
-        logger.info("Initializing Voice AI Agent components with Deepgram STT...")
+        """Initialize all components with Deepgram Nova 3 STT."""
+        logger.info("Initializing Voice AI Agent components with Deepgram Nova 3 STT...")
         
-        # Initialize speech recognizer with Deepgram
+        # Initialize speech recognizer with Deepgram Nova 3
         self.speech_recognizer = DeepgramStreamingSTT(
             api_key=self.api_key,
+            model_name=self.stt_model,  # Use Nova 3 model
             language=self.stt_language,
             sample_rate=16000,
             encoding="linear16",
@@ -177,7 +180,7 @@ class VoiceAIAgent:
         # Initialize TTS client
         self.tts_client = DeepgramTTS()
         
-        logger.info("Voice AI Agent initialization complete with Deepgram STT")
+        logger.info("Voice AI Agent initialization complete with Deepgram Nova 3 STT")
         
     async def process_audio(
         self,

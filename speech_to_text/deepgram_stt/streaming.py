@@ -39,7 +39,7 @@ class DeepgramStreamingSTT:
     def __init__(
         self, 
         api_key: Optional[str] = None,
-        model_name: Optional[str] = None,
+        model_name: Optional[str] = "nova-3",  # Changed to Nova 3
         language: Optional[str] = None,
         sample_rate: Optional[int] = None,
         encoding: str = "linear16",
@@ -51,7 +51,7 @@ class DeepgramStreamingSTT:
         
         Args:
             api_key: Deepgram API key (defaults to environment variable)
-            model_name: STT model to use (defaults to config)
+            model_name: STT model to use (defaults to nova-3)
             language: Language code for recognition (defaults to config)
             sample_rate: Audio sample rate (defaults to config)
             encoding: Audio encoding format (default linear16)
@@ -62,7 +62,7 @@ class DeepgramStreamingSTT:
         if not self.api_key:
             raise ValueError("Deepgram API key is required. Set it in .env file or pass directly.")
         
-        self.model_name = model_name or "general"  # Hardcoded to "general" model which is available
+        self.model_name = model_name or "nova-3"  # Default to Nova 3
         self.language = language or config.language
         self.sample_rate = sample_rate or config.sample_rate
         self.encoding = encoding
@@ -80,7 +80,7 @@ class DeepgramStreamingSTT:
     def _get_params(self) -> Dict[str, Any]:
         """Get optimized parameters for the API request."""
         params = {
-            "model": self.model_name,
+            "model": self.model_name,  # Will be nova-3
             "language": self.language,
             "encoding": self.encoding,
             "sample_rate": self.sample_rate,
@@ -94,6 +94,10 @@ class DeepgramStreamingSTT:
             "punctuate": "true",  # Add punctuation for better readability
             "diarize": "false"     # Single speaker for telephony
         }
+        
+        # Add Nova 3 specific parameters
+        # For telephony use cases, we can add telephony-specific keyterms
+        params["keyterms"] = json.dumps(["price", "plan", "cost", "subscription", "service", "features", "support"])
         
         return params
     
@@ -118,7 +122,7 @@ class DeepgramStreamingSTT:
         self.utterance_id = 0
         self.is_streaming = True
         
-        logger.info("Started Deepgram session (simulated streaming)")
+        logger.info("Started Deepgram Nova 3 session (simulated streaming)")
     
     async def stop_streaming(self) -> None:
         """Stop the simulated streaming session."""
