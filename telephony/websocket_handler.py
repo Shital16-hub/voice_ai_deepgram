@@ -1,5 +1,5 @@
 """
-WebSocket handler for Twilio media streams with Deepgram STT integration.
+WebSocket handler for Twilio media streams with Google Cloud Speech integration.
 """
 import json
 import base64
@@ -10,11 +10,13 @@ import numpy as np
 import re
 from typing import Dict, Any, Callable, Awaitable, Optional, List
 from scipy import signal
+from google.cloud import speech
+from google.cloud.speech import SpeechClient, StreamingRecognitionConfig, RecognitionConfig, StreamingRecognizeRequest
+from google.cloud.speech_v1p1beta1 import SpeechAsyncClient
+from google.api_core.exceptions import GoogleAPIError
 
 from telephony.audio_processor import AudioProcessor
 from telephony.config import CHUNK_SIZE, AUDIO_BUFFER_SIZE, SILENCE_THRESHOLD, SILENCE_DURATION, MAX_BUFFER_SIZE
-
-from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +51,216 @@ NON_SPEECH_PATTERNS = [
     r'static',                  # Common transcription
 ]
 
+class StreamingRecognitionResult:
+    """A wrapper for Google Cloud Speech results to maintain API compatibility."""
+    
+    def __init__(self, text="", is_final=False, confidence=0.0, alternatives=None):
+        self.text = text
+        self.is_final = is_final
+        self.confidence = confidence
+        self.alternatives = alternatives or []
+        self.start_time = 0.0
+        self.end_time = 0.0
+        self.chunk_id = 0
+        
+    @classmethod
+    def from_google_result(cls, result):
+        """Create a StreamingRecognitionResult from a Google Cloud Speech result."""
+        if not result.alternatives:
+            return cls(is_final=result.is_final)
+            
+        alt = result.alternatives[0]
+        return cls(
+            text=alt.transcript,
+            is_final=result.is_final,
+            confidence=alt.confidence if hasattr(alt, 'confidence') else 0.7,
+            alternatives=[a.transcript for a in result.alternatives[1:]]
+        )
+
+class GoogleCloudSpeechHandler:
+    """Handler for Google Cloud Speech API streaming recognition."""
+    
+    def __init__(self, language_code="en-US", sample_rate=16000, enable_automatic_punctuation=True):
+        """
+        Initialize the Google Cloud Speech client.
+        
+        Args:
+            language_code: Language code for recognition
+            sample_rate: Audio sample rate in Hz
+            enable_automatic_punctuation: Whether to enable automatic punctuation
+        """
+        self.language_code = language_code
+        self.sample_rate = sample_rate
+        self.enable_automatic_punctuation = enable_automatic_punctuation
+        
+        # Create a speech client
+        self.client = speech.SpeechClient()
+        
+        # State tracking
+        self.is_streaming = False
+        self.streaming_config = None
+        self.result_callbacks = []
+        
+        # Audio streaming data
+        self.audio_queue = asyncio.Queue()
+        self._stream_thread = None
+        self._stop_event = asyncio.Event()
+        
+    async def start_streaming(self):
+        """Start a new streaming recognition session."""
+        if self.is_streaming:
+            await self.stop_streaming()
+            
+        self.is_streaming = True
+        self._stop_event.clear()
+        
+        # Configure recognition
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=self.sample_rate,
+            language_code=self.language_code,
+            enable_automatic_punctuation=self.enable_automatic_punctuation,
+            use_enhanced=True,  # Use enhanced model for better accuracy
+            model="phone_call",  # Optimized for phone calls
+            audio_channel_count=1  # Mono audio
+        )
+        
+        # Create streaming config
+        self.streaming_config = speech.StreamingRecognitionConfig(
+            config=config,
+            interim_results=True,
+            single_utterance=False  # Allow multiple utterances in a stream
+        )
+        
+        # Create background task for recognition
+        self._stream_thread = asyncio.create_task(self._run_streaming_recognition())
+        
+        logger.info("Started Google Cloud Speech streaming session")
+        
+    async def process_audio_chunk(self, audio_chunk, callback=None):
+        """
+        Process an audio chunk through Google Cloud Speech.
+        
+        Args:
+            audio_chunk: Audio data as bytes or numpy array
+            callback: Optional callback for results
+            
+        Returns:
+            None, as results are delivered via callback
+        """
+        if not self.is_streaming:
+            logger.warning("Called process_audio_chunk but streaming is not active")
+            return None
+            
+        # Convert numpy array to bytes if needed
+        if isinstance(audio_chunk, np.ndarray):
+            # Ensure the data is float32 in [-1.0, 1.0] range
+            audio_chunk = np.clip(audio_chunk, -1.0, 1.0)
+            # Convert to int16
+            audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+        else:
+            audio_bytes = audio_chunk
+            
+        # Add callback if provided
+        if callback and callback not in self.result_callbacks:
+            self.result_callbacks.append(callback)
+        # Add audio chunk to the queue
+        if not self._stop_event.is_set():
+            await self.audio_queue.put(audio_bytes)
+            
+        return None  # Results come via callback
+            
+    async def stop_streaming(self):
+        """Stop the streaming recognition session and get final transcription."""
+        if not self.is_streaming:
+            return "", 0.0
+            
+        try:
+            # Signal that we're done adding audio
+            self._stop_event.set()
+            
+            # Wait for the streaming thread to complete
+            if self._stream_thread:
+                try:
+                    await asyncio.wait_for(self._stream_thread, timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    logger.warning("Timeout waiting for streaming thread to complete")
+                    if self._stream_thread:
+                        self._stream_thread.cancel()
+                    
+            # Cleanup
+            self.is_streaming = False
+            self.result_callbacks = []
+            
+            # Return empty string as this matches the expected interface
+            return "", 0.0
+            
+        except Exception as e:
+            logger.error(f"Error stopping streaming: {e}")
+            self.is_streaming = False
+            return "", 0.0
+    
+    async def _run_streaming_recognition(self):
+        """Run streaming recognition in the background."""
+        try:
+            # Define the generator that yields requests
+            async def request_generator():
+                # First request must contain only the streaming config
+                yield speech.StreamingRecognizeRequest(
+                    streaming_config=self.streaming_config
+                )
+                
+                # Subsequent requests contain audio data
+                while not self._stop_event.is_set():
+                    try:
+                        audio_data = await asyncio.wait_for(
+                            self.audio_queue.get(), 
+                            timeout=2.0
+                        )
+                        
+                        yield speech.StreamingRecognizeRequest(
+                            audio_content=audio_data
+                        )
+                        
+                        self.audio_queue.task_done()
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error in request generator: {e}")
+                        break
+            
+            # Get request generator
+            requests = request_generator()
+            
+            # Call the streaming recognize method with the request generator
+            responses = self.client.streaming_recognize(requests)
+            
+            # Process responses as they come in
+            for response in responses:
+                if self._stop_event.is_set():
+                    break
+                
+                for result in response.results:
+                    # Convert Google result to our format
+                    streaming_result = StreamingRecognitionResult.from_google_result(result)
+                    
+                    # Call all registered callbacks
+                    for callback in self.result_callbacks:
+                        try:
+                            await callback(streaming_result)
+                        except Exception as callback_error:
+                            logger.error(f"Error in result callback: {callback_error}")
+                            
+        except Exception as e:
+            logger.error(f"Error in streaming recognition: {e}")
+            
+        finally:
+            # Ensure we clean up
+            self.is_streaming = False
+
 class WebSocketHandler:
     """
-    Handles WebSocket connections for Twilio media streams with Deepgram STT integration.
+    Handles WebSocket connections for Twilio media streams with Google Cloud Speech integration.
     """
     
     def __init__(self, call_sid: str, pipeline):
@@ -96,24 +305,22 @@ class WebSocketHandler:
         self.pause_after_response = 2.0  # Wait 2 seconds after response before processing new input
         self.min_words_for_valid_query = 2  # Minimum words for a valid query
         
-        # Create an event to signal when we should stop processing
-        self.stop_event = asyncio.Event()
-        
         # Add ambient noise tracking for adaptive thresholds
         self.ambient_noise_level = 0.01  # Starting threshold
         self.noise_samples = []
         self.max_noise_samples = 20
         
-        # Determine if we're using Google Cloud STT
-        self.using_google_cloud = (
-            hasattr(pipeline, 'speech_recognizer') and 
-            isinstance(pipeline.speech_recognizer, GoogleCloudStreamingSTT)
+        # Set up Google Cloud Speech
+        self.speech_client = GoogleCloudSpeechHandler(
+            language_code="en-US",
+            sample_rate=16000,
+            enable_automatic_punctuation=True
         )
         
-        # Ensure we start with a fresh session state
-        self.stt_session_active = False
+        # Ensure we start with a fresh speech recognition session
+        self.google_speech_active = False
         
-        logger.info(f"WebSocketHandler initialized for call {call_sid} with {'Google Cloud' if self.using_google_cloud else 'Whisper'} STT")
+        logger.info(f"WebSocketHandler initialized for call {call_sid} with Google Cloud Speech")
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
@@ -293,33 +500,20 @@ class WebSocketHandler:
         self.last_transcription = ""
         self.last_response_time = time.time()
         self.conversation_active = True
-        self.stop_event.clear()
         self.noise_samples = []  # Reset noise samples
-        self.stt_session_active = False  # Reset session state
+        self.google_speech_active = False  # Reset Google Speech session state
         
         # Send a welcome message
         await self.send_text_response("I'm listening. How can I help you today?", ws)
         
-        # Initialize STT streaming session
-        if self.using_google_cloud:
-            try:
-                await self.pipeline.speech_recognizer.start_streaming()
-                self.stt_session_active = True
-                logger.info("Started Google Cloud STT streaming session")
-            except Exception as e:
-                logger.error(f"Error starting Google Cloud STT streaming session: {e}")
-                self.stt_session_active = False
-        else:
-            # Initialize other STT methods like Whisper, Deepgram, etc.
-            try:
-                if hasattr(self.pipeline.speech_recognizer, 'start_streaming'):
-                    await self.pipeline.speech_recognizer.start_streaming()
-                    self.stt_session_active = True
-                    logger.info("Started STT streaming session")
-            except Exception as e:
-                logger.error(f"Error starting STT streaming session: {e}")
-                self.stt_session_active = False
-
+        # Initialize Google Cloud Speech streaming session
+        try:
+            await self.speech_client.start_streaming()
+            self.google_speech_active = True
+            logger.info("Started Google Cloud Speech streaming session")
+        except Exception as e:
+            logger.error(f"Error starting Google Cloud Speech streaming session: {e}")
+            self.google_speech_active = False
     
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
         """
@@ -386,7 +580,6 @@ class WebSocketHandler:
         self.conversation_active = False
         self.connected = False
         self.connection_active.clear()
-        self.stop_event.set()
         
         # Cancel keep-alive task
         if self.keep_alive_task:
@@ -396,14 +589,14 @@ class WebSocketHandler:
             except asyncio.CancelledError:
                 pass
         
-        # Close Deepgram streaming session if using Deepgram
-        if self.using_google_cloud and self.stt_session_active:
+        # Close Google Cloud Speech streaming session
+        if self.google_speech_active:
             try:
-                await self.pipeline.speech_recognizer.stop_streaming()
-                logger.info("Stopped Deepgram streaming session")
-                self.deepgram_session_active = False
+                await self.speech_client.stop_streaming()
+                logger.info("Stopped Google Cloud Speech streaming session")
+                self.google_speech_active = False
             except Exception as e:
-                logger.error(f"Error stopping Deepgram streaming session: {e}")
+                logger.error(f"Error stopping Google Cloud Speech streaming session: {e}")
     
     async def _handle_mark(self, data: Dict[str, Any]) -> None:
         """
@@ -454,7 +647,7 @@ class WebSocketHandler:
     
     async def _process_audio(self, ws) -> None:
         """
-        Process accumulated audio data through the pipeline.
+        Process accumulated audio data through the pipeline with Google Cloud Speech.
         
         Args:
             ws: WebSocket connection
@@ -476,7 +669,7 @@ class WebSocketHandler:
                 half_size = len(self.input_buffer) // 2
                 self.input_buffer = self.input_buffer[half_size:]
                 return
-                    
+                
             # Add some checks for audio quality
             if len(pcm_audio) < 1000:  # Very small audio chunk
                 logger.warning(f"Audio chunk too small: {len(pcm_audio)} samples")
@@ -487,80 +680,120 @@ class WebSocketHandler:
             
             # Define a callback to collect results
             async def transcription_callback(result):
-                if hasattr(result, 'is_final'):
-                    # For STT systems that provide is_final flag
-                    if result.is_final:
-                        transcription_results.append(result)
-                        logger.debug(f"Received final STT result: {result.text}")
-                else:
-                    # For STT systems that don't have is_final flag
+                if hasattr(result, 'is_final') and result.is_final:
                     transcription_results.append(result)
-                    logger.debug(f"Received STT result: {result.text if hasattr(result, 'text') else result}")
+                    logger.debug(f"Received final Google Speech result: {result.text}")
             
-            # Process audio through the appropriate STT system
+            # Process audio through Google Cloud Speech
             try:
-                if self.using_google_cloud:
-                    # For Google Cloud, convert to bytes format if it's numpy array
-                    if isinstance(pcm_audio, np.ndarray):
-                        audio_bytes = (pcm_audio * 32767).astype(np.int16).tobytes()
-                    else:
-                        audio_bytes = pcm_audio
-                    
-                    # Make sure the Google Cloud STT streaming session is active
-                    if not self.stt_session_active:
-                        logger.info("Starting new Google Cloud STT streaming session")
-                        await self.pipeline.speech_recognizer.start_streaming()
-                        self.stt_session_active = True
-                    
-                    # Process chunk with Google Cloud STT
-                    result = await self.pipeline.speech_recognizer.process_audio_chunk(
-                        audio_chunk=audio_bytes,
-                        callback=transcription_callback
-                    )
-                    
-                    # Check if we got a final result directly
-                    if result and hasattr(result, 'is_final') and result.is_final:
-                        transcription_results.append(result)
-                    
-                    # Get transcription if we have results
-                    if transcription_results:
-                        # Use the best result based on confidence
-                        best_result = max(transcription_results, key=lambda r: getattr(r, 'confidence', 0))
-                        transcription = best_result.text
-                    else:
-                        # If no results, try stopping and restarting the session to get final results
-                        if self.stt_session_active:
-                            final_text, _ = await self.pipeline.speech_recognizer.stop_streaming()
-                            await self.pipeline.speech_recognizer.start_streaming()
-                            self.stt_session_active = True
-                            transcription = final_text
-                        else:
-                            # No transcription
-                            transcription = ""
+                # Convert to bytes format for Google Cloud Speech
+                audio_bytes = (pcm_audio * 32767).astype(np.int16).tobytes()
+                
+                # Make sure the Google Speech streaming session is active
+                if not self.google_speech_active:
+                    logger.info("Starting new Google Cloud Speech streaming session")
+                    await self.speech_client.start_streaming()
+                    self.google_speech_active = True
+                
+                # Process chunk with Google Cloud Speech
+                await self.speech_client.process_audio_chunk(
+                    audio_chunk=audio_bytes,
+                    callback=transcription_callback
+                )
+                
+                # Wait a short time for any pending results
+                await asyncio.sleep(0.5)
+                
+                # Get transcription if we have results
+                if transcription_results:
+                    # Use the best result based on confidence
+                    best_result = max(transcription_results, key=lambda r: getattr(r, 'confidence', 0))
+                    transcription = best_result.text
                 else:
-                    # For other STT systems (keep your existing code for Whisper/Deepgram)
-                    # ...existing code...
-                    pass
+                    # If no results, try stopping and restarting the session to get final results
+                    if self.google_speech_active:
+                        final_transcription, _ = await self.speech_client.stop_streaming()
+                        await self.speech_client.start_streaming()
+                        self.google_speech_active = True
+                        transcription = final_transcription
+                    else:
+                        transcription = ""
                 
-                # Continue with your existing code for processing the transcription
-                # ...
+                # Log before cleanup for debugging
+                logger.info(f"RAW TRANSCRIPTION: '{transcription}'")
                 
+                # Clean up transcription
+                transcription = self.cleanup_transcription(transcription)
+                logger.info(f"CLEANED TRANSCRIPTION: '{transcription}'")
+                
+                # Only process if it's a valid transcription
+                if transcription and self.is_valid_transcription(transcription):
+                    logger.info(f"Complete transcription: {transcription}")
+                    
+                    # Now clear the input buffer since we have a valid transcription
+                    self.input_buffer.clear()
+                    
+                    # Don't process duplicate transcriptions
+                    if transcription == self.last_transcription:
+                        logger.info("Duplicate transcription, not processing again")
+                        return
+                    
+                    # Process through knowledge base
+                    try:
+                        if hasattr(self.pipeline, 'query_engine'):
+                            query_result = await self.pipeline.query_engine.query(transcription)
+                            response = query_result.get("response", "")
+                            
+                            logger.info(f"Generated response: {response}")
+                            
+                            # Convert to speech
+                            if response and hasattr(self.pipeline, 'tts_integration'):
+                                speech_audio = await self.pipeline.tts_integration.text_to_speech(response)
+                                
+                                # Convert to mulaw for Twilio
+                                mulaw_audio = self.audio_processor.pcm_to_mulaw(speech_audio)
+                                
+                                # Send back to Twilio
+                                logger.info(f"Sending audio response ({len(mulaw_audio)} bytes)")
+                                await self._send_audio(mulaw_audio, ws)
+                                
+                                # Update state
+                                self.last_transcription = transcription
+                                self.last_response_time = time.time()
+                    except Exception as e:
+                        logger.error(f"Error processing through knowledge base: {e}", exc_info=True)
+                        
+                        # Try to send a fallback response
+                        fallback_message = "I'm sorry, I'm having trouble understanding. Could you try again?"
+                        try:
+                            fallback_audio = await self.pipeline.tts_integration.text_to_speech(fallback_message)
+                            mulaw_fallback = self.audio_processor.pcm_to_mulaw(fallback_audio)
+                            await self._send_audio(mulaw_fallback, ws)
+                            self.last_response_time = time.time()
+                        except Exception as e2:
+                            logger.error(f"Failed to send fallback response: {e2}")
+                else:
+                    # If no valid transcription, reduce buffer size but keep some for context
+                    half_size = len(self.input_buffer) // 2
+                    self.input_buffer = self.input_buffer[half_size:]
+                    logger.debug(f"No valid transcription, reduced buffer to {len(self.input_buffer)} bytes")
+            
             except Exception as e:
-                logger.error(f"Error during STT processing: {e}", exc_info=True)
+                logger.error(f"Error during Google Speech processing: {e}", exc_info=True)
                 # If error, clear part of buffer and continue
                 half_size = len(self.input_buffer) // 2
                 self.input_buffer = self.input_buffer[half_size:]
                 
-                # If we had a session error, reset the session
-                if self.using_google_cloud:
+                # If we had a Google Speech session error, reset the session
+                if self.google_speech_active:
                     try:
-                        logger.info("Resetting Google Cloud STT session after error")
-                        await self.pipeline.speech_recognizer.stop_streaming()
-                        await self.pipeline.speech_recognizer.start_streaming()
-                        self.stt_session_active = True
+                        logger.info("Resetting Google Speech session after error")
+                        await self.speech_client.stop_streaming()
+                        await self.speech_client.start_streaming()
+                        self.google_speech_active = True
                     except Exception as session_error:
-                        logger.error(f"Error resetting Google Cloud STT session: {session_error}")
-                        self.stt_session_active = False
+                        logger.error(f"Error resetting Google Speech session: {session_error}")
+                        self.google_speech_active = False
                 
         except Exception as e:
             logger.error(f"Error processing audio: {e}", exc_info=True)
