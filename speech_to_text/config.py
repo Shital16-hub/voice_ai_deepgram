@@ -12,16 +12,16 @@ load_dotenv()
 class STTConfig(BaseSettings):
     """Configuration for Speech-to-Text module."""
     
-    # Deepgram API settings
-    deepgram_api_key: str = Field(
-        default=os.getenv("DEEPGRAM_API_KEY", ""),
-        description="Deepgram API Key for STT services"
+    # Google Cloud credentials
+    credentials_file: str = Field(
+        default=os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
+        description="Path to Google Cloud credentials JSON file"
     )
     
     # STT settings
     model_name: str = Field(
-        default="general",
-        description="Deepgram STT model to use"
+        default="latest_long",
+        description="Google Cloud Speech-to-Text model name"
     )
     
     language: str = Field(
@@ -40,65 +40,47 @@ class STTConfig(BaseSettings):
         description="Whether to return interim results"
     )
     
-    endpointing: str = Field(
-        default="500",
-        description="Endpointing in ms, or 'default'"
+    enable_automatic_punctuation: bool = Field(
+        default=True,
+        description="Enable automatic punctuation in transcriptions"
     )
     
-    vad_events: bool = Field(
+    enable_word_time_offsets: bool = Field(
         default=True,
-        description="Whether to return VAD events"
+        description="Enable word-level timestamps"
     )
     
     # Telephony optimizations
-    utterance_end_ms: int = Field(
-        default=500,
-        description="Milliseconds of silence to consider an utterance complete"
+    use_enhanced_model: bool = Field(
+        default=True,
+        description="Use enhanced model for telephony"
     )
     
-    keywords: list = Field(
+    enable_speaker_diarization: bool = Field(
+        default=False,
+        description="Enable speaker diarization"
+    )
+    
+    diarization_speaker_count: int = Field(
+        default=1,
+        description="Expected number of speakers in the audio"
+    )
+    
+    # Keywords to boost recognition for telephony
+    speech_contexts: list = Field(
         default=["price", "plan", "cost", "subscription", "service", "features", "support"],
         description="Keywords to boost in telephony context"
     )
     
-    alternatives: int = Field(
-        default=1,
-        description="Number of alternative transcripts to return"
-    )
-    
     # Performance settings
-    enable_caching: bool = Field(
+    use_enhanced_telephony: bool = Field(
         default=True,
-        description="Enable caching of STT results"
-    )
-    
-    smart_format: bool = Field(
-        default=True,
-        description="Whether to apply smart formatting to numbers, dates, etc."
+        description="Use telephony model for optimized speech recognition"
     )
     
     profanity_filter: bool = Field(
         default=False,
-        description="Whether to filter profanity"
-    )
-    
-    # Telephony-specific settings
-    diarize: bool = Field(
-        default=False,
-        description="Whether to perform speaker diarization"
-    )
-    
-    multichannel: bool = Field(
-        default=False,
-        description="Whether to treat audio as multichannel"
-    )
-    
-    model_options: dict = Field(
-        default={
-            "tier": "enhanced",  # Use enhanced model for telephony
-            "filler_words": False,  # Filter out um, uh, etc.
-        },
-        description="Additional model options"
+        description="Filter profanity from transcription results"
     )
     
     class Config:

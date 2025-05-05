@@ -1,7 +1,7 @@
 """
-Enhanced Speech-to-Text integration module for Voice AI Agent with improved noise handling.
+Enhanced Speech-to-Text integration module for Voice AI Agent with Google Cloud.
 
-This module provides classes and functions for integrating Deepgram speech-to-text
+This module provides classes and functions for integrating Google Cloud speech-to-text
 capabilities with the Voice AI Agent system.
 """
 import logging
@@ -12,7 +12,7 @@ import numpy as np
 from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union, AsyncIterator
 from scipy import signal
 
-from speech_to_text.deepgram_stt import DeepgramStreamingSTT, StreamingTranscriptionResult
+from speech_to_text.google_cloud import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 from speech_to_text.utils.audio_utils import load_audio_file
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ NON_SPEECH_PATTERNS = [
 
 class STTIntegration:
     """
-    Enhanced Speech-to-Text integration for Voice AI Agent with Deepgram.
+    Enhanced Speech-to-Text integration for Voice AI Agent with Google Cloud.
     
     Provides an abstraction layer for speech recognition functionality,
     handling audio processing and transcription.
@@ -38,14 +38,14 @@ class STTIntegration:
     
     def __init__(
         self,
-        speech_recognizer: Optional[DeepgramStreamingSTT] = None,
-        language: str = "en"
+        speech_recognizer: Optional[GoogleCloudStreamingSTT] = None,
+        language: str = "en-US"
     ):
         """
         Initialize the STT integration.
         
         Args:
-            speech_recognizer: Initialized DeepgramStreamingSTT instance
+            speech_recognizer: Initialized GoogleCloudStreamingSTT instance
             language: Language code for speech recognition
         """
         self.speech_recognizer = speech_recognizer
@@ -61,29 +61,29 @@ class STTIntegration:
         self.max_samples = 20
         self.ambient_noise_level = 0.01  # Starting threshold
     
-    async def init(self, api_key: Optional[str] = None) -> None:
+    async def init(self, credentials_file: Optional[str] = None) -> None:
         """
         Initialize the STT component if not already initialized.
         
         Args:
-            api_key: Deepgram API key (optional)
+            credentials_file: Path to Google Cloud credentials file
         """
         if self.initialized:
             return
             
         try:
-            # Create a new Deepgram streaming client optimized for telephony
-            self.speech_recognizer = DeepgramStreamingSTT(
-                api_key=api_key,
+            # Create a new Google Cloud streaming client optimized for telephony
+            self.speech_recognizer = GoogleCloudStreamingSTT(
+                credentials_file=credentials_file,
                 language=self.language,
                 sample_rate=16000,
-                encoding="linear16",
+                encoding="LINEAR16",
                 channels=1,
                 interim_results=True
             )
             
             self.initialized = True
-            logger.info(f"Initialized STT with Deepgram API and language: {self.language}")
+            logger.info(f"Initialized STT with Google Cloud API and language: {self.language}")
         except Exception as e:
             logger.error(f"Error initializing STT: {e}")
             raise
