@@ -905,10 +905,10 @@ class WebSocketHandler:
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """
-        Send audio data to Twilio with proper format conversion.
+        Send audio data to Twilio with enhanced format verification.
         
         Args:
-            audio_data: Audio data as bytes (from TTS)
+            audio_data: Audio data as bytes
             ws: WebSocket connection
         """
         try:
@@ -916,35 +916,47 @@ class WebSocketHandler:
             if not audio_data or len(audio_data) == 0:
                 logger.warning("Attempted to send empty audio data")
                 return
-                
+            
+            # Verify correct format for Twilio (should be μ-law WAV)
+            if len(audio_data) >= 12:
+                # Check for WAV header
+                if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
+                    logger.debug(f"Sending WAV audio: {len(audio_data)} bytes")
+                    
+                    # Verify WAV is in μ-law format
+                    # This is a simplistic check - in production you'd check the format chunk
+                    pass
+                    
+                # Check for MP3 header (rough check)
+                elif (audio_data[0:2] == b'\xFF\xFB' or 
+                      audio_data[0:2] == b'ID3' or 
+                      audio_data.find(b'ID3') == 0):
+                    logger.error(f"Audio appears to be MP3, not converted properly: {len(audio_data)} bytes")
+                    
+                    # Try to convert on the fly as a fallback
+                    try:
+                        audio_data = self.audio_processor.prepare_audio_for_telephony(
+                            audio_data,
+                            format="mp3",
+                            target_sample_rate=8000,
+                            target_channels=1
+                        )
+                        logger.info(f"Converted MP3 to μ-law on the fly: {len(audio_data)} bytes")
+                    except Exception as conv_error:
+                        logger.error(f"Error converting MP3 to μ-law: {conv_error}")
+                        return  # Don't send incompatible audio
+                    
             # Check connection status
             if not self.connected:
                 logger.warning("WebSocket connection is closed, cannot send audio")
                 return
             
-            # Debug audio format before sending
-            try:
-                audio_info = self.audio_processor.get_audio_info(audio_data)
-                logger.debug(f"Audio format before sending: {audio_info}")
-                
-                # If not already in mulaw format, convert it
-                if audio_info.get("format") != "mulaw":
-                    # For LINEAR16 (PCM) format, convert to mulaw
-                    mulaw_audio = self.audio_processor.pcm_to_mulaw(audio_data)
-                else:
-                    mulaw_audio = audio_data
-            except Exception as format_error:
-                logger.error(f"Error analyzing audio format: {format_error}")
-                # Try to convert anyway
-                mulaw_audio = self.audio_processor.pcm_to_mulaw(audio_data)
-            
             # Split audio into smaller chunks to avoid timeouts
             chunk_size = 4000  # Smaller chunks (250ms of audio at 8kHz mono)
-            chunks = [mulaw_audio[i:i+chunk_size] for i in range(0, len(mulaw_audio), chunk_size)]
+            chunks = [audio_data[i:i+chunk_size] for i in range(0, len(audio_data), chunk_size)]
             
-            logger.info(f"Sending audio response ({len(mulaw_audio)} bytes)")
+            logger.debug(f"Splitting {len(audio_data)} bytes into {len(chunks)} chunks")
             
-            # Send each chunk
             for i, chunk in enumerate(chunks):
                 try:
                     # Encode audio to base64
@@ -976,7 +988,7 @@ class WebSocketHandler:
                         logger.error(f"Error sending audio chunk {i+1}/{len(chunks)}: {e}")
                         return
             
-            logger.debug(f"Sent {len(chunks)} audio chunks ({len(mulaw_audio)} bytes total)")
+            logger.debug(f"Sent {len(chunks)} audio chunks ({len(audio_data)} bytes total)")
             
         except Exception as e:
             logger.error(f"Error sending audio: {e}", exc_info=True)

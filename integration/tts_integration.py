@@ -1,21 +1,19 @@
 """
-TTS Integration module for Voice AI Agent.
-
-This module provides functions for integrating text-to-speech
-capabilities with the Voice AI Agent system.
+TTS Integration module with ElevenLabs support.
 """
 import logging
 import time
+import os
+import sys
 from typing import Optional, Dict, Any, AsyncIterator, Union, List, Callable, Awaitable
 
-# Modified import - remove DeepgramTTS since you're now using ElevenLabs
-from text_to_speech import ElevenLabsTTS, RealTimeResponseHandler, AudioProcessor
+from telephony.audio_processor import AudioProcessor
 
 logger = logging.getLogger(__name__)
 
 class TTSIntegration:
     """
-    Text-to-Speech integration for Voice AI Agent.
+    Text-to-Speech integration with ElevenLabs support.
     
     Provides an abstraction layer for TTS functionality, handling initialization,
     single-text processing, and streaming capabilities.
@@ -24,19 +22,16 @@ class TTSIntegration:
     def __init__(
         self,
         voice: Optional[str] = None,
-        voice_id: Optional[str] = None,  # Add voice_id as an alternative parameter
-        model_id: Optional[str] = None,  # Add model_id parameter
         enable_caching: bool = True
     ):
         """
         Initialize the TTS integration.
         
         Args:
-            voice: Voice ID to use for ElevenLabs TTS
+            voice: Voice ID to use for ElevenLabs
             enable_caching: Whether to enable TTS caching
         """
-        self.voice = voice or voice_id
-        self.model_id = model_id
+        self.voice = voice or "CwhRBWXzGAHq8TQ4Fs17"  # Default to Roger voice
         self.enable_caching = enable_caching
         self.tts_client = None
         self.tts_handler = None
@@ -47,38 +42,35 @@ class TTSIntegration:
         self.pause_duration_ms = 500  # 500ms pause after speech
     
     async def init(self) -> None:
-        """Initialize the TTS components."""
+        """Initialize the TTS components with ElevenLabs."""
         if self.initialized:
             return
             
         try:
-            # Initialize the ElevenLabs TTS client with proper parameters
-            kwargs = {
-                'voice_id': self.voice,
-                'enable_caching': self.enable_caching,
-                'output_format': "mp3_44100_128"  # Use MP3 format
-            }
+            # Add the directory containing elevenlabs_tts.py to the path
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if root_dir not in sys.path:
+                sys.path.append(root_dir)
             
-            # Add model_id if it's provided
-            if self.model_id:
-                kwargs['model_id'] = self.model_id
-                
-            self.tts_client = ElevenLabsTTS(**kwargs)
+            # Import the ElevenLabs TTS client
+            from elevenlabs_tts import ElevenLabsTTS
             
-            # Initialize the RealTimeResponseHandler
-            self.tts_handler = RealTimeResponseHandler(tts_streamer=None, tts_client=self.tts_client)
+            # Initialize the ElevenLabs TTS client
+            self.tts_client = ElevenLabsTTS(
+                voice_id=self.voice,
+                model_id="eleven_flash_v2_5",  # Fast model for telephony
+                enable_caching=self.enable_caching
+            )
             
             self.initialized = True
-            voice_id = self.voice or self.tts_client.DEFAULT_VOICE 
-            model_id = self.model_id or self.tts_client.DEFAULT_MODEL
-            logger.info(f"Initialized TTS with ElevenLabs - Voice: {voice_id}, Model: {model_id}")
+            logger.info(f"Initialized TTS with ElevenLabs - Voice: {self.voice}, Model: eleven_flash_v2_5")
         except Exception as e:
             logger.error(f"Error initializing TTS: {e}")
             raise
     
     async def text_to_speech(self, text: str) -> bytes:
         """
-        Convert text to speech with format conversion for Twilio.
+        Convert text to speech with proper telephony format conversion.
         
         Args:
             text: Text to convert to speech
@@ -90,79 +82,92 @@ class TTSIntegration:
             await self.init()
         
         try:
-            # Get audio data from TTS client (ElevenLabs)
+            # Get audio data from ElevenLabs TTS client (MP3 format)
             audio_data = await self.tts_client.synthesize(text)
             
-            # Check if we need to convert the format for Twilio
-            # ElevenLabs returns MP3 by default, but Twilio expects 8kHz PCM/mulaw
-            from telephony.audio_processor import AudioProcessor
+            # Get audio info before conversion
+            logger.debug(f"Raw ElevenLabs audio: {len(audio_data)} bytes")
             
-            # Convert to 8kHz mono PCM for Twilio (if not already in that format)
-            audio_info = AudioProcessor.get_audio_info(audio_data)
-            if audio_info.get("format") == "mp3" or audio_info.get("sample_rate", 0) != 8000:
-                audio_data = AudioProcessor.prepare_for_telephony(
+            # Create audio processor
+            audio_processor = AudioProcessor()
+            
+            # Convert to Twilio-compatible format
+            try:
+                processed_audio = audio_processor.prepare_audio_for_telephony(
                     audio_data,
-                    format="mp3",  # ElevenLabs default format
-                    target_sample_rate=8000,
-                    target_channels=1
+                    format="mp3",
+                    target_sample_rate=8000,  # Twilio uses 8kHz
+                    target_channels=1         # Mono for telephony
                 )
-            
-            # Ensure the audio data has an even number of bytes
-            if len(audio_data) % 2 != 0:
-                audio_data = audio_data + b'\x00'
-                logger.debug("Padded audio data to make even length")
+            except Exception as conv_error:
+                logger.error(f"Error preparing audio for telephony: {conv_error}")
+                # Return empty data if conversion fails
+                return b''
             
             # Add a short pause after speech for better conversation flow
-            if self.add_pause_after_speech:
+            if self.add_pause_after_speech and processed_audio:
                 # Generate silence based on pause_duration_ms
-                silence_size = int(8000 * (self.pause_duration_ms / 1000) * 2)  # 16-bit samples
-                silence_data = b'\x00' * silence_size
+                silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz sample rate
+                silence_data = b'\x7f' * silence_size  # μ-law silence
                 
                 # Append silence to audio data
-                audio_data = audio_data + silence_data
+                processed_audio = processed_audio + silence_data
                 logger.debug(f"Added {self.pause_duration_ms}ms pause after speech")
             
-            return audio_data
+            return processed_audio
+            
         except Exception as e:
             logger.error(f"Error in text to speech conversion: {e}")
-            raise
+            # Return empty data rather than raising
+            return b''
     
     async def text_to_speech_streaming(
         self, 
         text_generator: AsyncIterator[str]
     ) -> AsyncIterator[bytes]:
         """
-        Stream text to speech conversion.
+        Stream text to speech conversion with telephony optimization.
         
         Args:
             text_generator: Async generator yielding text chunks
             
         Yields:
-            Audio data chunks
+            Audio data chunks ready for Twilio
         """
         if not self.initialized:
             await self.init()
         
         try:
+            # Create audio processor
+            audio_processor = AudioProcessor()
+            
             # Track if we need to add the final pause
             needs_final_pause = False
             
-            async for text_chunk in text_generator:
-                if not text_chunk:
+            async for audio_chunk in self.tts_client.synthesize_streaming(text_generator):
+                # Process each chunk for telephony compatibility
+                try:
+                    processed_chunk = audio_processor.prepare_audio_for_telephony(
+                        audio_chunk,
+                        format="mp3",
+                        target_sample_rate=8000,
+                        target_channels=1
+                    )
+                    
+                    # Only the last chunk should get the pause
+                    needs_final_pause = True
+                    yield processed_chunk
+                    
+                except Exception as chunk_error:
+                    logger.error(f"Error processing streaming chunk: {chunk_error}")
+                    # Skip problematic chunks
                     continue
-                
-                # Synthesize the text chunk
-                audio_chunk = await self.text_to_speech(text_chunk)
-                
-                # Only the last chunk should get the pause
-                needs_final_pause = True
-                yield audio_chunk
             
             # Add a pause at the end of the complete audio stream
             if needs_final_pause and self.add_pause_after_speech:
                 # Generate silence based on pause_duration_ms
-                silence_size = int(8000 * (self.pause_duration_ms / 1000) * 2)  # 16-bit samples
-                silence_data = b'\x00' * silence_size
+                silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz sample rate
+                silence_data = b'\x7f' * silence_size  # μ-law silence
                 yield silence_data
                 logger.debug(f"Added {self.pause_duration_ms}ms pause at end of streaming audio")
                 
@@ -176,7 +181,7 @@ class TTSIntegration:
         audio_callback: Callable[[bytes], Awaitable[None]]
     ) -> Dict[str, Any]:
         """
-        Process text chunks in real-time and generate speech.
+        Process text chunks in real-time and generate speech with telephony optimization.
         
         Args:
             text_chunks: Async iterator of text chunks
@@ -191,10 +196,8 @@ class TTSIntegration:
         # Start measuring time
         start_time = time.time()
         
-        # Reset the TTS handler for this new session
-        if self.tts_handler:
-            await self.tts_handler.stop()
-            self.tts_handler = RealTimeResponseHandler(tts_streamer=None, tts_client=self.tts_client)
+        # Create audio processor
+        audio_processor = AudioProcessor()
         
         # Process each text chunk
         total_chunks = 0
@@ -240,52 +243,44 @@ class TTSIntegration:
     
     async def process_ssml(self, ssml: str) -> bytes:
         """
-        Process SSML text and convert to speech.
+        Process SSML text and convert to speech with telephony optimization.
         
         Args:
             ssml: SSML-formatted text
             
         Returns:
-            Audio data as bytes
+            Audio data as bytes (Twilio-compatible)
         """
         if not self.initialized:
             await self.init()
         
         try:
-            # For ElevenLabs, we need to handle SSML specially
+            # ElevenLabs doesn't directly support SSML, but we'll pass it through
             audio_data = await self.tts_client.synthesize_with_ssml(ssml)
             
-            # Convert to telephony format if needed
-            from telephony.audio_processor import AudioProcessor
-            audio_info = AudioProcessor.get_audio_info(audio_data)
-            if audio_info.get("format") == "mp3" or audio_info.get("sample_rate", 0) != 8000:
-                audio_data = AudioProcessor.prepare_for_telephony(
-                    audio_data,
-                    format="mp3",
-                    target_sample_rate=8000, 
-                    target_channels=1
-                )
+            # Create audio processor
+            audio_processor = AudioProcessor()
             
-            # Ensure even number of bytes
-            if len(audio_data) % 2 != 0:
-                audio_data = audio_data + b'\x00'
+            # Process for telephony
+            processed_audio = audio_processor.prepare_audio_for_telephony(
+                audio_data,
+                format="mp3",
+                target_sample_rate=8000,
+                target_channels=1
+            )
             
             # Add a pause at the end if needed
             if self.add_pause_after_speech:
-                silence_size = int(8000 * (self.pause_duration_ms / 1000) * 2)
-                silence_data = b'\x00' * silence_size
-                audio_data = audio_data + silence_data
+                silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz sample rate
+                silence_data = b'\x7f' * silence_size  # μ-law silence
+                processed_audio = processed_audio + silence_data
                 logger.debug(f"Added {self.pause_duration_ms}ms pause after SSML speech")
                 
-            return audio_data
+            return processed_audio
         except Exception as e:
             logger.error(f"Error in SSML processing: {e}")
             raise
     
     async def cleanup(self) -> None:
         """Clean up resources."""
-        if self.tts_handler:
-            try:
-                await self.tts_handler.stop()
-            except Exception as e:
-                logger.error(f"Error during TTS cleanup: {e}")
+        pass

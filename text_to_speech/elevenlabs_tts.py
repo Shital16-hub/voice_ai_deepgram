@@ -361,11 +361,6 @@ class ElevenLabsTTS:
         Returns:
             Audio data as bytes
         """
-        # Note: ElevenLabs doesn't directly support SSML. 
-        # This function strips SSML tags and sends the plain text.
-        # In a full implementation, you might want to parse the SSML and 
-        # translate it to ElevenLabs voice settings.
-        
         # Use configured IDs if not specified
         voice_id = voice_id or self.voice_id
         model_id = model_id or self.model_id
