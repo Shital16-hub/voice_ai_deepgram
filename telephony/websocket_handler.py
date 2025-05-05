@@ -15,6 +15,9 @@ from google.cloud.speech import SpeechClient, StreamingRecognitionConfig, Recogn
 from google.cloud.speech_v1p1beta1 import SpeechAsyncClient
 from google.api_core.exceptions import GoogleAPIError
 
+from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
+from speech_to_text.simple_google_stt import SimpleGoogleSTT
+
 from telephony.audio_processor import AudioProcessor
 from telephony.config import CHUNK_SIZE, AUDIO_BUFFER_SIZE, SILENCE_THRESHOLD, SILENCE_DURATION, MAX_BUFFER_SIZE
 import concurrent.futures
@@ -285,7 +288,10 @@ class GoogleCloudSpeechHandler:
             request_generator = generate_requests()
             
             # Start streaming recognition
-            responses = self.client.streaming_recognize(request_generator)
+            responses = self.client.streaming_recognize(
+                    requests=request_generator,
+                    config=self.streaming_config
+            )
             
             # Process responses
             for response in responses:
@@ -368,7 +374,7 @@ class WebSocketHandler:
         self.max_noise_samples = 20
         
         # Set up Google Cloud Speech
-        self.speech_client = GoogleCloudSpeechHandler(
+        self.speech_client = SimpleGoogleSTT(
             language_code="en-US",
             sample_rate=16000,
             enable_automatic_punctuation=True
