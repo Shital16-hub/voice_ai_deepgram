@@ -28,7 +28,7 @@ class AudioProcessor:
     def mulaw_to_pcm(mulaw_data: bytes) -> np.ndarray:
         """
         Convert Twilio's mulaw audio to PCM for Voice AI with enhanced noise filtering.
-        Optimized for Deepgram STT processing.
+        Optimized for speech recognition processing.
         
         Args:
             mulaw_data: Audio data in mulaw format
@@ -56,37 +56,45 @@ class AudioProcessor:
             audio_array = np.frombuffer(pcm_data_16k, dtype=np.int16)
             audio_array = audio_array.astype(np.float32) / 32768.0
             
-            # Apply enhanced audio filtering optimized for Deepgram
-            # Apply high-pass filter to remove low-frequency noise
-            b, a = signal.butter(6, 100/(SAMPLE_RATE_AI/2), 'highpass')
-            audio_array = signal.filtfilt(b, a, audio_array)
+            # Apply enhanced audio filtering optimized for speech recognition
             
-            # Apply band-pass filter for telephony freq range (300-3400 Hz)
-            b, a = signal.butter(4, [300/(SAMPLE_RATE_AI/2), 3400/(SAMPLE_RATE_AI/2)], 'band')
-            audio_array = signal.filtfilt(b, a, audio_array)
+            # 1. Apply pre-emphasis filter to boost higher frequencies (improves speech detection)
+            pre_emphasis = 0.97
+            emphasized_audio = np.append(audio_array[0], audio_array[1:] - pre_emphasis * audio_array[:-1])
             
-            # Apply a simple noise gate
+            # 2. Apply high-pass filter to remove low-frequency noise (below 80Hz)
+            nyquist = SAMPLE_RATE_AI / 2
+            high_pass = 80 / nyquist
+            b_high, a_high = signal.butter(6, high_pass, 'highpass')
+            high_passed = signal.filtfilt(b_high, a_high, emphasized_audio)
+            
+            # 3. Apply band-pass filter for telephony freq range (300-3400 Hz)
+            low_band = 300 / nyquist
+            high_band = 3400 / nyquist
+            b_band, a_band = signal.butter(4, [low_band, high_band], 'band')
+            band_passed = signal.filtfilt(b_band, a_band, high_passed)
+            
+            # 4. Apply a simple noise gate
             noise_threshold = 0.015  # Adjusted threshold
-            audio_array = np.where(np.abs(audio_array) < noise_threshold, 0, audio_array)
+            noise_gate = np.where(np.abs(band_passed) < noise_threshold, 0, band_passed)
             
-            # Apply pre-emphasis filter to boost higher frequencies
-            audio_array = np.append(audio_array[0], audio_array[1:] - 0.97 * audio_array[:-1])
-            
-            # Normalize for consistent volume
-            max_val = np.max(np.abs(audio_array))
+            # 5. Normalize for consistent volume
+            max_val = np.max(np.abs(noise_gate))
             if max_val > 0:
-                audio_array = audio_array * (0.9 / max_val)
+                normalized = noise_gate * (0.95 / max_val)
+            else:
+                normalized = noise_gate
             
             # Check audio levels
-            audio_level = np.mean(np.abs(audio_array)) * 100
-            logger.debug(f"Converted {len(mulaw_data)} bytes to {len(audio_array)} samples. Audio level: {audio_level:.1f}%")
+            audio_level = np.mean(np.abs(normalized)) * 100
+            logger.debug(f"Converted {len(mulaw_data)} bytes to {len(normalized)} samples. Audio level: {audio_level:.1f}%")
             
             # Apply a gain if audio is very quiet
             if audio_level < 1.0:  # Very quiet audio
-                audio_array = audio_array * min(5.0, 5.0/audio_level)
-                logger.debug(f"Applied gain to quiet audio. New level: {np.mean(np.abs(audio_array)) * 100:.1f}%")
+                normalized = normalized * min(5.0, 5.0/audio_level)
+                logger.debug(f"Applied gain to quiet audio. New level: {np.mean(np.abs(normalized)) * 100:.1f}%")
             
-            return audio_array
+            return normalized
             
         except Exception as e:
             logger.error(f"Error converting mulaw to PCM: {e}")
@@ -151,7 +159,7 @@ class AudioProcessor:
     def enhance_audio(audio_data: np.ndarray) -> np.ndarray:
         """
         Enhance audio quality by reducing noise and improving speech clarity.
-        Optimized for Deepgram STT processing.
+        Optimized for speech recognition processing.
         
         Args:
             audio_data: Audio data as numpy array
@@ -165,22 +173,23 @@ class AudioProcessor:
             b, a = signal.butter(4, 80/(SAMPLE_RATE_AI/2), 'highpass')
             filtered_audio = signal.filtfilt(b, a, audio_data)
             
-            # 2. Apply a mild de-emphasis filter to reduce hissing sounds in phone calls
-            b, a = signal.butter(1, 3000/(SAMPLE_RATE_AI/2), 'low')
-            de_emphasis = signal.filtfilt(b, a, filtered_audio)
+            # 2. Apply pre-emphasis filter to boost higher frequencies (for better speech detection)
+            pre_emphasis = 0.97
+            emphasized = np.append(filtered_audio[0], filtered_audio[1:] - pre_emphasis * filtered_audio[:-1])
             
-            # 3. Apply a simple noise gate to remove background noise
+            # 3. Apply a mild de-emphasis filter to reduce hissing sounds in phone calls
+            b, a = signal.butter(1, 3000/(SAMPLE_RATE_AI/2), 'low')
+            de_emphasis = signal.filtfilt(b, a, emphasized)
+            
+            # 4. Apply a simple noise gate to remove background noise
             noise_threshold = 0.005  # Adjust based on expected noise level
             noise_gate = np.where(np.abs(de_emphasis) < noise_threshold, 0, de_emphasis)
             
-            # 4. Apply pre-emphasis filter to boost higher frequencies (for better speech detection)
-            pre_emphasis = np.append(noise_gate[0], noise_gate[1:] - 0.97 * noise_gate[:-1])
-            
             # 5. Normalize audio to have consistent volume
-            if np.max(np.abs(pre_emphasis)) > 0:
-                normalized = pre_emphasis / np.max(np.abs(pre_emphasis)) * 0.95
+            if np.max(np.abs(noise_gate)) > 0:
+                normalized = noise_gate / np.max(np.abs(noise_gate)) * 0.95
             else:
-                normalized = pre_emphasis
+                normalized = noise_gate
             
             # 6. Apply a mild compression to even out volumes
             # Compression ratio 2:1 for values above threshold

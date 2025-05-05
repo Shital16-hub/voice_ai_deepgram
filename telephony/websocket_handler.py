@@ -384,6 +384,62 @@ class WebSocketHandler:
         self.google_speech_active = False
         
         logger.info(f"WebSocketHandler initialized for call {call_sid} with Google Cloud Speech")
+
+    def _detect_voice_activity(self, audio_data: np.ndarray, frame_size: int = 480, threshold: float = 0.015) -> list:
+        """
+        Detect segments of voice activity in audio.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            frame_size: Size of each frame to analyze (30ms at 16kHz)
+            threshold: Energy threshold for speech detection
+            
+        Returns:
+            List of (start, end) indices where speech is detected
+        """
+        # Normalize audio
+        audio_data = audio_data / np.max(np.abs(audio_data)) if np.max(np.abs(audio_data)) > 0 else audio_data
+        
+        # Calculate energy for each frame
+        frame_count = len(audio_data) // frame_size
+        energies = []
+        
+        for i in range(frame_count):
+            frame = audio_data[i * frame_size:(i + 1) * frame_size]
+            energy = np.mean(np.square(frame))
+            energies.append(energy)
+        
+        # Smooth energies with moving average
+        window_size = 5
+        if len(energies) >= window_size:
+            smoothed = np.convolve(energies, np.ones(window_size) / window_size, mode='same')
+        else:
+            smoothed = energies
+        
+        # Detect speech segments
+        is_speech = smoothed > threshold
+        segments = []
+        in_speech = False
+        start_idx = 0
+        
+        for i, speech in enumerate(is_speech):
+            if speech and not in_speech:
+                # Start of speech
+                in_speech = True
+                start_idx = i * frame_size
+            elif not speech and in_speech:
+                # End of speech
+                in_speech = False
+                end_idx = i * frame_size
+                # Only add if segment is long enough (avoid clicks/pops)
+                if end_idx - start_idx > frame_size * 3:  # At least 3 frames
+                    segments.append((start_idx, end_idx))
+        
+        # Handle case where audio ends during speech
+        if in_speech:
+            segments.append((start_idx, len(audio_data)))
+        
+        return segments
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
@@ -713,32 +769,64 @@ class WebSocketHandler:
     async def _process_audio(self, ws) -> None:
         """
         Process accumulated audio data through the pipeline with Google Cloud Speech.
+        Improved with enhanced speech detection and processing.
         
         Args:
             ws: WebSocket connection
         """
         try:
             # Convert buffer to PCM with enhanced processing
-            try:
-                mulaw_bytes = bytes(self.input_buffer)
+            mulaw_bytes = bytes(self.input_buffer)
+            
+            # Convert using the enhanced audio processing
+            pcm_audio = self.audio_processor.mulaw_to_pcm(mulaw_bytes)
+            
+            # Additional processing to improve recognition
+            pcm_audio = self._preprocess_audio(pcm_audio)
+            
+            # Keep accumulating if audio is too small
+            if len(pcm_audio) < 5000:  # Very small audio chunk
+                logger.debug(f"Audio chunk too small: {len(pcm_audio)} samples, continuing collection")
+                return
                 
-                # Convert using the enhanced audio processing
-                pcm_audio = self.audio_processor.mulaw_to_pcm(mulaw_bytes)
-                
-                # Additional processing to improve recognition
-                pcm_audio = self._preprocess_audio(pcm_audio)
-                
-            except Exception as e:
-                logger.error(f"Error converting audio: {e}")
-                # Clear part of buffer and try again next time
+            # Check for speech before processing
+            if not self._contains_speech(pcm_audio):
+                logger.debug("No speech detected in audio chunk, continuing collection")
+                # Only reduce buffer by half to maintain some context
+                half_size = len(self.input_buffer) // 2
+                self.input_buffer = self.input_buffer[half_size:]
+                return
+            
+            # Detect voice activity segments
+            segments = self._detect_voice_activity(pcm_audio)
+            
+            # If no speech segments found, don't process further
+            if not segments:
+                logger.debug("No speech segments detected, continuing collection")
                 half_size = len(self.input_buffer) // 2
                 self.input_buffer = self.input_buffer[half_size:]
                 return
                 
-            # Add some checks for audio quality
-            if len(pcm_audio) < 1000:  # Very small audio chunk
-                logger.warning(f"Audio chunk too small: {len(pcm_audio)} samples")
-                return
+            # Extract the longest speech segment
+            if segments:
+                longest_segment = max(segments, key=lambda s: s[1] - s[0])
+                start_idx, end_idx = longest_segment
+                
+                # Add some padding around the segment
+                padding = 0.5 * 16000  # 0.5 seconds
+                start_idx = max(0, start_idx - int(padding))
+                end_idx = min(len(pcm_audio), end_idx + int(padding))
+                
+                # Extract the segment with padding
+                speech_segment = pcm_audio[start_idx:end_idx]
+                
+                # Add additional silence padding for better recognition
+                silence_length = int(0.2 * 16000)  # 0.2 seconds of silence
+                silence = np.zeros(silence_length, dtype=pcm_audio.dtype)
+                padded_audio = np.concatenate([silence, speech_segment, silence])
+            else:
+                # If no segments were detected, use the full audio (shouldn't happen here)
+                padded_audio = pcm_audio
             
             # Create a list to collect transcription results
             transcription_results = []
@@ -752,7 +840,7 @@ class WebSocketHandler:
             # Process audio through Google Cloud Speech
             try:
                 # Convert to bytes format for Google Cloud Speech
-                audio_bytes = (pcm_audio * 32767).astype(np.int16).tobytes()
+                audio_bytes = (padded_audio * 32767).astype(np.int16).tobytes()
                 
                 # Make sure the Google Speech streaming session is active
                 if not self.google_speech_active:
@@ -876,30 +964,42 @@ class WebSocketHandler:
         if len(audio_data) < 100:
             return False
             
-        # Calculate RMS energy
+        # Calculate RMS energy with more sensitivity
         energy = np.sqrt(np.mean(np.square(audio_data)))
         
         # Calculate zero-crossing rate (helps distinguish speech from noise)
         zero_crossings = np.sum(np.abs(np.diff(np.signbit(audio_data)))) / len(audio_data)
         
-        # Calculate spectral centroid (speech typically has higher centroids than noise)
+        # Calculate spectral centroid (speech typically has centroids around 1000-2000 Hz)
         fft_data = np.abs(np.fft.rfft(audio_data))
         freqs = np.fft.rfftfreq(len(audio_data), 1/16000)
-        spectral_centroid = np.sum(freqs * fft_data) / (np.sum(fft_data) + 1e-10)
+        if np.sum(fft_data) > 0:  # Avoid division by zero
+            spectral_centroid = np.sum(freqs * fft_data) / np.sum(fft_data)
+        else:
+            spectral_centroid = 0
         
-        # Get threshold based on ambient noise
-        speech_threshold = max(0.01, self.ambient_noise_level * 2.5)
+        # Spectral flatness - speech is less flat than noise
+        if np.mean(fft_data) > 0:  # Avoid division by zero
+            spectral_flatness = np.exp(np.mean(np.log(fft_data + 1e-10))) / np.mean(fft_data)
+        else:
+            spectral_flatness = 1
+        
+        # Lower energy threshold to detect softer speech
+        speech_threshold = max(0.005, self.ambient_noise_level * 2.0)  # More sensitive
+        
+        # Enhanced speech detection logic with voice-specific characteristics
+        is_speech = (
+            (energy > speech_threshold) and  # Energy above threshold
+            (zero_crossings > 0.01 and zero_crossings < 0.15) and  # Typical for speech
+            (spectral_centroid > 500 and spectral_centroid < 3000) and  # Speech frequency range
+            (spectral_flatness < 0.5)  # Speech is less flat than noise
+        )
         
         # Log values for debugging
         logger.debug(f"Audio energy: {energy:.6f} (threshold: {speech_threshold:.6f}), "
                     f"zero crossings: {zero_crossings:.6f}, "
-                    f"spectral centroid: {spectral_centroid:.2f}Hz")
-        
-        # Combined speech detection logic
-        is_speech = (energy > speech_threshold) and \
-                   (zero_crossings > 0.01) and \
-                   (zero_crossings < 0.15) and \
-                   (spectral_centroid > 500)  # Speech typically > 500Hz
+                    f"spectral centroid: {spectral_centroid:.2f}Hz, "
+                    f"flatness: {spectral_flatness:.4f}")
         
         return is_speech
     

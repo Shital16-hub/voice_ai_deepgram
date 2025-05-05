@@ -10,9 +10,17 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# Add project root to path for imports
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Now import from the text_to_speech package
+from text_to_speech import ElevenLabsTTS
 
 def check_ffmpeg_installed():
     """Check if ffmpeg is installed and install it if not."""
@@ -50,11 +58,6 @@ async def test_elevenlabs_to_twilio():
         if not api_key:
             api_key = input("Enter your ElevenLabs API key: ")
             os.environ["ELEVENLABS_API_KEY"] = api_key
-        
-        # Import ElevenLabs TTS
-        import sys
-        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-        from elevenlabs_tts import ElevenLabsTTS
         
         # Create output directory
         output_dir = Path("./debug_audio")

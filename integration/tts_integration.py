@@ -47,13 +47,13 @@ class TTSIntegration:
             return
             
         try:
-            # Add the directory containing elevenlabs_tts.py to the path
+            # Add the directory containing the project root to the path
             root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             if root_dir not in sys.path:
                 sys.path.append(root_dir)
             
-            # Import the ElevenLabs TTS client
-            from elevenlabs_tts import ElevenLabsTTS
+            # Import the ElevenLabs TTS client - FIXED IMPORT PATH
+            from text_to_speech.elevenlabs_tts import ElevenLabsTTS
             
             # Initialize the ElevenLabs TTS client
             self.tts_client = ElevenLabsTTS(
@@ -172,7 +172,7 @@ class TTSIntegration:
                 logger.debug(f"Added {self.pause_duration_ms}ms pause at end of streaming audio")
                 
         except Exception as e:
-            logger.error(f"Error in streaming text to speech: {e}")
+            logger.error(f"Error in streaming TTS: {str(e)}")
             raise
     
     async def process_realtime_text(

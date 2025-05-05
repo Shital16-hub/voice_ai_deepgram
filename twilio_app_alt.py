@@ -107,8 +107,9 @@ async def initialize_system():
     
     # Initialize TTS integration
     tts = TTSIntegration(
-        voice_id="CwhRBWXzGAHq8TQ4Fs17",  # Roger voice
-        model_id="eleven_flash_v2_5"       # Flash model for low latency
+        voice="CwhRBWXzGAHq8TQ4Fs17", # Roger voice
+        enable_caching=True,
+        # model_id="eleven_flash_v2_5"       # Flash model for low latency
     )
     await tts.init()
     
