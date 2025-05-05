@@ -26,10 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from telephony.twilio_handler import TwilioHandler
 from telephony.websocket_handler import WebSocketHandler
 from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
-from telephony.config import STT_INITIAL_PROMPT, STT_NO_CONTEXT, STT_TEMPERATURE, STT_PRESET
-from voice_ai_agent import VoiceAIAgent
 from integration.tts_integration import TTSIntegration
 from integration.pipeline import VoiceAIAgentPipeline
+from text_to_speech import ElevenLabsTTS  # Make sure to use ElevenLabs
 
 # Get Twilio credentials from environment
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
@@ -56,6 +55,32 @@ async def initialize_system():
     
     logger.info("Initializing Voice AI Agent with telephony speech enhancements...")
     
+    # Initialize TTS integration with ElevenLabs
+    tts = TTSIntegration(
+        voice_id="CwhRBWXzGAHq8TQ4Fs17",  # Roger voice
+        model_id="eleven_flash_v2_5"       # Flash model for low latency
+    )
+    await tts.init()
+    
+    # Create a simplified pipeline without full STT integration
+    voice_ai_pipeline = {
+        "tts_integration": tts
+    }
+    
+    # Get base URL from environment
+    base_url = os.getenv('BASE_URL')
+    if not base_url:
+        logger.error("BASE_URL not set in environment")
+        raise ValueError("BASE_URL must be set")
+    
+    logger.info(f"Using BASE_URL: {base_url}")
+    
+    # Initialize Twilio handler with simplified pipeline
+    twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
+    await twilio_handler.start()
+    
+    logger.info("System initialized successfully with ElevenLabs TTS enhancements")
+    
     # Define a generic telephony-optimized prompt that works with any knowledge base
     telephony_prompt = (
         "This is a telephone conversation with a customer. "
@@ -80,7 +105,10 @@ async def initialize_system():
     await agent.init()
     
     # Initialize TTS integration
-    tts = TTSIntegration()
+    tts = TTSIntegration(
+        voice_id="CwhRBWXzGAHq8TQ4Fs17",  # Roger voice
+        model_id="eleven_flash_v2_5"       # Flash model for low latency
+    )
     await tts.init()
     
     # Create pipeline

@@ -1,14 +1,11 @@
 """
-TTS Integration module for Voice AI Agent.
-
-This module provides functions for integrating text-to-speech
-capabilities with the Voice AI Agent system.
+TTS Integration module for Voice AI Agent with ElevenLabs.
 """
 import logging
 import time
 from typing import Optional, Dict, Any, AsyncIterator, Union, List, Callable, Awaitable
 
-from text_to_speech import DeepgramTTS, RealTimeResponseHandler, AudioProcessor
+from text_to_speech import ElevenLabsTTS
 
 logger = logging.getLogger(__name__)
 
@@ -22,20 +19,22 @@ class TTSIntegration:
     
     def __init__(
         self,
-        voice: Optional[str] = None,
+        voice_id: Optional[str] = None,
+        model_id: Optional[str] = None,
         enable_caching: bool = True
     ):
         """
         Initialize the TTS integration.
         
         Args:
-            voice: Voice ID to use for Deepgram TTS
+            voice_id: Voice ID to use for ElevenLabs TTS
+            model_id: Model ID to use for ElevenLabs TTS
             enable_caching: Whether to enable TTS caching
         """
-        self.voice = voice
+        self.voice_id = voice_id  # Will use default if None
+        self.model_id = model_id  # Will use default if None
         self.enable_caching = enable_caching
         self.tts_client = None
-        self.tts_handler = None
         self.initialized = False
         
         # Parameters for better conversation flow
@@ -48,19 +47,15 @@ class TTSIntegration:
             return
             
         try:
-            # Initialize the DeepgramTTS client with linear16 format
-            self.tts_client = DeepgramTTS(
-                voice=self.voice, 
-                enable_caching=self.enable_caching,
-                container_format="linear16",  # Use linear16 for PCM WAV
-                sample_rate=16000  # Set sample rate for telephony
+            # Initialize the ElevenLabs TTS client
+            self.tts_client = ElevenLabsTTS(
+                voice_id=self.voice_id, 
+                model_id=self.model_id,
+                enable_caching=self.enable_caching
             )
             
-            # Initialize the RealTimeResponseHandler
-            self.tts_handler = RealTimeResponseHandler(tts_streamer=None, tts_client=self.tts_client)
-            
             self.initialized = True
-            logger.info(f"Initialized TTS with voice: {self.voice or 'default'}, format: linear16")
+            logger.info(f"Initialized TTS with ElevenLabs - Voice: {self.voice_id or 'default'}, Model: {self.model_id or 'default'}")
         except Exception as e:
             logger.error(f"Error initializing TTS: {e}")
             raise
@@ -81,22 +76,6 @@ class TTSIntegration:
         try:
             # Get audio data from TTS client
             audio_data = await self.tts_client.synthesize(text)
-            
-            # Ensure the audio data has an even number of bytes
-            if len(audio_data) % 2 != 0:
-                audio_data = audio_data + b'\x00'
-                logger.debug("Padded audio data to make even length")
-            
-            # Add a short pause after speech for better conversation flow
-            if self.add_pause_after_speech:
-                # Generate silence based on pause_duration_ms
-                silence_size = int(16000 * (self.pause_duration_ms / 1000) * 2)  # 16-bit samples
-                silence_data = b'\x00' * silence_size
-                
-                # Append silence to audio data
-                audio_data = audio_data + silence_data
-                logger.debug(f"Added {self.pause_duration_ms}ms pause after speech")
-            
             return audio_data
         except Exception as e:
             logger.error(f"Error in text to speech conversion: {e}")
@@ -119,25 +98,8 @@ class TTSIntegration:
             await self.init()
         
         try:
-            # Track if we need to add the final pause
-            needs_final_pause = False
-            
             async for audio_chunk in self.tts_client.synthesize_streaming(text_generator):
-                # Ensure each chunk has an even number of bytes
-                if len(audio_chunk) % 2 != 0:
-                    audio_chunk = audio_chunk + b'\x00'
-                
-                # Only the last chunk should get the pause
-                needs_final_pause = True
                 yield audio_chunk
-            
-            # Add a pause at the end of the complete audio stream
-            if needs_final_pause and self.add_pause_after_speech:
-                # Generate silence based on pause_duration_ms
-                silence_size = int(16000 * (self.pause_duration_ms / 1000) * 2)  # 16-bit samples
-                silence_data = b'\x00' * silence_size
-                yield silence_data
-                logger.debug(f"Added {self.pause_duration_ms}ms pause at end of streaming audio")
                 
         except Exception as e:
             logger.error(f"Error in streaming text to speech: {e}")
@@ -163,11 +125,6 @@ class TTSIntegration:
         
         # Start measuring time
         start_time = time.time()
-        
-        # Reset the TTS handler for this new session
-        if self.tts_handler:
-            await self.tts_handler.stop()
-            self.tts_handler = RealTimeResponseHandler(tts_streamer=None, tts_client=self.tts_client)
         
         # Process each text chunk
         total_chunks = 0
@@ -225,18 +182,8 @@ class TTSIntegration:
             await self.init()
         
         try:
+            # Note: ElevenLabs doesn't directly support SSML
             audio_data = await self.tts_client.synthesize_with_ssml(ssml)
-            # Ensure even number of bytes
-            if len(audio_data) % 2 != 0:
-                audio_data = audio_data + b'\x00'
-            
-            # Add a pause at the end if needed
-            if self.add_pause_after_speech:
-                silence_size = int(16000 * (self.pause_duration_ms / 1000) * 2)
-                silence_data = b'\x00' * silence_size
-                audio_data = audio_data + silence_data
-                logger.debug(f"Added {self.pause_duration_ms}ms pause after SSML speech")
-                
             return audio_data
         except Exception as e:
             logger.error(f"Error in SSML processing: {e}")
@@ -244,8 +191,5 @@ class TTSIntegration:
     
     async def cleanup(self) -> None:
         """Clean up resources."""
-        if self.tts_handler:
-            try:
-                await self.tts_handler.stop()
-            except Exception as e:
-                logger.error(f"Error during TTS cleanup: {e}")
+        # No specific cleanup needed for ElevenLabs TTS client
+        pass
