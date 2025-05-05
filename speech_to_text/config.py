@@ -20,7 +20,7 @@ class STTConfig(BaseSettings):
     
     # STT settings
     model_name: str = Field(
-        default="general",
+        default="nova-2",  # Updated to nova-2
         description="Deepgram STT model to use"
     )
     
@@ -97,6 +97,8 @@ class STTConfig(BaseSettings):
         default={
             "tier": "enhanced",  # Use enhanced model for telephony
             "filler_words": False,  # Filter out um, uh, etc.
+            "numerals": True,  # Better number handling 
+            "domain": "telephony"  # Optimize for phone calls
         },
         description="Additional model options"
     )

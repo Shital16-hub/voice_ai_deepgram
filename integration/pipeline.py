@@ -400,7 +400,7 @@ class VoiceAIAgentPipeline:
     
     async def _transcribe_audio(self, audio: np.ndarray) -> tuple[str, float]:
         """
-        Transcribe audio data using either Deepgram or Whisper.
+        Transcribe audio data using Whisper.
         
         Args:
             audio: Audio data as numpy array
@@ -408,14 +408,10 @@ class VoiceAIAgentPipeline:
         Returns:
             Tuple of (transcription, duration)
         """
-        logger.info(f"Transcribing audio: {len(audio)} samples")
+        logger.info(f"Transcribing audio: {len(audio)} samples with Whisper")
         
-        # Check if we're using Deepgram STT
-        if self.using_deepgram:
-            return await self._transcribe_audio_deepgram(audio)
-        else:
-            # Fallback to original Whisper approach if not using Deepgram
-            return await self._transcribe_audio_whisper(audio)
+        # Always use Whisper approach
+        return await self._transcribe_audio_whisper(audio)
     
     async def _transcribe_audio_deepgram(self, audio: np.ndarray) -> tuple[str, float]:
         """
@@ -476,7 +472,13 @@ class VoiceAIAgentPipeline:
     
     async def _transcribe_audio_whisper(self, audio: np.ndarray) -> tuple[str, float]:
         """
-        Transcribe audio using Whisper STT (original implementation).
+        Transcribe audio using Whisper STT.
+        
+        Args:
+            audio: Audio data as numpy array
+            
+        Returns:
+            Tuple of (transcription, duration)
         """
         # Save original VAD setting
         original_vad = self.speech_recognizer.vad_enabled
@@ -512,9 +514,6 @@ class VoiceAIAgentPipeline:
             # Get final transcription
             transcription, duration = await self.speech_recognizer.stop_streaming()
             
-            # Clean up transcription
-            transcription = self.stt_helper.cleanup_transcription(transcription)
-            
             # Check if we got a valid transcription
             if not transcription or transcription.strip() == "" or transcription == "[BLANK_AUDIO]":
                 logger.warning("First transcription attempt returned empty result, trying again with higher temperature")
@@ -526,32 +525,8 @@ class VoiceAIAgentPipeline:
                 raw_transcription, duration = await self.speech_recognizer.stop_streaming()
                 transcription = self.stt_helper.cleanup_transcription(raw_transcription)
                 self.speech_recognizer.update_parameters(temperature=0.0)  # Reset temperature
-                
-                # If still no result, try one more time with more padding
-                if not transcription or transcription.strip() == "" or transcription == "[BLANK_AUDIO]":
-                    logger.warning("Second transcription attempt returned empty result, trying with more padding")
-                    
-                    # Add more padding (2 seconds total)
-                    more_padding = np.zeros(self.speech_recognizer.sample_rate * 1.0, dtype=np.float32)
-                    padded_audio = np.concatenate([audio, more_padding])
-                    
-                    self.speech_recognizer.start_streaming()
-                    self.speech_recognizer.update_parameters(temperature=0.4)  # Even higher temperature
-                    await self.speech_recognizer.process_audio_chunk(padded_audio)
-                    raw_transcription, duration = await self.speech_recognizer.stop_streaming()
-                    transcription = self.stt_helper.cleanup_transcription(raw_transcription)
-                    self.speech_recognizer.update_parameters(temperature=0.0)  # Reset temperature
         except Exception as e:
             logger.error(f"Error in transcription: {e}", exc_info=True)
-            # Try one more time with basic parameters
-            try:
-                logger.info("Trying transcription one more time after error")
-                self.speech_recognizer.start_streaming()
-                await self.speech_recognizer.process_audio_chunk(audio)
-                raw_transcription, duration = await self.speech_recognizer.stop_streaming()
-                transcription = self.stt_helper.cleanup_transcription(raw_transcription)
-            except Exception as e2:
-                logger.error(f"Second transcription attempt also failed: {e2}", exc_info=True)
         finally:
             # Restore original VAD setting
             self.speech_recognizer.vad_enabled = original_vad

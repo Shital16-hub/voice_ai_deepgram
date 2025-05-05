@@ -1,6 +1,5 @@
 """
-Voice AI Agent main class that coordinates all components with Deepgram STT integration.
-Generic version that works with any knowledge base.
+Voice AI Agent main class that coordinates all components with Whisper STT.
 """
 import os
 import logging
@@ -10,46 +9,46 @@ from typing import Optional, Dict, Any, Union, Callable, Awaitable
 import numpy as np
 from scipy import signal
 
-# Deepgram STT imports
-from speech_to_text.deepgram_stt import DeepgramStreamingSTT
+# Import Whisper STT instead of Deepgram
+from speech_to_text.streaming.whisper_streaming import StreamingWhisperASR
 from speech_to_text.stt_integration import STTIntegration
 from knowledge_base.conversation_manager import ConversationManager
 from knowledge_base.llama_index.document_store import DocumentStore
 from knowledge_base.llama_index.index_manager import IndexManager
 from knowledge_base.llama_index.query_engine import QueryEngine
 from text_to_speech import DeepgramTTS
+from whisper_config import *  # Import Whisper configurations
 
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """Main Voice AI Agent class that coordinates all components with Deepgram STT."""
+    """Main Voice AI Agent class that coordinates all components with Whisper STT."""
     
     def __init__(
         self,
         storage_dir: str = './storage',
         model_name: str = 'mistral:7b-instruct-v0.2-q4_0',
-        api_key: Optional[str] = None,
+        whisper_model_path: str = MODEL_PATH,
         llm_temperature: float = 0.7,
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with Deepgram STT.
+        Initialize the Voice AI Agent with Whisper STT.
         
         Args:
             storage_dir: Directory for persistent storage
             model_name: LLM model name for knowledge base
-            api_key: Deepgram API key (defaults to env variable)
+            whisper_model_path: Path to Whisper model file 
             llm_temperature: LLM temperature for response generation
             **kwargs: Additional parameters for customization
         """
         self.storage_dir = storage_dir
         self.model_name = model_name
-        self.api_key = api_key
+        self.whisper_model_path = whisper_model_path
         self.llm_temperature = llm_temperature
         
         # STT Parameters
-        self.stt_language = kwargs.get('language', 'en-US')
-        self.stt_model = kwargs.get('stt_model', 'nova-3')  # Default to Nova 3
+        self.stt_language = kwargs.get('language', LANGUAGE)
         self.stt_keywords = kwargs.get('keywords', ['price', 'plan', 'cost', 'subscription', 'service'])
         
         # Component placeholders
@@ -63,6 +62,13 @@ class VoiceAIAgent:
         self.noise_floor = 0.005
         self.noise_samples = []
         self.max_noise_samples = 20
+        
+        # Whisper specific parameters
+        self.whisper_temperature = kwargs.get('whisper_temperature', TEMPERATURE)
+        self.whisper_initial_prompt = kwargs.get('whisper_initial_prompt', INITIAL_PROMPT)
+        self.whisper_no_context = kwargs.get('whisper_no_context', NO_CONTEXT)
+        self.whisper_single_segment = kwargs.get('whisper_single_segment', SINGLE_SEGMENT)
+        self.whisper_preset = kwargs.get('whisper_preset', PRESET)
         
     def _process_audio(self, audio: np.ndarray) -> np.ndarray:
         """
@@ -134,18 +140,27 @@ class VoiceAIAgent:
                 )
         
     async def init(self):
-        """Initialize all components with Deepgram Nova 3 STT."""
-        logger.info("Initializing Voice AI Agent components with Deepgram Nova 3 STT...")
+        """Initialize all components with Whisper STT."""
+        logger.info("Initializing Voice AI Agent components with Whisper STT...")
         
-        # Initialize speech recognizer with Deepgram Nova 3
-        self.speech_recognizer = DeepgramStreamingSTT(
-            api_key=self.api_key,
-            model_name=self.stt_model,  # Use Nova 3 model
+        # Initialize speech recognizer with Whisper
+        self.speech_recognizer = StreamingWhisperASR(
+            model_path=self.whisper_model_path,
             language=self.stt_language,
-            sample_rate=16000,
-            encoding="linear16",
-            channels=1,
-            interim_results=True
+            n_threads=N_THREADS,
+            chunk_size_ms=CHUNK_SIZE_MS,
+            overlap_ms=OVERLAP_MS,
+            silence_threshold=SILENCE_THRESHOLD,
+            min_silence_ms=MIN_SILENCE_MS,
+            max_chunk_size_ms=MAX_CHUNK_SIZE_MS,
+            vad_enabled=VAD_ENABLED,
+            translate=False,
+            temperature=self.whisper_temperature,
+            initial_prompt=self.whisper_initial_prompt,
+            max_tokens=MAX_TOKENS,
+            no_context=self.whisper_no_context,
+            single_segment=self.whisper_single_segment,
+            preset=self.whisper_preset
         )
         
         # Initialize STT integration 
@@ -180,7 +195,7 @@ class VoiceAIAgent:
         # Initialize TTS client
         self.tts_client = DeepgramTTS()
         
-        logger.info("Voice AI Agent initialization complete with Deepgram Nova 3 STT")
+        logger.info("Voice AI Agent initialization complete with Whisper STT")
         
     async def process_audio(
         self,
@@ -188,7 +203,7 @@ class VoiceAIAgent:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        Process audio data with Deepgram STT.
+        Process audio data with Whisper STT.
         
         Args:
             audio_data: Audio data as numpy array or bytes
@@ -204,7 +219,7 @@ class VoiceAIAgent:
         if isinstance(audio_data, np.ndarray):
             audio_data = self._process_audio(audio_data)
         
-        # Use STT integration for processing with Deepgram
+        # Use STT integration for processing with Whisper
         result = await self.stt_integration.transcribe_audio_data(audio_data, callback=callback)
         
         # Only process valid transcriptions
@@ -252,7 +267,7 @@ class VoiceAIAgent:
         results_count = 0
         
         # Start streaming session
-        await self.speech_recognizer.start_streaming()
+        self.speech_recognizer.start_streaming()
         
         try:
             # Process each audio chunk
@@ -263,50 +278,43 @@ class VoiceAIAgent:
                 if isinstance(chunk, np.ndarray):
                     chunk = self._process_audio(chunk)
                 
-                # Convert to bytes for Deepgram if needed
-                if isinstance(chunk, np.ndarray):
-                    audio_bytes = (chunk * 32767).astype(np.int16).tobytes()
-                else:
-                    audio_bytes = chunk
-                    
-                # Process through Deepgram
+                # Define callback to process results
                 async def process_result(result):
-                    # Only handle final results
-                    if result.is_final:
-                        # Clean up transcription
-                        transcription = self.stt_integration.cleanup_transcription(result.text)
+                    # Clean up transcription
+                    transcription = self.stt_integration.cleanup_transcription(result.text)
+                    
+                    # Process if valid
+                    if transcription and self.stt_integration.is_valid_transcription(transcription):
+                        # Get response from conversation manager
+                        response = await self.conversation_manager.handle_user_input(transcription)
                         
-                        # Process if valid
-                        if transcription and self.stt_integration.is_valid_transcription(transcription):
-                            # Get response from conversation manager
-                            response = await self.conversation_manager.handle_user_input(transcription)
-                            
-                            # Format result
-                            result_data = {
-                                "transcription": transcription,
-                                "response": response.get("response", ""),
-                                "confidence": result.confidence,
-                                "is_final": True
-                            }
-                            
-                            nonlocal results_count
-                            results_count += 1
-                            
-                            # Call callback if provided
-                            if result_callback:
-                                await result_callback(result_data)
+                        # Format result
+                        result_data = {
+                            "transcription": transcription,
+                            "response": response.get("response", ""),
+                            "confidence": result.confidence,
+                            "is_final": True
+                        }
+                        
+                        nonlocal results_count
+                        results_count += 1
+                        
+                        # Call callback if provided
+                        if result_callback:
+                            await result_callback(result_data)
                 
-                # Process chunk
-                await self.speech_recognizer.process_audio_chunk(audio_bytes, process_result)
+                # Process chunk with Whisper
+                await self.speech_recognizer.process_audio_chunk(chunk, process_result)
                 
             # Stop streaming session
-            await self.speech_recognizer.stop_streaming()
+            transcription, _ = await self.speech_recognizer.stop_streaming()
             
             # Return stats
             return {
                 "status": "complete",
                 "chunks_processed": chunks_processed,
                 "results_count": results_count,
+                "final_transcription": transcription,
                 "total_time": time.time() - start_time
             }
             
@@ -335,7 +343,7 @@ class VoiceAIAgent:
         """Shut down all components properly."""
         logger.info("Shutting down Voice AI Agent...")
         
-        # Close Deepgram streaming session if active
+        # Close Whisper streaming session if active
         if self.speech_recognizer and hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming:
             await self.speech_recognizer.stop_streaming()
         

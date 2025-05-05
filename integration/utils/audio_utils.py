@@ -15,6 +15,44 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+def preprocess_telephony_audio(audio: np.ndarray) -> np.ndarray:
+    """
+    Preprocess telephony audio for better speech recognition.
+    
+    Args:
+        audio: Audio data as numpy array
+        
+    Returns:
+        Processed audio data
+    """
+    from scipy import signal
+    
+    try:
+        # Apply high-pass filter to remove low-frequency noise
+        b, a = signal.butter(6, 100/(16000/2), 'highpass')
+        audio = signal.filtfilt(b, a, audio)
+        
+        # Apply band-pass filter for telephony frequency range
+        b, a = signal.butter(4, [300/(16000/2), 3400/(16000/2)], 'band')
+        audio = signal.filtfilt(b, a, audio)
+        
+        # Apply pre-emphasis to boost high frequencies
+        audio = np.append(audio[0], audio[1:] - 0.97 * audio[:-1])
+        
+        # Apply noise gate
+        threshold = 0.01
+        audio = np.where(np.abs(audio) < threshold, 0, audio)
+        
+        # Normalize audio level
+        max_val = np.max(np.abs(audio))
+        if max_val > 0:
+            audio = audio * (0.9 / max_val)
+        
+        return audio
+    except Exception as e:
+        logger.error(f"Error preprocessing telephony audio: {e}")
+        return audio  # Return original if processing fails
+
 def convert_mp3_to_wav(
     mp3_data: bytes,
     target_sample_rate: int = 16000,
