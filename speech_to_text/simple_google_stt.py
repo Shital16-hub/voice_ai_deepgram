@@ -51,41 +51,20 @@ class SimpleGoogleSTT:
         self.utterance_id = 0
     
     def _get_config(self):
-        """Get an enhanced recognition config specifically for telephony."""
+        """Get the recognition config."""
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=self.sample_rate,
             language_code=self.language_code,
-            enable_automatic_punctuation=True,
-            use_enhanced=True,  # Use enhanced model
-            model="phone_call",  # Explicitly use phone_call model
-            audio_channel_count=1,  # Mono audio
-            # Add these parameters 
-            enable_word_time_offsets=True,  # Get word timing
-            speech_contexts=[{
-                # Add common telephony words to improve recognition
-                "phrases": [
-                    "help", "yes", "no", "please", "thank you",
-                    "pricing", "plan", "cost", "features", "support",
-                    "account", "service", "question", "information"
-                ],
-                "boost": 15.0  # Boost recognition of these phrases
-            }],
-            # Adjust these settings for telephony
-            profanity_filter=False,  # Don't filter profanity
-            # Add these to improve handling of silence/speech transitions
-            metadata={
-                "interaction_type": "PHONE_CALL",
-                "microphone_distance": "NEARFIELD",
-                "original_media_type": "PHONE_LINE",
-                "recording_device_type": "PHONE_LINE"
-            }
+            enable_automatic_punctuation=self.enable_automatic_punctuation,
+            use_enhanced=True,
+            model="phone_call",
+            audio_channel_count=1
         )
         
         streaming_config = speech.StreamingRecognitionConfig(
             config=config,
-            interim_results=True,
-            single_utterance=False  # IMPORTANT: Set to False to continue listening
+            interim_results=True
         )
         
         return streaming_config

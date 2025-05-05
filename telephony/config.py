@@ -41,12 +41,9 @@ RESPONSE_TIMEOUT = 4.0      # Maximum time to wait for a response (seconds)
 MIN_TRANSCRIPTION_LENGTH = 3  # Increased from 2 to avoid processing noise/short utterances
 
 # Noise Filtering Settings
-HIGH_PASS_FILTER = 150
-LOW_PASS_FILTER = 3400 
-NOISE_GATE_THRESHOLD = 0.01  # Noise gate threshold
+HIGH_PASS_FILTER = 80       # High-pass filter cutoff frequency in Hz
+NOISE_GATE_THRESHOLD = 0.015  # Noise gate threshold
 ENABLE_NOISE_FILTERING = True  # Enable enhanced noise filtering
-DYNAMIC_RANGE_COMPRESSION = True
-VOICE_CLARITY_BOOST = True
 
 # Logging Configuration
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')

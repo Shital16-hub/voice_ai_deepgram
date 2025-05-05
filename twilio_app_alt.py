@@ -16,7 +16,6 @@ from simple_websocket import Server, ConnectionClosed
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from twilio.rest import Client
-from voice_ai_agent import VoiceAIAgent
 
 # Load environment variables
 load_dotenv()
@@ -27,9 +26,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from telephony.twilio_handler import TwilioHandler
 from telephony.websocket_handler import WebSocketHandler
 from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
+from telephony.config import STT_INITIAL_PROMPT, STT_NO_CONTEXT, STT_TEMPERATURE, STT_PRESET
+from voice_ai_agent import VoiceAIAgent
 from integration.tts_integration import TTSIntegration
 from integration.pipeline import VoiceAIAgentPipeline
-from text_to_speech import ElevenLabsTTS  # Make sure to use ElevenLabs
 
 # Get Twilio credentials from environment
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
@@ -56,22 +56,6 @@ async def initialize_system():
     
     logger.info("Initializing Voice AI Agent with telephony speech enhancements...")
     
-    # Initialize audio enhancer for improved voice quality
-    from telephony.audio_enhancer import AudioEnhancer
-    audio_enhancer = AudioEnhancer(
-        enable_compression=True,
-        enable_noise_gate=True,
-        enable_eq=True
-    )
-    
-    # Initialize TTS integration with ElevenLabs
-    tts = TTSIntegration(
-        voice="CwhRBWXzGAHq8TQ4Fs17",  # Roger voice - good for telephony
-        enable_caching=True,
-        # model_id="eleven_flash_v2_5"    # Flash model for low latency
-    )
-    await tts.init()
-    
     # Define a generic telephony-optimized prompt that works with any knowledge base
     telephony_prompt = (
         "This is a telephone conversation with a customer. "
@@ -82,34 +66,30 @@ async def initialize_system():
     )
     
     # Initialize Voice AI Agent with enhanced parameters that are knowledge-base agnostic
-    try:
-        agent = VoiceAIAgent(
-            storage_dir='./storage',
-            model_name='mistral:7b-instruct-v0.2-q4_0',
-            whisper_model_path='models/base.en',
-            llm_temperature=0.7,
-            # Pass generic telephony-optimized parameters
-            whisper_initial_prompt=telephony_prompt,
-            whisper_temperature=0.0,  # Greedy decoding for more reliable transcription
-            whisper_no_context=True,  # Each utterance is independent
-            whisper_preset="default"
-        )
-        await agent.init()
-        
-        # Create pipeline with the agent components
-        voice_ai_pipeline = VoiceAIAgentPipeline(
-            speech_recognizer=agent.speech_recognizer,
-            conversation_manager=agent.conversation_manager,
-            query_engine=agent.query_engine,
-            tts_integration=tts
-        )
-    except Exception as e:
-        logger.error(f"Error initializing Voice AI Agent: {e}", exc_info=True)
-        # Fall back to a simpler pipeline with just TTS if full initialization fails
-        logger.warning("Falling back to simplified pipeline with TTS only")
-        voice_ai_pipeline = {
-            "tts_integration": tts
-        }
+    agent = VoiceAIAgent(
+        storage_dir='./storage',
+        model_name='mistral:7b-instruct-v0.2-q4_0',
+        whisper_model_path='models/base.en',
+        llm_temperature=0.7,
+        # Pass generic telephony-optimized parameters
+        whisper_initial_prompt=telephony_prompt,
+        whisper_temperature=0.0,  # Greedy decoding for more reliable transcription
+        whisper_no_context=True,  # Each utterance is independent
+        whisper_preset="default"
+    )
+    await agent.init()
+    
+    # Initialize TTS integration
+    tts = TTSIntegration()
+    await tts.init()
+    
+    # Create pipeline
+    voice_ai_pipeline = VoiceAIAgentPipeline(
+        speech_recognizer=agent.speech_recognizer,
+        conversation_manager=agent.conversation_manager,
+        query_engine=agent.query_engine,
+        tts_integration=tts
+    )
     
     # Get base URL from environment
     base_url = os.getenv('BASE_URL')
@@ -121,45 +101,10 @@ async def initialize_system():
     
     # Initialize Twilio handler
     twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
-    
-    # Configure audio processor with enhanced settings
-    if hasattr(twilio_handler, 'audio_processor'):
-        twilio_handler.audio_processor.noise_gate_threshold = 0.01
-        twilio_handler.audio_processor.highpass_cutoff = 150
-        twilio_handler.audio_processor.lowpass_cutoff = 3400
-        twilio_handler.audio_processor.target_volume = 0.85
-        logger.info("Configured audio processor with enhanced telephony settings")
-    
     await twilio_handler.start()
     
-    # Additional audio quality checks
-    try:
-        # Test the TTS pipeline to ensure it's producing valid audio
-        test_text = "This is a test of the voice system."
-        test_audio = await tts.text_to_speech(test_text)
-        
-        if test_audio and len(test_audio) > 0:
-            logger.info(f"TTS test successful: generated {len(test_audio)} bytes")
-            
-            # Check audio format
-            if test_audio[:4] == b'RIFF':
-                logger.info("TTS output is in WAV format")
-            elif test_audio[0:2] == b'\xFF\xFB' or test_audio.find(b'ID3') == 0:
-                logger.info("TTS output is in MP3 format - will be converted to WAV for Twilio")
-        else:
-            logger.error("TTS test failed: no audio generated")
-    except Exception as e:
-        logger.error(f"Error testing TTS pipeline: {e}")
-    
-    # Check FFmpeg installation
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        logger.info("FFmpeg is installed and working correctly")
-    except Exception as e:
-        logger.error(f"FFmpeg check failed: {e}. Audio conversion may not work properly.")
-        logger.error("Try installing FFmpeg with: apt-get install -y ffmpeg")
-    
-    logger.info("System initialized successfully with telephony speech enhancements")
+    logger.info("System initialized successfully with knowledge-base agnostic speech enhancements")
+
 @app.route('/', methods=['GET'])
 def index():
     """Simple test endpoint."""
@@ -169,6 +114,7 @@ def index():
 def handle_incoming_call():
     """Handle incoming voice calls using WebSocket stream."""
     logger.info("Received incoming call request")
+    logger.info(f"Request headers: {request.headers}")
     logger.info(f"Request form data: {request.form}")
     
     if not twilio_handler:
@@ -190,39 +136,28 @@ def handle_incoming_call():
         # Add call to manager
         twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
         
-        # Create TwiML response with enhanced audio settings
+        # Create TwiML response
         response = VoiceResponse()
         
-        # Add clear intro with higher-quality voice settings
-        response.say(
-            "Welcome to the Voice AI Agent. I'm here to help you.", 
-            voice='alice',
-            language='en-US'
-        )
+        # Add initial greeting
+        response.say("Welcome to the Voice AI Agent. I'm here to help you.", voice='alice')
+        response.pause(length=1)
         
-        # Add a slightly longer pause for the connection to stabilize
-        response.pause(length=1.5)
-        
-        # Set up WebSocket stream
+        # Use WebSocket streaming for real-time conversation
         ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
         logger.info(f"Setting up WebSocket stream at: {ws_url}")
         
-        # Create simple streaming connection - removing parameters that aren't supported
+        # Create the streaming connection
         connect = Connect()
         stream = Stream(url=ws_url)
         connect.append(stream)
         response.append(connect)
         
-        # Add clear instruction
-        response.say(
-            "Welcome to the Voice Assistant. I'm here to help you with information about our products and services. Please speak clearly after the tone.", 
-            voice='alice',
-            language='en-US'
-        )
+        # Add TwiML to keep connection alive if needed
+        response.say("The AI assistant is now listening. Please speak clearly.", voice='alice')
         
         logger.info(f"Generated TwiML for WebSocket streaming: {response}")
         return Response(str(response), mimetype='text/xml')
-    
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
         fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
@@ -230,7 +165,7 @@ def handle_incoming_call():
     <Say>An error occurred. Please try again later.</Say>
 </Response>'''
         return Response(fallback_twiml, mimetype='text/xml')
-        
+
 @app.route('/voice/status', methods=['POST'])
 def handle_status_callback():
     """Handle call status callbacks."""
@@ -251,26 +186,25 @@ def handle_status_callback():
         # Handle status update
         twilio_handler.handle_status_callback(call_sid, call_status)
         
-        # Check if call_sid exists in event loops before trying to delete
-        if call_sid in call_event_loops:
+        # Clean up event loop if call is completed
+        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
             # Clean up the event loop for this call
-            loop_info = call_event_loops[call_sid]
-            # Signal termination
-            if 'terminate_flag' in loop_info:
-                loop_info['terminate_flag'].set()
+            if call_sid in call_event_loops:
+                loop_info = call_event_loops[call_sid]
+                # Signal termination
+                if 'terminate_flag' in loop_info:
+                    loop_info['terminate_flag'].set()
+                    
+                # Remove from dictionary
+                if loop_info.get('thread'):
+                    # Wait for thread to join with timeout
+                    thread = loop_info['thread']
+                    thread.join(timeout=1.0)
+                    
+                # Remove from tracking
+                del call_event_loops[call_sid]
+                logger.info(f"Cleaned up event loop resources for call {call_sid}")
                 
-            # Remove from dictionary
-            if loop_info.get('thread'):
-                # Wait for thread to join with timeout
-                thread = loop_info['thread']
-                thread.join(timeout=1.0)
-                
-            # Remove from tracking
-            del call_event_loops[call_sid]
-            logger.info(f"Cleaned up event loop resources for call {call_sid}")
-        else:
-            logger.debug(f"Call {call_sid} not found in event loops, nothing to clean up")
-            
         return Response('', status=204)
     except Exception as e:
         logger.error(f"Error handling status callback: {e}", exc_info=True)

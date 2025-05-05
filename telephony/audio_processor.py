@@ -1,16 +1,11 @@
 """
-Enhanced audio processing utilities for telephony integration with ElevenLabs TTS.
+Enhanced audio processing utilities for telephony integration with Deepgram STT.
 
 Handles audio format conversion between Twilio and Voice AI Agent.
 """
 import audioop
 import numpy as np
 import logging
-import os
-import tempfile
-import subprocess
-import io
-import wave
 from typing import Tuple, Dict, Any
 from scipy import signal
 
@@ -21,32 +16,16 @@ logger = logging.getLogger(__name__)
 class AudioProcessor:
     """
     Handles audio conversion between Twilio and Voice AI formats with improved noise handling.
-    Optimized for ElevenLabs TTS integration.
+    Optimized for Deepgram STT integration.
     
     Twilio uses 8kHz mulaw encoding, while our Voice AI uses 16kHz PCM.
     """
-    
-    def __init__(self):
-        """Initialize audio processor with enhanced voice quality settings."""
-        # Noise reduction parameters
-        self.noise_gate_threshold = 0.015  # Noise gate threshold
-        self.highpass_cutoff = 100         # High-pass filter cutoff (Hz)
-        self.lowpass_cutoff = 3400         # Low-pass filter cutoff (Hz)
-        self.pre_emphasis = 0.97           # Pre-emphasis factor
-        
-        # Voice optimization parameters
-        self.compression_threshold = 0.3    # Compression threshold
-        self.compression_ratio = 0.7        # Compression ratio
-        self.target_volume = 0.8            # Target volume (0-1)
-        
-        # Audio quality checks
-        self.min_acceptable_quality = 0.2   # Minimum energy level for acceptable quality
     
     @staticmethod
     def mulaw_to_pcm(mulaw_data: bytes) -> np.ndarray:
         """
         Convert Twilio's mulaw audio to PCM for Voice AI with enhanced noise filtering.
-        Optimized for speech recognition processing.
+        Optimized for Deepgram STT processing.
         
         Args:
             mulaw_data: Audio data in mulaw format
@@ -74,46 +53,37 @@ class AudioProcessor:
             audio_array = np.frombuffer(pcm_data_16k, dtype=np.int16)
             audio_array = audio_array.astype(np.float32) / 32768.0
             
-            # Apply enhanced audio filtering optimized for speech recognition
+            # Apply enhanced audio filtering optimized for Deepgram
+            # Apply high-pass filter to remove low-frequency noise
+            b, a = signal.butter(6, 100/(SAMPLE_RATE_AI/2), 'highpass')
+            audio_array = signal.filtfilt(b, a, audio_array)
             
-            # 1. Apply pre-emphasis filter to boost higher frequencies (improves speech detection)
-            pre_emphasis = 0.97
-            emphasized_audio = np.append(audio_array[0], audio_array[1:] - pre_emphasis * audio_array[:-1])
+            # Apply band-pass filter for telephony freq range (300-3400 Hz)
+            b, a = signal.butter(4, [300/(SAMPLE_RATE_AI/2), 3400/(SAMPLE_RATE_AI/2)], 'band')
+            audio_array = signal.filtfilt(b, a, audio_array)
             
-            # 2. Apply high-pass filter to remove low-frequency noise (below 80Hz)
-            nyquist = SAMPLE_RATE_AI / 2
-            high_pass = 80 / nyquist
-            b_high, a_high = signal.butter(6, high_pass, 'highpass')
-            high_passed = signal.filtfilt(b_high, a_high, emphasized_audio)
-            
-            # 3. Apply band-pass filter for telephony freq range (300-3400 Hz)
-            low_band = 300 / nyquist
-            high_band = 3400 / nyquist
-            b_band, a_band = signal.butter(4, [low_band, high_band], 'band')
-            band_passed = signal.filtfilt(b_band, a_band, high_passed)
-            
-            # 4. Apply a simple noise gate
+            # Apply a simple noise gate
             noise_threshold = 0.015  # Adjusted threshold
-            noise_gate = np.where(np.abs(band_passed) < noise_threshold, 0, band_passed)
+            audio_array = np.where(np.abs(audio_array) < noise_threshold, 0, audio_array)
             
-            # 5. Normalize for consistent volume
-            max_val = np.max(np.abs(noise_gate))
+            # Apply pre-emphasis filter to boost higher frequencies
+            audio_array = np.append(audio_array[0], audio_array[1:] - 0.97 * audio_array[:-1])
+            
+            # Normalize for consistent volume
+            max_val = np.max(np.abs(audio_array))
             if max_val > 0:
-                normalized = noise_gate * (0.95 / max_val)
-            else:
-                normalized = noise_gate
+                audio_array = audio_array * (0.9 / max_val)
             
             # Check audio levels
-            audio_level = np.mean(np.abs(normalized)) * 100
-            logger.debug(f"Converted {len(mulaw_data)} bytes to {len(normalized)} samples. Audio level: {audio_level:.1f}%")
+            audio_level = np.mean(np.abs(audio_array)) * 100
+            logger.debug(f"Converted {len(mulaw_data)} bytes to {len(audio_array)} samples. Audio level: {audio_level:.1f}%")
             
             # Apply a gain if audio is very quiet
-            if audio_level > 0:
-                # Safely apply gain to quiet audio
-                normalized = normalized * min(5.0, 5.0/audio_level)
-                logger.debug(f"Applied gain to quiet audio. New level: {np.mean(np.abs(normalized)) * 100:.1f}%")
+            if audio_level < 1.0:  # Very quiet audio
+                audio_array = audio_array * min(5.0, 5.0/audio_level)
+                logger.debug(f"Applied gain to quiet audio. New level: {np.mean(np.abs(audio_array)) * 100:.1f}%")
             
-            return normalized
+            return audio_array
             
         except Exception as e:
             logger.error(f"Error converting mulaw to PCM: {e}")
@@ -123,7 +93,7 @@ class AudioProcessor:
     @staticmethod
     def pcm_to_mulaw(pcm_data: bytes) -> bytes:
         """
-        Convert PCM audio to mulaw for Twilio.
+        Convert PCM audio from Voice AI to mulaw for Twilio.
         
         Args:
             pcm_data: Audio data in PCM format
@@ -158,9 +128,10 @@ class AudioProcessor:
             # Return empty data rather than raising an exception
             return b''
     
-    def normalize_audio(self, audio_data: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def normalize_audio(audio_data: np.ndarray) -> np.ndarray:
         """
-        Normalize audio to [-1, 1] range with improved loudness.
+        Normalize audio to [-1, 1] range.
         
         Args:
             audio_data: Audio data as numpy array
@@ -168,30 +139,16 @@ class AudioProcessor:
         Returns:
             Normalized audio data
         """
-        if len(audio_data) == 0:
-            return audio_data
-            
-        # Calculate RMS (power) for audio leveling
-        rms = np.sqrt(np.mean(np.square(audio_data)))
-        target_rms = 0.2  # Target RMS power (good loudness for speech)
-        
-        # If audio is already loud enough, just do peak normalization
         max_val = np.max(np.abs(audio_data))
         if max_val > 0:
-            if rms >= target_rms:
-                # Just prevent clipping
-                return audio_data * (0.95 / max_val)
-            else:
-                # Apply gain to reach target RMS
-                gain = min(target_rms / rms, 5.0)  # Limit gain to 5x to prevent noise amplification
-                return np.clip(audio_data * gain, -0.95, 0.95)
-        
+            return audio_data / max_val
         return audio_data
     
-    def enhance_audio(self, audio_data: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def enhance_audio(audio_data: np.ndarray) -> np.ndarray:
         """
         Enhance audio quality by reducing noise and improving speech clarity.
-        Optimized for speech recognition processing.
+        Optimized for Deepgram STT processing.
         
         Args:
             audio_data: Audio data as numpy array
@@ -200,141 +157,166 @@ class AudioProcessor:
             Enhanced audio data
         """
         try:
-            # Skip processing if audio is empty
-            if len(audio_data) == 0:
-                return audio_data
-                
             # 1. Apply high-pass filter to remove low-frequency noise (below 80Hz)
             # Telephone lines often have low frequency hum
-            b, a = signal.butter(4, self.highpass_cutoff/(SAMPLE_RATE_AI/2), 'highpass')
+            b, a = signal.butter(4, 80/(SAMPLE_RATE_AI/2), 'highpass')
             filtered_audio = signal.filtfilt(b, a, audio_data)
             
-            # 2. Apply pre-emphasis filter to boost higher frequencies (for better speech detection)
-            emphasized = np.append(filtered_audio[0], filtered_audio[1:] - self.pre_emphasis * filtered_audio[:-1])
+            # 2. Apply a mild de-emphasis filter to reduce hissing sounds in phone calls
+            b, a = signal.butter(1, 3000/(SAMPLE_RATE_AI/2), 'low')
+            de_emphasis = signal.filtfilt(b, a, filtered_audio)
             
-            # 3. Apply a mild de-emphasis filter to reduce hissing sounds in phone calls
-            b, a = signal.butter(1, self.lowpass_cutoff/(SAMPLE_RATE_AI/2), 'low')
-            de_emphasis = signal.filtfilt(b, a, emphasized)
+            # 3. Apply a simple noise gate to remove background noise
+            noise_threshold = 0.005  # Adjust based on expected noise level
+            noise_gate = np.where(np.abs(de_emphasis) < noise_threshold, 0, de_emphasis)
             
-            # 4. Apply a simple noise gate to remove background noise
-            noise_gate = np.where(np.abs(de_emphasis) < self.noise_gate_threshold, 0, de_emphasis)
+            # 4. Apply pre-emphasis filter to boost higher frequencies (for better speech detection)
+            pre_emphasis = np.append(noise_gate[0], noise_gate[1:] - 0.97 * noise_gate[:-1])
             
-            # 5. Apply dynamic range compression for more consistent volume
-            # Calculate the signal magnitude
-            magnitude = np.abs(noise_gate)
-            
-            # Determine which samples exceed the threshold
-            above_threshold = magnitude > self.compression_threshold
-            
-            # Prepare the gain array (initialize with ones)
-            gain = np.ones_like(magnitude)
-            
-            # Calculate the gain to apply for samples above threshold
-            if np.any(above_threshold):
-                compressed_magnitude = self.compression_threshold + \
-                                      (magnitude[above_threshold] - self.compression_threshold) * \
-                                      self.compression_ratio
-                gain[above_threshold] = compressed_magnitude / magnitude[above_threshold]
-            
-            # Apply the gain
-            compressed = noise_gate * gain
-            
-            # 6. Normalize to target volume
-            max_val = np.max(np.abs(compressed))
-            if max_val > 0:
-                normalized = compressed * (self.target_volume / max_val)
+            # 5. Normalize audio to have consistent volume
+            if np.max(np.abs(pre_emphasis)) > 0:
+                normalized = pre_emphasis / np.max(np.abs(pre_emphasis)) * 0.95
             else:
-                normalized = compressed
+                normalized = pre_emphasis
+            
+            # 6. Apply a mild compression to even out volumes
+            # Compression ratio 2:1 for values above threshold
+            threshold = 0.2
+            ratio = 0.5  # 2:1 compression
+            
+            def compressor(x, threshold, ratio):
+                # If below threshold, leave it alone
+                # If above threshold, compress it
+                mask = np.abs(x) > threshold
+                sign = np.sign(x)
+                mag = np.abs(x)
+                compressed = np.where(
+                    mask,
+                    threshold + (mag - threshold) * ratio,
+                    mag
+                )
+                return sign * compressed
+            
+            compressed = compressor(normalized, threshold, ratio)
+            
+            # Re-normalize after compression
+            if np.max(np.abs(compressed)) > 0:
+                result = compressed / np.max(np.abs(compressed)) * 0.95
+            else:
+                result = compressed
                 
-            return normalized
+            return result
             
         except Exception as e:
             logger.error(f"Error enhancing audio: {e}")
             # Return original audio if enhancement fails
             return audio_data
-    
-    def prepare_audio_for_telephony(
-        self,
-        audio_data: bytes,
-        format: str = 'mp3',
-        target_sample_rate: int = 8000,
-        target_channels: int = 1
-    ) -> bytes:
+            
+    @staticmethod
+    def detect_silence(audio_data: np.ndarray, threshold: float = 0.01) -> bool:
         """
-        Prepare audio data for telephony systems with ElevenLabs support.
-        Optimized with telephony-specific filters for clearer speech.
+        Enhanced silence detection with frequency analysis.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            threshold: Silence threshold
+            
+        Returns:
+            True if audio is considered silence
+        """
+        try:
+            # 1. Check energy level
+            energy = np.mean(np.abs(audio_data))
+            energy_silence = energy < threshold
+            
+            # Only do more expensive analysis if the energy check isn't conclusive
+            if energy < threshold * 2:  # If energy is low but not definitely silent
+                # 2. Check zero-crossing rate (white noise has high ZCR)
+                zcr = np.sum(np.abs(np.diff(np.signbit(audio_data)))) / len(audio_data)
+                
+                # 3. Check spectral flatness (noise typically has flatter spectrum)
+                # Approximate with FFT magnitude variance
+                fft_data = np.abs(np.fft.rfft(audio_data))
+                spectral_flatness = np.std(fft_data) / (np.mean(fft_data) + 1e-10)
+                
+                # Combined decision - true silence has low energy, low-moderate ZCR, and low spectral flatness
+                return energy_silence and zcr < 0.1 and spectral_flatness < 2.0
+            
+            # If energy is very low or very high, just use that criterion
+            return energy_silence
+            
+        except Exception as e:
+            logger.error(f"Error in silence detection: {e}")
+            # Fall back to simple energy threshold
+            return np.mean(np.abs(audio_data)) < threshold
+    
+    @staticmethod
+    def get_audio_info(audio_data: bytes) -> Dict[str, Any]:
+        """
+        Get information about audio data.
         
         Args:
             audio_data: Audio data as bytes
-            format: Source format ('mp3', 'wav', etc.)
-            target_sample_rate: Target sample rate in Hz
-            target_channels: Target number of channels
             
         Returns:
-            Processed audio data as bytes
+            Dictionary with audio information
+        """
+        info = {
+            "size_bytes": len(audio_data)
+        }
+        
+        # Try to determine if mulaw or pcm
+        if len(audio_data) > 0:
+            # Check first few bytes for common patterns
+            if audio_data[:4] == b'RIFF':
+                info["format"] = "wav"
+            else:
+                # Rough guess based on values
+                sample_values = np.frombuffer(audio_data[:100], dtype=np.uint8)
+                if np.any(sample_values > 127):
+                    info["format"] = "mulaw"
+                else:
+                    info["format"] = "pcm"
+        
+        return info
+    
+    @staticmethod
+    def float32_to_pcm16(audio_data: np.ndarray) -> bytes:
+        """
+        Convert float32 audio to 16-bit PCM bytes.
+        
+        Args:
+            audio_data: Audio data as numpy array (float32)
+            
+        Returns:
+            Audio data as 16-bit PCM bytes
+        """
+        # Ensure audio is in [-1, 1] range
+        audio_data = np.clip(audio_data, -1.0, 1.0)
+        
+        # Convert to int16
+        audio_int16 = (audio_data * 32767).astype(np.int16)
+        
+        # Convert to bytes
+        return audio_int16.tobytes()
+    
+    @staticmethod
+    def pcm16_to_float32(audio_data: bytes) -> np.ndarray:
+        """
+        Convert 16-bit PCM bytes to float32 audio.
+        
+        Args:
+            audio_data: Audio data as 16-bit PCM bytes
+            
+        Returns:
+            Audio data as numpy array (float32)
         """
         try:
-            # Verify ffmpeg is installed
-            try:
-                subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-            except (subprocess.SubprocessError, FileNotFoundError):
-                logger.error("ffmpeg not found! Please install it with: apt-get install -y ffmpeg")
-                raise RuntimeError("ffmpeg not installed")
+            # Convert to numpy array
+            audio_int16 = np.frombuffer(audio_data, dtype=np.int16)
             
-            # Create temporary files
-            with tempfile.NamedTemporaryFile(suffix=f'.{format}', delete=False) as src_file:
-                src_file.write(audio_data)
-                src_path = src_file.name
-            
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as wav_file:
-                wav_path = wav_file.name
-            
-            # Build ffmpeg command with SPECIFIC telephony optimizations:
-            cmd = [
-                'ffmpeg',
-                '-i', src_path,
-                '-acodec', 'pcm_mulaw',  # μ-law encoding for telephony
-                '-ar', str(target_sample_rate),  # 8kHz for telephony
-                '-ac', str(target_channels),     # Mono for telephony
-                
-                # Critical audio filter chain for telephony - do not modify!
-                '-af', 'highpass=f=200,lowpass=f=3400,compand=0.02|0.05:-60/-60|-40/-10|-20/-8|0/-6:6:0:-90:0.2,volume=3.0',
-                # This filter chain:
-                # 1. Removes frequencies below 200Hz (eliminates rumble/hum)
-                # 2. Removes frequencies above 3400Hz (telephone bandpass)
-                # 3. Applies compression for consistent volume
-                # 4. Increases overall volume for better audibility
-                
-                '-y',  # Overwrite output file if it exists
-                wav_path
-            ]
-            
-            # Run ffmpeg with detailed error capture
-            logger.debug(f"Running ffmpeg with telephony-optimized command: {' '.join(cmd)}")
-            process = subprocess.run(cmd, check=True, capture_output=True)
-            
-            if process.stderr:
-                stderr_output = process.stderr.decode('utf-8', errors='ignore')
-                if "Error" in stderr_output or "Invalid" in stderr_output:
-                    logger.warning(f"FFmpeg warnings or errors: {stderr_output}")
-            
-            # Read the output file
-            with open(wav_path, 'rb') as f:
-                processed_audio = f.read()
-            
-            # Log successful conversion details
-            logger.info(f"Converted {len(audio_data)} bytes of {format} to {len(processed_audio)} bytes of telephony audio")
-            
-            # Clean up temporary files
-            os.unlink(src_path)
-            os.unlink(wav_path)
-            
-            return processed_audio
-            
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "Unknown error"
-            logger.error(f"FFmpeg error: {stderr}")
-            raise RuntimeError(f"Error preparing audio for telephony: {stderr}")
+            # Convert to float32
+            return audio_int16.astype(np.float32) / 32768.0
         except Exception as e:
-            logger.error(f"Error in prepare_audio_for_telephony: {str(e)}")
-            raise
+            logger.error(f"Error converting PCM16 to float32: {e}")
+            return np.array([], dtype=np.float32)

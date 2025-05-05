@@ -1,5 +1,3 @@
-# text_to_speech/config.py
-
 """
 Configuration settings for the Text-to-Speech module.
 """
@@ -14,28 +12,28 @@ load_dotenv()
 class TTSConfig(BaseSettings):
     """Configuration for Text-to-Speech module."""
     
-    # ElevenLabs API settings
-    elevenlabs_api_key: str = Field(
-        default=os.getenv("ELEVENLABS_API_KEY", ""),
-        description="ElevenLabs API Key for TTS services"
+    # Deepgram API settings
+    deepgram_api_key: str = Field(
+        default=os.getenv("DEEPGRAM_API_KEY", ""),
+        description="Deepgram API Key for TTS services"
     )
     
     # TTS settings
-    model_id: str = Field(
-        default="eleven_flash_v2_5",
-        description="ElevenLabs TTS model to use (optimized for telephony)"
+    model: str = Field(
+        default="aura-asteria-en",
+        description="Deepgram TTS model to use"
     )
-    voice_id: str = Field(
-        default="CwhRBWXzGAHq8TQ4Fs17",  # Roger voice
-        description="Voice ID for the TTS system"
+    voice: str = Field(
+        default="aura-asteria-en",  # Default voice
+        description="Voice for the TTS system"
     )
     sample_rate: int = Field(
         default=24000,
         description="Audio sample rate in Hz"
     )
-    output_format: str = Field(
-        default="mp3_44100_128",
-        description="Audio output format"
+    container_format: str = Field(
+        default="mp3",
+        description="Audio container format (mp3, wav, etc.)"
     )
     
     # Streaming settings
@@ -45,7 +43,7 @@ class TTSConfig(BaseSettings):
     )
     max_text_chunk_size: int = Field(
         default=100,
-        description="Maximum text chunk size to send to ElevenLabs at once"
+        description="Maximum text chunk size to send to Deepgram at once"
     )
     stream_timeout: float = Field(
         default=10.0,
