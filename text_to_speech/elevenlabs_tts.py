@@ -71,9 +71,9 @@ class ElevenLabsTTS:
     def _get_voice_settings(self) -> Dict[str, Any]:
         """Get voice settings optimized for telephony."""
         return {
-            "stability": 0.75,  # Higher stability for consistent telephony output
-            "similarity_boost": 0.75,  # Balanced voice characteristic preservation
-            "style": 0.0,  # Neutral style
+            "stability": 0.8,          # Higher stability for clearer output
+            "similarity_boost": 0.65,  # Slightly reduced for better clarity
+            "style": 0.0,              # Neutral style for telephony
             "use_speaker_boost": True  # Enhance clarity for telephony
         }
     

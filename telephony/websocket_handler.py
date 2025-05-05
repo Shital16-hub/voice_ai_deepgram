@@ -1005,7 +1005,7 @@ class WebSocketHandler:
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """
-        Send audio data to Twilio with enhanced format verification.
+        Send audio data to Twilio with improved chunking for better quality.
         
         Args:
             audio_data: Audio data as bytes
@@ -1017,45 +1017,17 @@ class WebSocketHandler:
                 logger.warning("Attempted to send empty audio data")
                 return
             
-            # Verify correct format for Twilio (should be μ-law WAV)
-            if len(audio_data) >= 12:
-                # Check for WAV header
-                if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
-                    logger.debug(f"Sending WAV audio: {len(audio_data)} bytes")
-                    
-                    # Verify WAV is in μ-law format
-                    # This is a simplistic check - in production you'd check the format chunk
-                    pass
-                    
-                # Check for MP3 header (rough check)
-                elif (audio_data[0:2] == b'\xFF\xFB' or 
-                      audio_data[0:2] == b'ID3' or 
-                      audio_data.find(b'ID3') == 0):
-                    logger.error(f"Audio appears to be MP3, not converted properly: {len(audio_data)} bytes")
-                    
-                    # Try to convert on the fly as a fallback
-                    try:
-                        audio_data = self.audio_processor.prepare_audio_for_telephony(
-                            audio_data,
-                            format="mp3",
-                            target_sample_rate=8000,
-                            target_channels=1
-                        )
-                        logger.info(f"Converted MP3 to μ-law on the fly: {len(audio_data)} bytes")
-                    except Exception as conv_error:
-                        logger.error(f"Error converting MP3 to μ-law: {conv_error}")
-                        return  # Don't send incompatible audio
-                    
             # Check connection status
             if not self.connected:
                 logger.warning("WebSocket connection is closed, cannot send audio")
                 return
             
-            # Split audio into smaller chunks to avoid timeouts
-            chunk_size = 4000  # Smaller chunks (250ms of audio at 8kHz mono)
+            # Use larger chunk size for smoother playback - CRITICAL FOR QUALITY
+            chunk_size = 4000  # ~250ms for 8kHz μ-law (larger chunks = smoother playback)
             chunks = [audio_data[i:i+chunk_size] for i in range(0, len(audio_data), chunk_size)]
             
-            logger.debug(f"Splitting {len(audio_data)} bytes into {len(chunks)} chunks")
+            # Log details about chunking
+            logger.info(f"Sending audio response ({len(audio_data)} bytes) in {len(chunks)} chunks")
             
             for i, chunk in enumerate(chunks):
                 try:
@@ -1074,9 +1046,10 @@ class WebSocketHandler:
                     # Send message
                     ws.send(json.dumps(message))
                     
-                    # Add a small delay between chunks to prevent flooding
+                    # Add consistent delay between chunks - CRITICAL FOR QUALITY
+                    # This timing is carefully calibrated for telephony audio
                     if i < len(chunks) - 1:
-                        await asyncio.sleep(0.02)  # 20ms delay between chunks
+                        await asyncio.sleep(0.08)  # 80ms delay for 8000Hz audio
                     
                 except Exception as e:
                     if "Connection closed" in str(e):
@@ -1087,8 +1060,6 @@ class WebSocketHandler:
                     else:
                         logger.error(f"Error sending audio chunk {i+1}/{len(chunks)}: {e}")
                         return
-            
-            logger.debug(f"Sent {len(chunks)} audio chunks ({len(audio_data)} bytes total)")
             
         except Exception as e:
             logger.error(f"Error sending audio: {e}", exc_info=True)
