@@ -347,7 +347,9 @@ class WebSocketHandler:
         
         # State tracking
         self.is_speaking = False
-        self.silence_start_time = None
+        self.speech_interrupted = False
+        self.barge_in_enabled = False  # Will be set based on stream configuration
+        self.current_audio_chunks = []
         self.is_processing = False
         self.conversation_active = True
         self.sequence_number = 0  # For Twilio media sequence tracking
@@ -388,7 +390,7 @@ class WebSocketHandler:
         # Set up ElevenLabs TTS with optimized settings for Twilio
         self.elevenlabs_tts = None
         
-        logger.info(f"WebSocketHandler initialized for call {call_sid} with Google Cloud Speech and ElevenLabs TTS")
+        logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support")
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
@@ -451,8 +453,10 @@ class WebSocketHandler:
         return cleaned_text
     
     def is_valid_transcription(self, text: str) -> bool:
+        
         """
         Check if a transcription is valid and worth processing.
+        Modified to handle questions properly for barge-in scenarios.
         
         Args:
             text: Transcription text
@@ -473,9 +477,21 @@ class WebSocketHandler:
             logger.info(f"Transcription contains non-speech patterns: {text}")
             return False
             
+        # Basic checks for valid question patterns that should always pass
+        question_starters = ["what", "who", "where", "when", "why", "how", "can", "could", "do", "does", "is", "are"]
+        lowered_text = cleaned_text.lower()
+        
+        # Allow questions even if they contain uncertainty markers
+        for starter in question_starters:
+            if lowered_text.startswith(starter):
+                logger.info(f"Allowing question pattern: {text}")
+                return True
+        
         # Estimate confidence based on presence of uncertainty markers
+        # BUT DON'T COUNT QUESTION MARKS as uncertainty markers
         confidence_estimate = 1.0
-        if "?" in text or "[" in text or "(" in text or "<" in text:
+        uncertainty_markers = ["[", "(", "<"]  # Removed '?' from this list
+        if any(marker in text for marker in uncertainty_markers):
             confidence_estimate = 0.6  # Lower confidence if it contains uncertainty markers
             logger.info(f"Reduced confidence due to uncertainty markers: {text}")
             
@@ -493,7 +509,7 @@ class WebSocketHandler:
     
     async def handle_message(self, message: str, ws) -> None:
         """
-        Handle incoming WebSocket message.
+        Handle incoming WebSocket message with barge-in support.
         
         Args:
             message: JSON message from Twilio
@@ -520,6 +536,8 @@ class WebSocketHandler:
                 await self._handle_stop(data)
             elif event_type == 'mark':
                 await self._handle_mark(data)
+            elif event_type == 'bargein':  # New event type for barge-in detection
+                await self._handle_bargein(data, ws)
             else:
                 logger.warning(f"Unknown event type: {event_type}")
             
@@ -549,7 +567,7 @@ class WebSocketHandler:
     
     async def _handle_start(self, data: Dict[str, Any], ws) -> None:
         """
-        Handle stream start event.
+        Handle stream start event with barge-in configuration.
         
         Args:
             data: Start event data
@@ -559,11 +577,16 @@ class WebSocketHandler:
         logger.info(f"Stream started - SID: {self.stream_sid}, Call: {self.call_sid}")
         logger.info(f"Start data: {data}")
         
+        # Extract barge-in configuration if available
+        self.barge_in_enabled = data.get('bargeIn', False)
+        logger.info(f"Barge-in detection: {'Enabled' if self.barge_in_enabled else 'Disabled'}")
+        
         # Reset state for new stream
         self.input_buffer.clear()
         self.output_buffer.clear()
         self.is_speaking = False
         self.is_processing = False
+        self.speech_interrupted = False
         self.silence_start_time = None
         self.last_transcription = ""
         self.last_response_time = time.time()
@@ -688,6 +711,36 @@ class WebSocketHandler:
                 self.google_speech_active = False
             except Exception as e:
                 logger.error(f"Error stopping Google Cloud Speech streaming session: {e}")
+
+    async def _handle_bargein(self, data: Dict[str, Any], ws) -> None:
+        """
+        Handle barge-in event when user interrupts the system.
+        
+        Args:
+            data: Barge-in event data
+            ws: WebSocket connection
+        """
+        logger.info(f"Barge-in detected - user interrupted the system. Data: {data}")
+        
+        # Stop any ongoing speech
+        self.speech_interrupted = True
+        
+        # Clear current audio chunks to stop sending
+        self.current_audio_chunks = []
+        
+        # Clear input buffer to start fresh with new user input
+        self.input_buffer.clear()
+        
+        # Reset state for new input
+        self.is_speaking = False
+        self.is_processing = False
+        self.last_response_time = 0  # Reset to allow immediate processing
+        
+        # Send a small acknowledgment if desired
+        # await self.send_text_response("I'm listening", ws)
+        
+        logger.info("Barge-in processed - ready for new user input")
+
     
     async def _handle_mark(self, data: Dict[str, Any]) -> None:
         """
@@ -969,30 +1022,44 @@ class WebSocketHandler:
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """
-        Send audio data to Twilio.
+        Send audio data to Twilio with barge-in awareness.
         
         Args:
             audio_data: Audio data as bytes
             ws: WebSocket connection
         """
         try:
+            # Mark that we're speaking
+            self.is_speaking = True
+            self.speech_interrupted = False
+            
             # Ensure the audio data is valid
             if not audio_data or len(audio_data) == 0:
                 logger.warning("Attempted to send empty audio data")
+                self.is_speaking = False
                 return
                 
             # Check connection status
             if not self.connected:
                 logger.warning("WebSocket connection is closed, cannot send audio")
+                self.is_speaking = False
                 return
             
-            # Split audio into smaller chunks to avoid timeouts
-            chunk_size = 4000  # Smaller chunks (250ms of audio at 8kHz mono)
+            # Split audio into smaller chunks for better responsiveness
+            chunk_size = 1000  # Smaller chunks (62.5ms of audio at 8kHz mono)
             chunks = [audio_data[i:i+chunk_size] for i in range(0, len(audio_data), chunk_size)]
             
-            logger.debug(f"Splitting {len(audio_data)} bytes into {len(chunks)} chunks")
+            logger.debug(f"Splitting {len(audio_data)} bytes into {len(chunks)} chunks for playback")
+            
+            # Store chunks for potential interruption
+            self.current_audio_chunks = chunks.copy()
             
             for i, chunk in enumerate(chunks):
+                # Check if we've been interrupted before sending each chunk
+                if self.speech_interrupted:
+                    logger.info(f"Speech playback interrupted after sending {i}/{len(chunks)} chunks")
+                    break
+                    
                 try:
                     # Encode audio to base64
                     audio_base64 = base64.b64encode(chunk).decode('utf-8')
@@ -1009,8 +1076,8 @@ class WebSocketHandler:
                     # Send message
                     ws.send(json.dumps(message))
                     
-                    # Add a small delay between chunks to prevent flooding
-                    if i < len(chunks) - 1:
+                    # Add a small delay between chunks to allow for interruption
+                    if i < len(chunks) - 1:  # Don't delay after the last chunk
                         await asyncio.sleep(0.02)  # 20ms delay between chunks
                     
                 except Exception as e:
@@ -1018,15 +1085,19 @@ class WebSocketHandler:
                         logger.warning(f"WebSocket connection closed while sending chunk {i+1}/{len(chunks)}")
                         self.connected = False
                         self.connection_active.clear()
+                        self.is_speaking = False
                         return
                     else:
                         logger.error(f"Error sending audio chunk {i+1}/{len(chunks)}: {e}")
+                        self.is_speaking = False
                         return
             
-            logger.debug(f"Sent {len(chunks)} audio chunks ({len(audio_data)} bytes total)")
+            logger.debug(f"Sent {i+1}/{len(chunks)} audio chunks ({len(audio_data)} bytes total)")
+            self.is_speaking = False
             
         except Exception as e:
             logger.error(f"Error sending audio: {e}", exc_info=True)
+            self.is_speaking = False
             if "Connection closed" in str(e):
                 self.connected = False
                 self.connection_active.clear()

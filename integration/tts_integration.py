@@ -68,10 +68,28 @@ class TTSIntegration:
         except Exception as e:
             logger.error(f"Error initializing TTS: {e}")
             raise
+
+    async def cancel_ongoing_tts(self) -> None:
+        """
+        Cancel any ongoing TTS generation for barge-in support.
+        """
+        if hasattr(self, 'current_tts_task') and self.current_tts_task:
+            logger.info("Canceling ongoing TTS generation")
+            
+            # Cancel the task
+            self.current_tts_task.cancel()
+            try:
+                await self.current_tts_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Error canceling TTS task: {e}")
+            
+            self.current_tts_task = None
     
     async def text_to_speech(self, text: str) -> bytes:
         """
-        Convert text to speech.
+        Convert text to speech with barge-in support.
         
         Args:
             text: Text to convert to speech
@@ -83,28 +101,52 @@ class TTSIntegration:
             await self.init()
         
         try:
-            # Get audio data from TTS client
-            audio_data = await self.tts_client.synthesize(text)
+            # Store the TTS task reference for potential cancellation
+            self.current_tts_task = asyncio.create_task(self._generate_speech(text))
             
-            # Ensure the audio data has an even number of bytes
-            if len(audio_data) % 2 != 0:
-                audio_data = audio_data + b'\x00'
-                logger.debug("Padded audio data to make even length")
-            
-            # Add a short pause after speech for better conversation flow
-            if self.add_pause_after_speech:
-                # Generate silence based on pause_duration_ms
-                silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz for Twilio
-                silence_data = b'\x00' * silence_size
+            try:
+                # Wait for TTS completion or interruption
+                audio_data = await self.current_tts_task
+                self.current_tts_task = None
                 
-                # Append silence to audio data
-                audio_data = audio_data + silence_data
-                logger.debug(f"Added {self.pause_duration_ms}ms pause after speech")
-            
-            return audio_data
+                # Ensure the audio data has an even number of bytes
+                if len(audio_data) % 2 != 0:
+                    audio_data = audio_data + b'\x00'
+                    logger.debug("Padded audio data to make even length")
+                
+                # Add a short pause after speech for better conversation flow
+                if self.add_pause_after_speech:
+                    # Generate silence based on pause_duration_ms
+                    silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz for Twilio
+                    silence_data = b'\x00' * silence_size
+                    
+                    # Append silence to audio data
+                    audio_data = audio_data + silence_data
+                    logger.debug(f"Added {self.pause_duration_ms}ms pause after speech")
+                
+                return audio_data
+            except asyncio.CancelledError:
+                logger.info("TTS generation was cancelled for barge-in")
+                return b''  # Return empty audio if cancelled
+                
         except Exception as e:
             logger.error(f"Error in text to speech conversion: {e}")
             raise
+
+    async def _generate_speech(self, text: str) -> bytes:
+        
+        """
+        Generate speech from text using ElevenLabs.
+        
+        Args:
+            text: Text to convert to speech
+            
+        Returns:
+            Audio data as bytes
+        """
+        # Get audio data from TTS client
+        audio_data = await self.tts_client.synthesize(text)
+        return audio_data
     
     async def text_to_speech_streaming(
         self, 

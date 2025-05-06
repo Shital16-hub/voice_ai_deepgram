@@ -85,6 +85,20 @@ class VoiceAIAgentPipeline:
             return False
             
         return True
+
+    async def interrupt_current_response(self) -> bool:
+        """
+        Interrupt the current response for barge-in support.
+        
+        Returns:
+            True if an ongoing response was interrupted
+        """
+        # Stop TTS if it's ongoing
+        if hasattr(self, 'tts_integration') and self.tts_integration:
+            await self.tts_integration.cancel_ongoing_tts()
+            return True
+        
+        return False
     
     async def process_audio_file(
         self,

@@ -1,5 +1,5 @@
 """
-Main Twilio handler for voice calls.
+Main Twilio handler for voice calls with barge-in support.
 """
 import logging
 from typing import Optional, Dict, Any
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class TwilioHandler:
     """
-    Handles Twilio voice call operations.
+    Handles Twilio voice call operations with barge-in support.
     """
     
     def __init__(self, pipeline, base_url: str):
@@ -47,7 +47,7 @@ class TwilioHandler:
     
     def handle_incoming_call(self, from_number: str, to_number: str, call_sid: str) -> str:
         """
-        Handle incoming voice call with WebSocket streaming.
+        Handle incoming voice call with WebSocket streaming and barge-in detection.
         
         Args:
             from_number: Caller phone number
@@ -65,8 +65,12 @@ class TwilioHandler:
         # Create TwiML response
         response = VoiceResponse()
         
-        # Add initial greeting
-        response.say("Welcome to the Voice AI Agent. I'm here to help.", voice='alice')
+        # Add initial greeting with barge-in enabled
+        response.say("Welcome to the Voice AI Agent. I'm here to help.", 
+                    voice='alice', 
+                    playBeep=False,
+                    bargeIn=True)  # Enable barge-in
+        
         response.pause(length=1)
         
         try:
@@ -76,12 +80,15 @@ class TwilioHandler:
             
             # Use Connect and Stream for bidirectional audio streaming
             connect = Connect()
-            stream = Stream(url=ws_url)
+            # Add barge-in detector to the stream
+            stream = Stream(url=ws_url, bargeIn=True)
             connect.append(stream)
             response.append(connect)
             
-            # Add followup instruction to user
-            response.say("You can start speaking now. The AI assistant is listening.", voice='alice')
+            # Add followup instruction to user, also with barge-in enabled
+            response.say("You can start speaking now. The AI assistant is listening.", 
+                        voice='alice', 
+                        bargeIn=True)
             
             return str(response)
         except Exception as e:
@@ -116,7 +123,7 @@ class TwilioHandler:
         status_callback: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Place an outbound call.
+        Place an outbound call with barge-in support.
         
         Args:
             to_number: Destination phone number
@@ -132,12 +139,12 @@ class TwilioHandler:
         if not status_callback:
             status_callback = f"{self.base_url}/voice/status"
         
-        # Set up TwiML for outbound call
+        # Set up TwiML for outbound call with barge-in support
         twiml = f"""
         <Response>
-            <Say voice="alice">Hello! This is a call from the AI Voice Agent.</Say>
+            <Say voice="alice" bargeIn="true">Hello! This is a call from the AI Voice Agent.</Say>
             <Connect>
-                <Stream url="{self.base_url.replace('https://', 'wss://')}/ws/stream/outbound" />
+                <Stream url="{self.base_url.replace('https://', 'wss://')}/ws/stream/outbound" bargeIn="true" />
             </Connect>
         </Response>
         """

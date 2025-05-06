@@ -130,7 +130,7 @@ def index():
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
-    """Handle incoming voice calls using WebSocket stream."""
+    """Handle incoming voice calls using WebSocket stream with barge-in support."""
     logger.info("Received incoming call request")
     logger.info(f"Request headers: {request.headers}")
     logger.info(f"Request form data: {request.form}")
@@ -157,24 +157,28 @@ def handle_incoming_call():
         # Create TwiML response
         response = VoiceResponse()
         
-        # Add initial greeting
-        response.say("Welcome to the Voice AI Agent. I'm here to help you.", voice='alice')
+        # Add initial greeting with barge-in enabled
+        response.say("Welcome to the Voice AI Agent. I'm here to help you.", 
+                    voice='alice', 
+                    bargeIn=True)
         response.pause(length=1)
         
-        # Use WebSocket streaming for real-time conversation
+        # Use WebSocket streaming for real-time conversation with barge-in support
         ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
         logger.info(f"Setting up WebSocket stream at: {ws_url}")
         
-        # Create the streaming connection
+        # Create the streaming connection with barge-in enabled
         connect = Connect()
-        stream = Stream(url=ws_url)
+        stream = Stream(url=ws_url, bargeIn=True)
         connect.append(stream)
         response.append(connect)
         
         # Add TwiML to keep connection alive if needed
-        response.say("The AI assistant is now listening. Please speak clearly.", voice='alice')
+        response.say("The AI assistant is now listening. Please speak clearly.", 
+                    voice='alice',
+                    bargeIn=True)
         
-        logger.info(f"Generated TwiML for WebSocket streaming: {response}")
+        logger.info(f"Generated TwiML for WebSocket streaming with barge-in: {response}")
         return Response(str(response), mimetype='text/xml')
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
