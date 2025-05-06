@@ -1,7 +1,8 @@
 # voice_ai_agent.py
 
 """
-Voice AI Agent main class that coordinates all components with Google Cloud STT integration.
+Voice AI Agent main class that coordinates all components with Google Cloud STT integration
+and ElevenLabs TTS.
 Generic version that works with any knowledge base.
 """
 import os
@@ -19,12 +20,14 @@ from knowledge_base.conversation_manager import ConversationManager
 from knowledge_base.llama_index.document_store import DocumentStore
 from knowledge_base.llama_index.index_manager import IndexManager
 from knowledge_base.llama_index.query_engine import QueryEngine
-from text_to_speech import DeepgramTTS
+
+# ElevenLabs TTS imports
+from text_to_speech import ElevenLabsTTS
 
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """Main Voice AI Agent class that coordinates all components with Google Cloud STT."""
+    """Main Voice AI Agent class that coordinates all components with Google Cloud STT and ElevenLabs TTS."""
     
     def __init__(
         self,
@@ -34,7 +37,7 @@ class VoiceAIAgent:
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with Google Cloud STT.
+        Initialize the Voice AI Agent with Google Cloud STT and ElevenLabs TTS.
         
         Args:
             storage_dir: Directory for persistent storage
@@ -52,6 +55,11 @@ class VoiceAIAgent:
         
         # Whether to use enhanced model for telephony
         self.enhanced_model = kwargs.get('enhanced_model', True)
+        
+        # TTS Parameters for ElevenLabs
+        self.elevenlabs_api_key = kwargs.get('elevenlabs_api_key', os.getenv('ELEVENLABS_API_KEY'))
+        self.elevenlabs_voice_id = kwargs.get('elevenlabs_voice_id', os.getenv('TTS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM'))  # Default to Rachel voice
+        self.elevenlabs_model_id = kwargs.get('elevenlabs_model_id', os.getenv('TTS_MODEL_ID', 'eleven_monolingual_v1'))
         
         # Component placeholders
         self.speech_recognizer = None
@@ -135,8 +143,8 @@ class VoiceAIAgent:
                 )
         
     async def init(self):
-        """Initialize all components with Google Cloud STT."""
-        logger.info("Initializing Voice AI Agent components with Google Cloud STT...")
+        """Initialize all components with Google Cloud STT and ElevenLabs TTS."""
+        logger.info("Initializing Voice AI Agent components with Google Cloud STT and ElevenLabs TTS...")
         
         # Initialize speech recognizer with Google Cloud
         self.speech_recognizer = GoogleCloudStreamingSTT(
@@ -178,10 +186,25 @@ class VoiceAIAgent:
         )
         await self.conversation_manager.init()
         
-        # Initialize TTS client
-        self.tts_client = DeepgramTTS()
+        # Initialize ElevenLabs TTS client
+        try:
+            if not self.elevenlabs_api_key:
+                raise ValueError("ElevenLabs API key is required. Please set ELEVENLABS_API_KEY in environment variables.")
+                
+            self.tts_client = ElevenLabsTTS(
+                api_key=self.elevenlabs_api_key,
+                voice_id=self.elevenlabs_voice_id,
+                model_id=self.elevenlabs_model_id,
+                container_format="mulaw", # For Twilio compatibility
+                sample_rate=8000  # For Twilio compatibility
+            )
+            
+            logger.info(f"Initialized ElevenLabs TTS with voice ID: {self.elevenlabs_voice_id}, model ID: {self.elevenlabs_model_id}")
+        except Exception as e:
+            logger.error(f"Error initializing ElevenLabs TTS: {e}")
+            raise
         
-        logger.info("Voice AI Agent initialization complete with Google Cloud STT")
+        logger.info("Voice AI Agent initialization complete with Google Cloud STT and ElevenLabs TTS")
         
     async def process_audio(
         self,
@@ -216,11 +239,30 @@ class VoiceAIAgent:
             # Process through conversation manager
             response = await self.conversation_manager.handle_user_input(transcription)
             
-            return {
-                "transcription": transcription,
-                "response": response.get("response", ""),
-                "status": "success"
-            }
+            # Generate speech using ElevenLabs TTS
+            if response and response.get("response"):
+                try:
+                    speech_audio = await self.tts_client.synthesize(response["response"])
+                    return {
+                        "transcription": transcription,
+                        "response": response.get("response", ""),
+                        "speech_audio": speech_audio,
+                        "status": "success"
+                    }
+                except Exception as e:
+                    logger.error(f"Error synthesizing speech with ElevenLabs: {e}")
+                    return {
+                        "transcription": transcription,
+                        "response": response.get("response", ""),
+                        "error": f"Speech synthesis error: {str(e)}",
+                        "status": "tts_error"
+                    }
+            else:
+                return {
+                    "transcription": transcription,
+                    "response": response.get("response", ""),
+                    "status": "success"
+                }
         else:
             logger.info("Invalid or empty transcription")
             return {
@@ -276,10 +318,23 @@ class VoiceAIAgent:
                             # Get response from conversation manager
                             response = await self.conversation_manager.handle_user_input(transcription)
                             
+                            # Generate speech with ElevenLabs TTS
+                            speech_audio = None
+                            tts_error = None
+                            
+                            if response and response.get("response"):
+                                try:
+                                    speech_audio = await self.tts_client.synthesize(response["response"])
+                                except Exception as e:
+                                    logger.error(f"Error synthesizing speech with ElevenLabs: {e}")
+                                    tts_error = str(e)
+                            
                             # Format result
                             result_data = {
                                 "transcription": transcription,
                                 "response": response.get("response", ""),
+                                "speech_audio": speech_audio,
+                                "tts_error": tts_error,
                                 "confidence": result.confidence,
                                 "is_final": True
                             }
@@ -324,7 +379,8 @@ class VoiceAIAgent:
         """Check if all components are initialized."""
         return (self.speech_recognizer is not None and 
                 self.conversation_manager is not None and 
-                self.query_engine is not None)
+                self.query_engine is not None and
+                self.tts_client is not None)
                 
     async def shutdown(self):
         """Shut down all components properly."""

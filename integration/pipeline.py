@@ -2,7 +2,8 @@
 End-to-end pipeline orchestration for Voice AI Agent.
 
 This module provides high-level functions for running the complete
-STT -> Knowledge Base -> TTS pipeline with Google Cloud STT integration.
+STT -> Knowledge Base -> TTS pipeline with Google Cloud STT integration
+and ElevenLabs TTS.
 """
 import os
 import asyncio
@@ -29,7 +30,8 @@ class VoiceAIAgentPipeline:
     End-to-end pipeline orchestration for Voice AI Agent.
     
     Provides a high-level interface for running the complete
-    STT -> Knowledge Base -> TTS pipeline with Google Cloud STT.
+    STT -> Knowledge Base -> TTS pipeline with Google Cloud STT
+    and ElevenLabs TTS.
     """
     
     def __init__(
@@ -46,7 +48,7 @@ class VoiceAIAgentPipeline:
             speech_recognizer: Initialized STT component (Google Cloud or other)
             conversation_manager: Initialized conversation manager
             query_engine: Initialized query engine
-            tts_integration: Initialized TTS integration
+            tts_integration: Initialized TTS integration with ElevenLabs
         """
         self.speech_recognizer = speech_recognizer
         self.conversation_manager = conversation_manager
@@ -58,7 +60,7 @@ class VoiceAIAgentPipeline:
         
         # Determine if we're using Google Cloud STT
         self.using_google_cloud = isinstance(speech_recognizer, GoogleCloudStreamingSTT)
-        logger.info(f"Pipeline initialized with {'Google Cloud' if self.using_google_cloud else 'Other'} STT")
+        logger.info(f"Pipeline initialized with {'Google Cloud' if self.using_google_cloud else 'Other'} STT and ElevenLabs TTS")
     
     async def _is_valid_transcription(self, transcription: str) -> bool:
         """
@@ -160,12 +162,12 @@ class VoiceAIAgentPipeline:
             logger.error(f"Error in KB stage: {e}")
             return {"error": f"Knowledge base error: {str(e)}"}
         
-        # STAGE 3: Text-to-Speech
-        logger.info("STAGE 3: Text-to-Speech")
+        # STAGE 3: Text-to-Speech with ElevenLabs
+        logger.info("STAGE 3: Text-to-Speech with ElevenLabs")
         tts_start = time.time()
         
         try:
-            # Convert response to speech
+            # Convert response to speech using ElevenLabs
             speech_audio = await self.tts_integration.text_to_speech(response)
             
             # Save speech audio if output file specified
@@ -247,7 +249,7 @@ class VoiceAIAgentPipeline:
             logger.error(f"Error in transcription: {e}")
             return {"error": f"Transcription error: {str(e)}"}
         
-        # Stream the response with TTS
+        # Stream the response with ElevenLabs TTS
         try:
             # Stream the response directly to TTS
             total_chunks = 0
@@ -263,7 +265,7 @@ class VoiceAIAgentPipeline:
                     # Add to full response
                     full_response += chunk_text
                     
-                    # Convert to speech and send to callback
+                    # Convert to speech with ElevenLabs and send to callback
                     audio_data = await self.tts_integration.text_to_speech(chunk_text)
                     await audio_callback(audio_data)
                     
@@ -359,12 +361,12 @@ class VoiceAIAgentPipeline:
             logger.error(f"Error in KB stage: {e}")
             return {"error": f"Knowledge base error: {str(e)}"}
         
-        # STAGE 3: Text-to-Speech
-        logger.info("STAGE 3: Text-to-Speech")
+        # STAGE 3: Text-to-Speech with ElevenLabs
+        logger.info("STAGE 3: Text-to-Speech with ElevenLabs")
         tts_start = time.time()
         
         try:
-            # Convert response to speech
+            # Convert response to speech using ElevenLabs
             speech_audio = await self.tts_integration.text_to_speech(response)
             
             # Save speech audio if output file specified
@@ -601,7 +603,7 @@ class VoiceAIAgentPipeline:
                                     response = query_result.get("response", "")
                                     
                                     if response:
-                                        # Convert to speech
+                                        # Convert to speech using ElevenLabs
                                         speech_audio = await self.tts_integration.text_to_speech(response)
                                         
                                         # Send through callback
@@ -638,7 +640,7 @@ class VoiceAIAgentPipeline:
                                 response = query_result.get("response", "")
                                 
                                 if response:
-                                    # Convert to speech
+                                    # Convert to speech using ElevenLabs
                                     speech_audio = await self.tts_integration.text_to_speech(response)
                                     
                                     # Send through callback
@@ -675,7 +677,7 @@ class VoiceAIAgentPipeline:
                     final_response = query_result.get("response", "")
                     
                     if final_response:
-                        # Convert to speech
+                        # Convert to speech using ElevenLabs
                         final_speech = await self.tts_integration.text_to_speech(final_response)
                         
                         # Send through callback

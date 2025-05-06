@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced Twilio application using WebSocket streaming with improved noise handling.
+Enhanced Twilio application using WebSocket streaming with ElevenLabs TTS integration.
 """
 import os
 import sys
@@ -30,10 +30,16 @@ from telephony.config import STT_INITIAL_PROMPT, STT_NO_CONTEXT, STT_TEMPERATURE
 from voice_ai_agent import VoiceAIAgent
 from integration.tts_integration import TTSIntegration
 from integration.pipeline import VoiceAIAgentPipeline
+from text_to_speech import ElevenLabsTTS  # Import ElevenLabs TTS
 
 # Get Twilio credentials from environment
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+
+# Get ElevenLabs credentials from environment
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
+ELEVENLABS_VOICE_ID = os.getenv('TTS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default to Rachel voice
+ELEVENLABS_MODEL_ID = os.getenv('TTS_MODEL_ID', 'eleven_monolingual_v1')
 
 # Configure logging with more debug info
 logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
@@ -51,10 +57,15 @@ base_url = None
 call_event_loops = {}
 
 async def initialize_system():
-    """Initialize all system components with knowledge-base agnostic speech enhancements."""
+    """Initialize all system components with ElevenLabs TTS integration."""
     global twilio_handler, voice_ai_pipeline, base_url
     
-    logger.info("Initializing Voice AI Agent with telephony speech enhancements...")
+    logger.info("Initializing Voice AI Agent with ElevenLabs TTS integration...")
+    
+    # Verify ElevenLabs API key is set
+    if not ELEVENLABS_API_KEY:
+        logger.error("ELEVENLABS_API_KEY not set in environment")
+        raise ValueError("ELEVENLABS_API_KEY must be set")
     
     # Define a generic telephony-optimized prompt that works with any knowledge base
     telephony_prompt = (
@@ -75,12 +86,19 @@ async def initialize_system():
         whisper_initial_prompt=telephony_prompt,
         whisper_temperature=0.0,  # Greedy decoding for more reliable transcription
         whisper_no_context=True,  # Each utterance is independent
-        whisper_preset="default"
+        whisper_preset="default",
+        # Pass ElevenLabs parameters
+        elevenlabs_api_key=ELEVENLABS_API_KEY,
+        elevenlabs_voice_id=ELEVENLABS_VOICE_ID,
+        elevenlabs_model_id=ELEVENLABS_MODEL_ID
     )
     await agent.init()
     
-    # Initialize TTS integration
-    tts = TTSIntegration()
+    # Initialize TTS integration with ElevenLabs
+    tts = TTSIntegration(
+        voice_id=ELEVENLABS_VOICE_ID,  # Use ElevenLabs voice ID
+        enable_caching=True
+    )
     await tts.init()
     
     # Create pipeline
@@ -103,12 +121,12 @@ async def initialize_system():
     twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
     await twilio_handler.start()
     
-    logger.info("System initialized successfully with knowledge-base agnostic speech enhancements")
+    logger.info("System initialized successfully with ElevenLabs TTS integration")
 
 @app.route('/', methods=['GET'])
 def index():
     """Simple test endpoint."""
-    return "Voice AI Agent is running with improved noise handling!"
+    return "Voice AI Agent is running with ElevenLabs TTS integration!"
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
@@ -248,7 +266,7 @@ def run_event_loop_in_thread(loop, ws_handler, ws, call_sid, terminate_flag):
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream with improved noise handling."""
+    """Handle WebSocket media stream with ElevenLabs TTS."""
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
     if not twilio_handler or not voice_ai_pipeline:
@@ -260,7 +278,7 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Create WebSocket handler with noise handling optimizations
+        # Create WebSocket handler with ElevenLabs TTS
         ws_handler = WebSocketHandler(call_sid, voice_ai_pipeline)
         
         # Create an event loop for this connection
@@ -378,7 +396,7 @@ def ws_test():
         </script>
     </head>
     <body>
-        <h1>WebSocket Connection Test</h1>
+        <h1>WebSocket Connection Test with ElevenLabs TTS</h1>
         <input id="wsUrl" type="text" value="wss://your-runpod-url.proxy.runpod.net/ws/test" style="width:400px" />
         <button onclick="startTest()">Test Connection</button>
         <div id="output"></div>
@@ -393,7 +411,7 @@ def ws_test_endpoint():
         ws = Server.accept(request.environ)
         logger.info("WebSocket test connection established")
         
-        ws.send(json.dumps({"status": "connected", "message": "WebSocket test successful!"}))
+        ws.send(json.dumps({"status": "connected", "message": "WebSocket test with ElevenLabs TTS successful!"}))
         
         try:
             while True:
@@ -419,8 +437,41 @@ def health_check():
                        mimetype='application/json', 
                        status=503)
     
-    return Response(json.dumps({"status": "healthy"}), 
-                   mimetype='application/json')
+    return Response(json.dumps({
+        "status": "healthy",
+        "tts_provider": "ElevenLabs",
+        "voice_id": ELEVENLABS_VOICE_ID
+    }), mimetype='application/json')
+
+@app.route('/tts/voices', methods=['GET'])
+def list_voices():
+    """List available ElevenLabs voices."""
+    if not ELEVENLABS_API_KEY:
+        return Response(json.dumps({"error": "ElevenLabs API key not configured"}),
+                       mimetype='application/json',
+                       status=400)
+    
+    try:
+        # Call ElevenLabs API to get voices
+        response = requests.get(
+            "https://api.elevenlabs.io/v1/voices",
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY
+            }
+        )
+        
+        if response.status_code == 200:
+            voices = response.json()
+            return Response(json.dumps(voices),
+                          mimetype='application/json')
+        else:
+            return Response(json.dumps({"error": f"Failed to retrieve voices: {response.text}"}),
+                          mimetype='application/json',
+                          status=response.status_code)
+    except Exception as e:
+        return Response(json.dumps({"error": f"Failed to retrieve voices: {str(e)}"}),
+                      mimetype='application/json',
+                      status=500)
 
 if __name__ == '__main__':
     # Initialize the system
@@ -430,4 +481,5 @@ if __name__ == '__main__':
     # Run the server
     logger.info(f"Server starting on {HOST}:{PORT}")
     logger.info(f"BASE_URL: {os.getenv('BASE_URL')}")
+    logger.info(f"Using ElevenLabs TTS with voice ID: {ELEVENLABS_VOICE_ID}")
     app.run(host=HOST, port=PORT, debug=DEBUG)

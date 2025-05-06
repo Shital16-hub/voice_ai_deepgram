@@ -1,3 +1,5 @@
+# text_to_speech/config.py
+
 """
 Configuration settings for the Text-to-Speech module.
 """
@@ -12,28 +14,31 @@ load_dotenv()
 class TTSConfig(BaseSettings):
     """Configuration for Text-to-Speech module."""
     
-    # Deepgram API settings
-    deepgram_api_key: str = Field(
-        default=os.getenv("DEEPGRAM_API_KEY", ""),
-        description="Deepgram API Key for TTS services"
+    # ElevenLabs API settings
+    elevenlabs_api_key: str = Field(
+        default=os.getenv("ELEVENLABS_API_KEY", ""),
+        description="ElevenLabs API Key for TTS services"
     )
     
     # TTS settings
-    model: str = Field(
-        default="aura-asteria-en",
-        description="Deepgram TTS model to use"
+    model_id: str = Field(
+        default="eleven_monolingual_v1",  # or "eleven_multilingual_v2" for multilingual support
+        description="ElevenLabs model ID to use"
     )
-    voice: str = Field(
-        default="aura-asteria-en",  # Default voice
-        description="Voice for the TTS system"
+    
+    voice_id: str = Field(
+        default="21m00Tcm4TlvDq8ikWAM",  # Rachel voice ID
+        description="Voice ID for the TTS system"
     )
+    
     sample_rate: int = Field(
-        default=24000,
+        default=16000,
         description="Audio sample rate in Hz"
     )
+    
     container_format: str = Field(
-        default="mp3",
-        description="Audio container format (mp3, wav, etc.)"
+        default="mulaw",  # mulaw for Twilio compatibility
+        description="Audio container format (mp3, wav, mulaw)"
     )
     
     # Streaming settings
@@ -41,10 +46,12 @@ class TTSConfig(BaseSettings):
         default=1024,
         description="Size of audio chunks to process at once in bytes"
     )
+    
     max_text_chunk_size: int = Field(
         default=100,
-        description="Maximum text chunk size to send to Deepgram at once"
+        description="Maximum text chunk size to send to ElevenLabs at once"
     )
+    
     stream_timeout: float = Field(
         default=10.0,
         description="Timeout for streaming operations in seconds"
@@ -55,6 +62,7 @@ class TTSConfig(BaseSettings):
         default=True,
         description="Enable caching of TTS results"
     )
+    
     cache_dir: str = Field(
         default="./cache/tts_cache",
         description="Directory for caching TTS results"

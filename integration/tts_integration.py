@@ -1,14 +1,16 @@
+# integration/tts_integration.py
+
 """
 TTS Integration module for Voice AI Agent.
 
 This module provides functions for integrating text-to-speech
-capabilities with the Voice AI Agent system.
+capabilities with the Voice AI Agent system using ElevenLabs.
 """
 import logging
 import time
 from typing import Optional, Dict, Any, AsyncIterator, Union, List, Callable, Awaitable
 
-from text_to_speech import DeepgramTTS, RealTimeResponseHandler, AudioProcessor
+from text_to_speech import ElevenLabsTTS, RealTimeResponseHandler, AudioProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +24,17 @@ class TTSIntegration:
     
     def __init__(
         self,
-        voice: Optional[str] = None,
+        voice_id: Optional[str] = None,
         enable_caching: bool = True
     ):
         """
         Initialize the TTS integration.
         
         Args:
-            voice: Voice ID to use for Deepgram TTS
+            voice_id: Voice ID to use for ElevenLabs TTS
             enable_caching: Whether to enable TTS caching
         """
-        self.voice = voice
+        self.voice_id = voice_id
         self.enable_caching = enable_caching
         self.tts_client = None
         self.tts_handler = None
@@ -48,19 +50,19 @@ class TTSIntegration:
             return
             
         try:
-            # Initialize the DeepgramTTS client with linear16 format
-            self.tts_client = DeepgramTTS(
-                voice=self.voice, 
+            # Initialize the ElevenLabs TTS client with settings optimized for Twilio
+            self.tts_client = ElevenLabsTTS(
+                voice_id=self.voice_id, 
                 enable_caching=self.enable_caching,
-                container_format="linear16",  # Use linear16 for PCM WAV
-                sample_rate=16000  # Set sample rate for telephony
+                container_format="mulaw",  # Use mulaw for Twilio compatibility
+                sample_rate=8000  # Set sample rate for telephony
             )
             
             # Initialize the RealTimeResponseHandler
             self.tts_handler = RealTimeResponseHandler(tts_streamer=None, tts_client=self.tts_client)
             
             self.initialized = True
-            logger.info(f"Initialized TTS with voice: {self.voice or 'default'}, format: linear16")
+            logger.info(f"Initialized TTS with ElevenLabs, voice: {self.voice_id or 'default'}, format: mulaw for Twilio")
         except Exception as e:
             logger.error(f"Error initializing TTS: {e}")
             raise
@@ -90,7 +92,7 @@ class TTSIntegration:
             # Add a short pause after speech for better conversation flow
             if self.add_pause_after_speech:
                 # Generate silence based on pause_duration_ms
-                silence_size = int(16000 * (self.pause_duration_ms / 1000) * 2)  # 16-bit samples
+                silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz for Twilio
                 silence_data = b'\x00' * silence_size
                 
                 # Append silence to audio data
@@ -122,7 +124,7 @@ class TTSIntegration:
             # Track if we need to add the final pause
             needs_final_pause = False
             
-            async for audio_chunk in self.tts_client.synthesize_streaming(text_generator):
+            async for audio_chunk in self.tts_client.synthesize_with_streaming(text_generator):
                 # Ensure each chunk has an even number of bytes
                 if len(audio_chunk) % 2 != 0:
                     audio_chunk = audio_chunk + b'\x00'
@@ -134,7 +136,7 @@ class TTSIntegration:
             # Add a pause at the end of the complete audio stream
             if needs_final_pause and self.add_pause_after_speech:
                 # Generate silence based on pause_duration_ms
-                silence_size = int(16000 * (self.pause_duration_ms / 1000) * 2)  # 16-bit samples
+                silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz for Twilio
                 silence_data = b'\x00' * silence_size
                 yield silence_data
                 logger.debug(f"Added {self.pause_duration_ms}ms pause at end of streaming audio")
@@ -215,6 +217,8 @@ class TTSIntegration:
         """
         Process SSML text and convert to speech.
         
+        Note: ElevenLabs does not support SSML directly, so we strip SSML tags.
+        
         Args:
             ssml: SSML-formatted text
             
@@ -225,17 +229,24 @@ class TTSIntegration:
             await self.init()
         
         try:
-            audio_data = await self.tts_client.synthesize_with_ssml(ssml)
+            # ElevenLabs doesn't support SSML directly, so we need to strip SSML tags
+            # This is a simple approach and might not handle all SSML features
+            import re
+            text = re.sub(r'<[^>]*>', '', ssml)
+            
+            # Generate speech from the cleaned text
+            audio_data = await self.tts_client.synthesize(text)
+            
             # Ensure even number of bytes
             if len(audio_data) % 2 != 0:
                 audio_data = audio_data + b'\x00'
             
             # Add a pause at the end if needed
             if self.add_pause_after_speech:
-                silence_size = int(16000 * (self.pause_duration_ms / 1000) * 2)
+                silence_size = int(8000 * (self.pause_duration_ms / 1000))
                 silence_data = b'\x00' * silence_size
                 audio_data = audio_data + silence_data
-                logger.debug(f"Added {self.pause_duration_ms}ms pause after SSML speech")
+                logger.debug(f"Added {self.pause_duration_ms}ms pause after speech")
                 
             return audio_data
         except Exception as e:

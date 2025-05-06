@@ -1,5 +1,6 @@
 """
-WebSocket handler for Twilio media streams with Google Cloud Speech integration.
+WebSocket handler for Twilio media streams with Google Cloud Speech integration
+and ElevenLabs TTS.
 """
 import json
 import base64
@@ -23,6 +24,8 @@ from telephony.config import CHUNK_SIZE, AUDIO_BUFFER_SIZE, SILENCE_THRESHOLD, S
 import concurrent.futures
 import threading
 
+# Import ElevenLabs TTS
+from text_to_speech import ElevenLabsTTS
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +326,8 @@ class GoogleCloudSpeechHandler:
 
 class WebSocketHandler:
     """
-    Handles WebSocket connections for Twilio media streams with Google Cloud Speech integration.
+    Handles WebSocket connections for Twilio media streams with Google Cloud Speech integration
+    and ElevenLabs TTS.
     """
     
     def __init__(self, call_sid: str, pipeline):
@@ -383,7 +387,10 @@ class WebSocketHandler:
         # Ensure we start with a fresh speech recognition session
         self.google_speech_active = False
         
-        logger.info(f"WebSocketHandler initialized for call {call_sid} with Google Cloud Speech")
+        # Set up ElevenLabs TTS
+        self.elevenlabs_tts = None
+        
+        logger.info(f"WebSocketHandler initialized for call {call_sid} with Google Cloud Speech and ElevenLabs TTS")
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
@@ -566,6 +573,28 @@ class WebSocketHandler:
         self.noise_samples = []  # Reset noise samples
         self.google_speech_active = False  # Reset Google Speech session state
         
+        # Initialize ElevenLabs TTS if not already
+        if self.elevenlabs_tts is None:
+            try:
+                # Get API key from environment if not explicitly provided
+                import os
+                api_key = os.environ.get("ELEVENLABS_API_KEY")
+                voice_id = os.environ.get("TTS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default to Rachel voice
+                model_id = os.environ.get("TTS_MODEL_ID", "eleven_monolingual_v1")
+                
+                # Create ElevenLabs TTS client
+                self.elevenlabs_tts = ElevenLabsTTS(
+                    api_key=api_key,
+                    voice_id=voice_id,
+                    model_id=model_id,
+                    container_format="mulaw",  # For Twilio compatibility
+                    sample_rate=8000  # For Twilio compatibility
+                )
+                logger.info(f"Initialized ElevenLabs TTS with voice ID: {voice_id}")
+            except Exception as e:
+                logger.error(f"Error initializing ElevenLabs TTS: {e}")
+                # Will fall back to pipeline TTS integration
+        
         # Send a welcome message
         await self.send_text_response("I'm listening. How can I help you today?", ws)
         
@@ -710,7 +739,8 @@ class WebSocketHandler:
     
     async def _process_audio(self, ws) -> None:
         """
-        Process accumulated audio data through the pipeline with Google Cloud Speech.
+        Process accumulated audio data through the pipeline with Google Cloud Speech
+        and ElevenLabs TTS.
         
         Args:
             ws: WebSocket connection
@@ -809,28 +839,65 @@ class WebSocketHandler:
                             
                             logger.info(f"Generated response: {response}")
                             
-                            # Convert to speech
-                            if response and hasattr(self.pipeline, 'tts_integration'):
-                                speech_audio = await self.pipeline.tts_integration.text_to_speech(response)
-                                
-                                # Convert to mulaw for Twilio
-                                mulaw_audio = self.audio_processor.pcm_to_mulaw(speech_audio)
-                                
-                                # Send back to Twilio
-                                logger.info(f"Sending audio response ({len(mulaw_audio)} bytes)")
-                                await self._send_audio(mulaw_audio, ws)
-                                
-                                # Update state
-                                self.last_transcription = transcription
-                                self.last_response_time = time.time()
+                            # Convert to speech with ElevenLabs TTS
+                            if response:
+                                # Try using direct ElevenLabs TTS first, fall back to pipeline TTS integration
+                                try:
+                                    if self.elevenlabs_tts:
+                                        speech_audio = await self.elevenlabs_tts.synthesize(response)
+                                        logger.info(f"Generated speech with ElevenLabs TTS: {len(speech_audio)} bytes")
+                                    else:
+                                        # Fall back to pipeline's TTS integration
+                                        speech_audio = await self.pipeline.tts_integration.text_to_speech(response)
+                                        logger.info(f"Generated speech with pipeline TTS: {len(speech_audio)} bytes")
+                                                                        
+                                    # Convert to mulaw for Twilio if needed
+                                    if not self.elevenlabs_tts or self.elevenlabs_tts.container_format != "mulaw":
+                                        mulaw_audio = self.audio_processor.convert_to_mulaw(speech_audio)
+                                    else:
+                                        # Already in mulaw format from ElevenLabs
+                                        mulaw_audio = speech_audio
+                                    
+                                    # Send back to Twilio
+                                    logger.info(f"Sending audio response ({len(mulaw_audio)} bytes)")
+                                    await self._send_audio(mulaw_audio, ws)
+                                    
+                                    # Update state
+                                    self.last_transcription = transcription
+                                    self.last_response_time = time.time()
+                                except Exception as tts_error:
+                                    logger.error(f"Error with ElevenLabs TTS, falling back to pipeline TTS: {tts_error}")
+                                    
+                                    # Fall back to pipeline's TTS integration
+                                    speech_audio = await self.pipeline.tts_integration.text_to_speech(response)
+                                    
+                                    # Convert to mulaw for Twilio
+                                    mulaw_audio = self.audio_processor.convert_to_mulaw(speech_audio)
+                                    
+                                    # Send back to Twilio
+                                    logger.info(f"Sending fallback audio response ({len(mulaw_audio)} bytes)")
+                                    await self._send_audio(mulaw_audio, ws)
+                                    
+                                    # Update state
+                                    self.last_transcription = transcription
+                                    self.last_response_time = time.time()
                     except Exception as e:
                         logger.error(f"Error processing through knowledge base: {e}", exc_info=True)
                         
                         # Try to send a fallback response
                         fallback_message = "I'm sorry, I'm having trouble understanding. Could you try again?"
                         try:
-                            fallback_audio = await self.pipeline.tts_integration.text_to_speech(fallback_message)
-                            mulaw_fallback = self.audio_processor.pcm_to_mulaw(fallback_audio)
+                            if self.elevenlabs_tts:
+                                fallback_audio = await self.elevenlabs_tts.synthesize(fallback_message)
+                            else:
+                                fallback_audio = await self.pipeline.tts_integration.text_to_speech(fallback_message)
+                                
+                            # Convert to mulaw for Twilio if needed
+                            if not self.elevenlabs_tts or self.elevenlabs_tts.container_format != "mulaw":
+                                mulaw_fallback = self.audio_processor.convert_to_mulaw(fallback_audio)
+                            else:
+                                mulaw_fallback = fallback_audio
+                                
                             await self._send_audio(mulaw_fallback, ws)
                             self.last_response_time = time.time()
                         except Exception as e2:
@@ -967,23 +1034,47 @@ class WebSocketHandler:
     
     async def send_text_response(self, text: str, ws) -> None:
         """
-        Send a text response by converting to speech first.
+        Send a text response by converting to speech with ElevenLabs first.
         
         Args:
             text: Text to send
             ws: WebSocket connection
         """
         try:
-            # Convert text to speech
+            # Convert text to speech with ElevenLabs
+            if self.elevenlabs_tts:
+                try:
+                    # Use direct ElevenLabs TTS
+                    speech_audio = await self.elevenlabs_tts.synthesize(text)
+                    logger.info(f"Generated speech with ElevenLabs TTS: {len(speech_audio)} bytes")
+                    
+                    # If already in mulaw format, send directly
+                    if self.elevenlabs_tts.container_format == "mulaw":
+                        mulaw_audio = speech_audio
+                    else:
+                        # Convert to mulaw for Twilio
+                        mulaw_audio = self.audio_processor.convert_to_mulaw(speech_audio)
+                        
+                    # Send audio
+                    await self._send_audio(mulaw_audio, ws)
+                    logger.info(f"Sent text response using ElevenLabs: '{text}'")
+                    
+                    # Update last response time to add pause
+                    self.last_response_time = time.time()
+                    return
+                except Exception as e:
+                    logger.error(f"Error with ElevenLabs TTS, falling back to pipeline TTS: {e}")
+            
+            # Fall back to pipeline's TTS integration
             if hasattr(self.pipeline, 'tts_integration'):
                 speech_audio = await self.pipeline.tts_integration.text_to_speech(text)
                 
-                # Convert to mulaw
-                mulaw_audio = self.audio_processor.pcm_to_mulaw(speech_audio)
+                # Convert to mulaw for Twilio
+                mulaw_audio = self.audio_processor.convert_to_mulaw(speech_audio)
                 
                 # Send audio
                 await self._send_audio(mulaw_audio, ws)
-                logger.info(f"Sent text response: '{text}'")
+                logger.info(f"Sent text response using pipeline TTS: '{text}'")
                 
                 # Update last response time to add pause
                 self.last_response_time = time.time()
