@@ -96,7 +96,7 @@ class GoogleCloudStreamingSTT:
         channels: int = 1,
         interim_results: bool = True,
         speech_context_phrases: Optional[List[str]] = None,
-        enhanced_model: bool = True,
+        enhanced_model: bool = True,  # Voice Activity Detection
         vad_enabled: bool = True,  # Voice Activity Detection
         barge_in_threshold: float = 0.02  # Energy threshold for barge-in detection
     ):
@@ -189,7 +189,6 @@ class GoogleCloudStreamingSTT:
             r'music playing',           # Common transcription
             r'background noise',        # Common transcription
             r'static',                  # Common transcription
-            r'\b(um|uh|hmm|mmm)\b',     # Common filler words
         ]))
         
         # Create the speech client
@@ -463,11 +462,9 @@ class GoogleCloudStreamingSTT:
             self.is_streaming = True
             self.audio_queue = queue.Queue()
             self.stop_event = threading.Event()
+            self.result_callbacks = []
             
-            # Initialize variables
-            self.requests = []
-            
-            # Create the streaming configuration once
+            # Create the streaming configuration
             streaming_config = self._get_streaming_config()
             
             # Create the initial request with streaming config
@@ -510,8 +507,8 @@ class GoogleCloudStreamingSTT:
                         break
             
             # Start streaming recognize with the request generator
+            # Use only the requests parameter
             responses = self.client.streaming_recognize(
-                config=self._get_streaming_config(),  # Add config parameter
                 requests=request_generator()
             )
             
@@ -548,69 +545,7 @@ class GoogleCloudStreamingSTT:
                             logger.error(f"Error calling callback: {e}")
                 
         except Exception as e:
-            if "config" in str(e):
-                logger.error(f"Error in streaming: {e} - This appears to be an API version compatibility issue.")
-                # Try the v1 version
-                try:
-                    logger.info("Trying alternative API method...")
-                    # Recreate the generator for v1
-                    def request_generator_v1():
-                        yield speech.StreamingRecognizeRequest(
-                            streaming_config=self._get_streaming_config()
-                        )
-                        
-                        while not self.stop_event.is_set():
-                            try:
-                                chunk = self.audio_queue.get(timeout=0.5)
-                                yield speech.StreamingRecognizeRequest(audio_content=chunk)
-                                self.audio_queue.task_done()
-                            except queue.Empty:
-                                continue
-                            except Exception as e:
-                                logger.error(f"Error in v1 request generator: {e}")
-                                break
-                    
-                    # Try the v1 approach (without config parameter)
-                    responses = self.client.streaming_recognize(
-                        requests=request_generator_v1()
-                    )
-                    
-                    # Process results (same code as above)
-                    for response in responses:
-                        if self.stop_event.is_set():
-                            break
-                        
-                        # Process each result in the response
-                        for result in response.results:
-                            transcription_result = StreamingTranscriptionResult.from_google_result(
-                                result,
-                                energy_level=0.0
-                            )
-                            
-                            # Set barge-in flag if detected
-                            transcription_result.barge_in_detected = self.potential_barge_in
-                            
-                            # Save final results for later use
-                            if result.is_final:
-                                self.last_result = transcription_result
-                            
-                            # Process callbacks
-                            for callback in self.result_callbacks:
-                                try:
-                                    # Call callback in the event loop
-                                    loop = asyncio.get_event_loop()
-                                    if loop.is_running():
-                                        asyncio.run_coroutine_threadsafe(
-                                            callback(transcription_result),
-                                            loop
-                                        )
-                                except Exception as e:
-                                    logger.error(f"Error calling callback: {e}")
-                    
-                except Exception as e2:
-                    logger.error(f"Alternative API method also failed: {e2}")
-            else:
-                logger.error(f"Error in streaming audio: {e}")
+            logger.error(f"Error in streaming audio: {e}")
     
     def set_agent_speaking(self, speaking: bool) -> None:
         """
