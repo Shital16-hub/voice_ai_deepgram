@@ -370,11 +370,11 @@ class WebSocketHandler:
         self.non_speech_pattern = re.compile('|'.join(NON_SPEECH_PATTERNS))
         
         # Conversation flow management
-        self.pause_after_response = 1.0  # Reduced from 2.0 to 1.0 for better barge-in response
+        self.pause_after_response = 0.3  # Reduced for better barge-in response
         self.min_words_for_valid_query = 2  # Minimum words for a valid query
         
         # Add ambient noise tracking for adaptive thresholds
-        self.ambient_noise_level = 0.01  # Starting threshold
+        self.ambient_noise_level = 0.008  # Starting threshold
         self.noise_samples = []
         self.max_noise_samples = 20
         
@@ -392,8 +392,12 @@ class WebSocketHandler:
         self.elevenlabs_tts = None
         
         # Add barge-in sensitivity settings
-        self.barge_in_energy_threshold = 0.008  # Lower threshold specifically for barge-in detection
-        self.barge_in_check_enabled = True  # Additional flag to control audio-based barge-in detection
+        self.barge_in_energy_threshold = 0.005  # Reduced from 0.008 to improve sensitivity
+        self.barge_in_check_enabled = True
+        
+        # Track recent audio segments to detect echo
+        self.recent_audio_energy = []
+        self.max_recent_audio = 5  # Track last 5 audio segments
         
         logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support (FORCED ENABLED)")
     
@@ -422,6 +426,58 @@ class WebSocketHandler:
                     np.percentile(self.noise_samples, 95) * 2.0  # Set threshold just above noise
                 )
                 logger.debug(f"Updated ambient noise level to {self.ambient_noise_level:.6f}")
+
+    def _is_echo_of_system_speech(self, transcription: str) -> bool:
+        """
+        Check if a transcription appears to be an echo of the system's own speech.
+        
+        Args:
+            transcription: The transcription to check
+            
+        Returns:
+            True if the transcription appears to be an echo of the system's own speech
+        """
+        # No transcription, no echo
+        if not transcription:
+            return False
+        
+        # Check recent responses for similarity
+        for turn in self.pipeline.conversation_manager.history[-3:]:  # Check recent history
+            if turn.response:
+                # Clean up response text for comparison
+                response_start = self.cleanup_transcription(turn.response.split('.')[0])
+                
+                # Check if transcription is similar to the start of any recent response
+                similarity_ratio = self._get_text_similarity(transcription, response_start)
+                
+                if similarity_ratio > 0.7:  # High similarity threshold
+                    logger.info(f"Detected echo of system speech (similarity: {similarity_ratio:.2f})")
+                    return True
+                    
+        return False
+
+    def _get_text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity between two text strings using a simple approach."""
+        # Convert to lowercase for better comparison
+        text1 = text1.lower()
+        text2 = text2.lower()
+        
+        # Very simple similarity check - see if one text is contained in the other
+        if text1 in text2 or text2 in text1:
+            return 0.9
+        
+        # Count matching words
+        words1 = set(text1.split())
+        words2 = set(text2.split())
+        
+        # Calculate Jaccard similarity
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        if union == 0:
+            return 0.0
+            
+        return intersection / union
     
     def cleanup_transcription(self, text: str) -> str:
         """
@@ -901,6 +957,13 @@ class WebSocketHandler:
                 transcription = self.cleanup_transcription(transcription)
                 logger.info(f"CLEANED TRANSCRIPTION: '{transcription}'")
                 
+                # Check if this is an echo of the system's own speech
+                if self._is_echo_of_system_speech(transcription):
+                    logger.info("Detected echo of system speech, ignoring")
+                    # Clear input buffer and return
+                    self.input_buffer.clear()
+                    return
+                
                 # Only process if it's a valid transcription
                 if transcription and self.is_valid_transcription(transcription):
                     logger.info(f"Complete transcription: {transcription}")
@@ -932,7 +995,7 @@ class WebSocketHandler:
                                         # Fall back to pipeline's TTS integration
                                         speech_audio = await self.pipeline.tts_integration.text_to_speech(response)
                                         logger.info(f"Generated speech with pipeline TTS: {len(speech_audio)} bytes")
-                                                                        
+                                                                    
                                     # Convert to mulaw for Twilio if needed
                                     if not self.elevenlabs_tts or self.elevenlabs_tts.container_format != "mulaw":
                                         mulaw_audio = self.audio_processor.convert_to_mulaw(speech_audio)
@@ -1040,7 +1103,7 @@ class WebSocketHandler:
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """
-        Send audio data to Twilio with barge-in awareness.
+        Send audio data to Twilio with improved barge-in handling.
         
         Args:
             audio_data: Audio data as bytes
@@ -1072,6 +1135,10 @@ class WebSocketHandler:
             # Store chunks for potential interruption
             self.current_audio_chunks = chunks.copy()
             
+            # Add a short delay after starting speech to allow for system to stabilize
+            # This helps avoid echo detection immediately after starting to speak
+            await asyncio.sleep(0.05)
+            
             for i, chunk in enumerate(chunks):
                 # Check if we've been interrupted before sending each chunk
                 if self.speech_interrupted:
@@ -1095,8 +1162,26 @@ class WebSocketHandler:
                     ws.send(json.dumps(message))
                     
                     # Add a small delay between chunks to allow for interruption
+                    # This ensures we can detect barge-in and stop quickly
                     if i < len(chunks) - 1:  # Don't delay after the last chunk
                         await asyncio.sleep(0.05)  # 50ms delay between chunks for better barge-in opportunity
+                    
+                    # Every 10 chunks, check the input buffer for potential speech
+                    # This helps detect barge-in even between audio chunk processing
+                    if i % 10 == 0 and len(self.input_buffer) > 4000:
+                        # Process any incoming audio
+                        try:
+                            # Sample a small portion of the input buffer
+                            sample_size = min(len(self.input_buffer), 4000)
+                            sample_data = self.audio_processor.mulaw_to_pcm(bytes(self.input_buffer[-sample_size:]))
+                            
+                            # Check for speech
+                            if self.audio_processor.detect_speech_for_barge_in(sample_data, threshold=self.barge_in_energy_threshold):
+                                logger.info(f"AUDIO-BASED BARGE-IN DETECTED during audio playback at chunk {i}/{len(chunks)}")
+                                self.speech_interrupted = True
+                                break
+                        except Exception as e:
+                            logger.error(f"Error checking for barge-in during playback: {e}")
                     
                 except Exception as e:
                     if "Connection closed" in str(e):

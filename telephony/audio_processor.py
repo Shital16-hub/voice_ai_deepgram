@@ -216,10 +216,10 @@ class AudioProcessor:
             return audio_data
             
     @staticmethod
-    def detect_speech_for_barge_in(audio_data: np.ndarray, threshold: float = 0.007) -> bool:
+    def detect_speech_for_barge_in(audio_data: np.ndarray, threshold: float = 0.005) -> bool:
         """
         Enhanced speech detection specifically optimized for barge-in detection
-        with lower thresholds and faster response.
+        with multi-factor analysis to reduce false positives.
         
         Args:
             audio_data: Audio data as numpy array
@@ -229,12 +229,49 @@ class AudioProcessor:
             True if speech is detected for barge-in
         """
         try:
-            # 1. Check energy level with lower threshold for barge-in
-            energy = np.mean(np.abs(audio_data))
-            is_speech = energy > threshold
+            # Apply a band-pass filter to focus on speech frequencies (300-3400 Hz)
+            # This helps eliminate background noise and some echo
+            b, a = signal.butter(4, [300/(16000/2), 3400/(16000/2)], 'band')
+            filtered_audio = signal.filtfilt(b, a, audio_data)
+            
+            # 1. Energy level check with adaptive threshold
+            energy = np.mean(np.abs(filtered_audio))
+            energy_detected = energy > threshold
+            
+            # 2. Check for speech patterns - meaningful energy variations
+            # Speech typically has variations in energy
+            frame_size = min(len(filtered_audio), 320)  # 20ms at 16kHz
+            if frame_size > 0:
+                frames = [filtered_audio[i:i+frame_size] for i in range(0, len(filtered_audio), frame_size)]
+                frame_energies = [np.mean(np.abs(frame)) for frame in frames if len(frame) == frame_size]
+                
+                if len(frame_energies) >= 3:
+                    # Calculate energy variance (speech has more variance than steady noise)
+                    energy_std = np.std(frame_energies)
+                    energy_mean = np.mean(frame_energies)
+                    variation_ratio = energy_std / energy_mean if energy_mean > 0 else 0
+                    variation_detected = variation_ratio > 0.2  # Speech typically has high variation
+                else:
+                    variation_detected = False
+            else:
+                variation_detected = False
+            
+            # 3. Peak detection - speech often has stronger peaks
+            if len(filtered_audio) > 0:
+                peaks = np.max(np.abs(filtered_audio))
+                peak_detected = peaks > (threshold * 3)  # Higher threshold for peaks
+            else:
+                peak_detected = False
+                
+            # Decision logic: Multiple factors must indicate speech to reduce false positives
+            # This helps avoid triggering on echoes or background noise
+            is_speech = energy_detected and (variation_detected or peak_detected)
             
             # Log detection results for debugging
-            logger.debug(f"Barge-in speech detection: energy={energy:.6f}, threshold={threshold:.6f}, detected={is_speech}")
+            logger.debug(f"Barge-in speech detection: energy={energy:.6f}, threshold={threshold:.6f}, "
+                         f"variation={variation_ratio if 'variation_ratio' in locals() else 0:.6f}, "
+                         f"peaks={peaks if 'peaks' in locals() else 0:.6f}, "
+                         f"detected={is_speech}")
             
             return is_speech
             

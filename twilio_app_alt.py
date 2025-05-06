@@ -43,7 +43,7 @@ ELEVENLABS_VOICE_ID = os.getenv('TTS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Defau
 ELEVENLABS_MODEL_ID = os.getenv('TTS_MODEL_ID', 'eleven_monolingual_v1')
 
 # Configure logging with more debug info
-logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
+logging.basicConfig(level=getattr(logging, LOG_LEVEL), format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 # Flask app setup
@@ -65,8 +65,7 @@ async def initialize_system():
     
     # Verify ElevenLabs API key is set
     if not ELEVENLABS_API_KEY:
-        logger.error("ELEVENLABS_API_KEY not set in environment")
-        raise ValueError("ELEVENLABS_API_KEY must be set")
+        logger.warning("ELEVENLABS_API_KEY not set in environment, attempting to proceed without it")
     
     # Define a generic telephony-optimized prompt that works with any knowledge base
     telephony_prompt = (
@@ -76,6 +75,14 @@ async def initialize_system():
         "Common terms in business conversations include: pricing, plan, cost, features, "
         "monthly, subscription, support, upgrade, details, information."
     )
+    
+    # Get base URL from environment
+    base_url = os.getenv('BASE_URL')
+    if not base_url:
+        logger.error("BASE_URL not set in environment")
+        raise ValueError("BASE_URL must be set")
+    
+    logger.info(f"Using BASE_URL: {base_url}")
     
     # Initialize Voice AI Agent with enhanced parameters that are knowledge-base agnostic
     agent = VoiceAIAgent(
@@ -109,14 +116,6 @@ async def initialize_system():
         query_engine=agent.query_engine,
         tts_integration=tts
     )
-    
-    # Get base URL from environment
-    base_url = os.getenv('BASE_URL')
-    if not base_url:
-        logger.error("BASE_URL not set in environment")
-        raise ValueError("BASE_URL must be set")
-    
-    logger.info(f"Using BASE_URL: {base_url}")
     
     # Initialize Twilio handler
     twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
@@ -296,7 +295,8 @@ def handle_media_stream(call_sid):
         # Force enable barge-in for better user experience
         ws_handler.barge_in_enabled = True
         ws_handler.barge_in_check_enabled = True
-        ws_handler.barge_in_energy_threshold = 0.008  # Set lower threshold for faster response
+        # Lower threshold for faster response
+        ws_handler.barge_in_energy_threshold = 0.005  # Reduced from 0.008 to improve sensitivity
         
         # Create an event loop for this connection
         loop = asyncio.new_event_loop()
@@ -375,3 +375,24 @@ def handle_media_stream(call_sid):
         
         # Return empty response
         return ""
+
+# Function to initialize the system synchronously
+def init_system():
+    """Run the async initialization in a synchronous context."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(initialize_system())
+    finally:
+        loop.close()
+
+# Starting point of the application
+if __name__ == '__main__':
+    print("Starting Voice AI Agent with ElevenLabs TTS integration...")
+    
+    # Initialize the system before starting the Flask app
+    init_system()
+    
+    # Run the Flask app
+    print(f"Starting Flask server on {HOST}:{PORT}")
+    app.run(host=HOST, port=PORT, debug=DEBUG)
