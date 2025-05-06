@@ -13,8 +13,8 @@ from typing import Optional, Dict, Any, Union, Callable, Awaitable
 import numpy as np
 from scipy import signal
 
-# Google Cloud STT imports
-from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
+# Update the import to use the enhanced GoogleCloudStreamingSTT
+from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 from speech_to_text.stt_integration import STTIntegration
 from knowledge_base.conversation_manager import ConversationManager
 from knowledge_base.llama_index.document_store import DocumentStore
@@ -56,6 +56,10 @@ class VoiceAIAgent:
         # Whether to use enhanced model for telephony
         self.enhanced_model = kwargs.get('enhanced_model', True)
         
+        # Barge-in detection parameters
+        self.enable_barge_in = kwargs.get('enable_barge_in', True)
+        self.barge_in_threshold = kwargs.get('barge_in_threshold', 0.02)
+        
         # TTS Parameters for ElevenLabs
         self.elevenlabs_api_key = kwargs.get('elevenlabs_api_key', os.getenv('ELEVENLABS_API_KEY'))
         # Updated to use environment variables with better defaults
@@ -69,85 +73,15 @@ class VoiceAIAgent:
         self.query_engine = None
         self.tts_client = None
         
-        # Noise floor tracking for adaptive threshold
-        self.noise_floor = 0.005
-        self.noise_samples = []
-        self.max_noise_samples = 20
-        
-    def _process_audio(self, audio: np.ndarray) -> np.ndarray:
-        """
-        Process audio for better speech recognition.
-        
-        Args:
-            audio: Audio data as numpy array
-            
-        Returns:
-            Processed audio data
-        """
-        try:
-            # Update noise floor from quiet sections
-            self._update_noise_floor(audio)
-            
-            # Apply high-pass filter to remove low-frequency noise
-            b, a = signal.butter(6, 100/(16000/2), 'highpass')
-            audio = signal.filtfilt(b, a, audio)
-            
-            # Apply band-pass filter for telephony frequency range
-            b, a = signal.butter(4, [300/(16000/2), 3400/(16000/2)], 'band')
-            audio = signal.filtfilt(b, a, audio)
-            
-            # Apply pre-emphasis to boost high frequencies
-            audio = np.append(audio[0], audio[1:] - 0.97 * audio[:-1])
-            
-            # Apply noise gate with adaptive threshold
-            threshold = self.noise_floor * 3.0
-            audio = np.where(np.abs(audio) < threshold, 0, audio)
-            
-            # Normalize audio level
-            max_val = np.max(np.abs(audio))
-            if max_val > 0:
-                audio = audio * (0.9 / max_val)
-                
-            return audio
-        except Exception as e:
-            logger.error(f"Error processing audio: {e}")
-            return audio  # Return original if processing fails
-    
-    def _update_noise_floor(self, audio: np.ndarray) -> None:
-        """Update noise floor estimate from quiet sections."""
-        # Find quiet sections (bottom 10% of energy)
-        frame_size = min(len(audio), int(0.02 * 16000))  # 20ms frames
-        if frame_size <= 1:
-            return
-            
-        frames = [audio[i:i+frame_size] for i in range(0, len(audio), frame_size)]
-        frame_energies = [np.mean(np.square(frame)) for frame in frames]
-        
-        if len(frame_energies) > 0:
-            # Sort energies and take bottom 10%
-            sorted_energies = sorted(frame_energies)
-            quiet_count = max(1, len(sorted_energies) // 10)
-            quiet_energies = sorted_energies[:quiet_count]
-            
-            # Update noise samples
-            self.noise_samples.extend(quiet_energies)
-            
-            # Limit sample count
-            if len(self.noise_samples) > self.max_noise_samples:
-                self.noise_samples = self.noise_samples[-self.max_noise_samples:]
-            
-            # Update noise floor with safety limits
-            if self.noise_samples:
-                self.noise_floor = max(
-                    0.001,  # Minimum
-                    min(0.02, np.percentile(self.noise_samples, 90) * 1.5)  # Maximum
-                )
+        # Agent state tracking
+        self.agent_is_speaking = False
+        self.current_response_interrupted = False
         
     async def init(self):
         """Initialize all components with Google Cloud STT and ElevenLabs TTS."""
         logger.info("Initializing Voice AI Agent components with Google Cloud STT and ElevenLabs TTS...")
         
-        # Initialize speech recognizer with Google Cloud
+        # Initialize speech recognizer with enhanced Google Cloud STT
         self.speech_recognizer = GoogleCloudStreamingSTT(
             language=self.stt_language,
             sample_rate=16000,
@@ -155,7 +89,9 @@ class VoiceAIAgent:
             channels=1,
             interim_results=True,
             speech_context_phrases=self.stt_keywords,
-            enhanced_model=self.enhanced_model
+            enhanced_model=self.enhanced_model,
+            vad_enabled=True,  # Enable voice activity detection
+            barge_in_threshold=self.barge_in_threshold  # Set barge-in sensitivity
         )
         
         # Initialize STT integration 
@@ -207,7 +143,25 @@ class VoiceAIAgent:
             raise
         
         logger.info("Voice AI Agent initialization complete with Google Cloud STT and ElevenLabs TTS")
+    
+    def set_agent_speaking(self, speaking: bool) -> None:
+        """
+        Set whether the agent is currently speaking, for barge-in detection.
         
+        Args:
+            speaking: True if agent is speaking, False otherwise
+        """
+        # Update state
+        self.agent_is_speaking = speaking
+        
+        # Also update the speech recognizer for barge-in detection
+        if self.speech_recognizer:
+            self.speech_recognizer.set_agent_speaking(speaking)
+        
+        # And update the STT integration if available
+        if self.stt_integration:
+            self.stt_integration.set_agent_speaking(speaking)
+    
     async def process_audio(
         self,
         audio_data: Union[bytes, np.ndarray],
@@ -226,51 +180,114 @@ class VoiceAIAgent:
         if not self.initialized:
             raise RuntimeError("Voice AI Agent not initialized")
         
-        # Process audio for better speech recognition
-        if isinstance(audio_data, np.ndarray):
-            audio_data = self._process_audio(audio_data)
+        # Create a wrapper callback that handles barge-in detection
+        async def barge_in_callback(result):
+            # Check if this is a barge-in during agent speech
+            if hasattr(result, 'barge_in_detected') and result.barge_in_detected and self.agent_is_speaking:
+                logger.info("Barge-in detected during agent speech!")
+                # Set flag for interruption
+                self.current_response_interrupted = True
+                
+                # If additional callback provided, forward the event
+                if callback:
+                    # Create a specialized event for the barge-in
+                    barge_in_event = {
+                        "type": "barge_in",
+                        "timestamp": time.time(),
+                        "energy_level": result.energy_level if hasattr(result, 'energy_level') else 0.0,
+                        "transcription": result.text if hasattr(result, 'text') else ""
+                    }
+                    await callback(barge_in_event)
+            # Forward the result to the original callback
+            elif callback:
+                await callback(result)
         
         # Use STT integration for processing with Google Cloud
-        result = await self.stt_integration.transcribe_audio_data(audio_data, callback=callback)
+        result = await self.stt_integration.transcribe_audio_data(
+            audio_data, 
+            callback=barge_in_callback
+        )
+        
+        # Add barge-in information to the result
+        if "barge_in_detected" not in result and hasattr(self, 'current_response_interrupted'):
+            result["barge_in_detected"] = self.current_response_interrupted
         
         # Only process valid transcriptions
         if result.get("is_valid", False) and result.get("transcription"):
             transcription = result["transcription"]
             logger.info(f"Valid transcription: {transcription}")
             
-            # Process through conversation manager
-            response = await self.conversation_manager.handle_user_input(transcription)
-            
-            # Generate speech using ElevenLabs TTS
-            if response and response.get("response"):
-                try:
-                    speech_audio = await self.tts_client.synthesize(response["response"])
+            # Check if this is part of a barge-in
+            if result.get("barge_in_detected", False):
+                logger.info("Processing barge-in transcription")
+                
+                # Generate response with priority for barge-in
+                response = await self.conversation_manager.handle_user_input(transcription)
+                
+                # Reset interruption flag
+                self.current_response_interrupted = False
+                
+                # Return with special flag for barge-in
+                if response and response.get("response"):
+                    try:
+                        self.set_agent_speaking(True)
+                        speech_audio = await self.tts_client.synthesize(response["response"])
+                        self.set_agent_speaking(False)
+                        
+                        return {
+                            "transcription": transcription,
+                            "response": response.get("response", ""),
+                            "speech_audio": speech_audio,
+                            "status": "success",
+                            "was_barge_in": True
+                        }
+                    except Exception as e:
+                        logger.error(f"Error synthesizing speech with ElevenLabs: {e}")
+                        return {
+                            "transcription": transcription,
+                            "response": response.get("response", ""),
+                            "error": f"Speech synthesis error: {str(e)}",
+                            "status": "tts_error",
+                            "was_barge_in": True
+                        }
+            else:
+                # Standard processing for non-barge-in
+                response = await self.conversation_manager.handle_user_input(transcription)
+                
+                # Generate speech using ElevenLabs TTS
+                if response and response.get("response"):
+                    try:
+                        self.set_agent_speaking(True)
+                        speech_audio = await self.tts_client.synthesize(response["response"])
+                        self.set_agent_speaking(False)
+                        
+                        return {
+                            "transcription": transcription,
+                            "response": response.get("response", ""),
+                            "speech_audio": speech_audio,
+                            "status": "success"
+                        }
+                    except Exception as e:
+                        logger.error(f"Error synthesizing speech with ElevenLabs: {e}")
+                        return {
+                            "transcription": transcription,
+                            "response": response.get("response", ""),
+                            "error": f"Speech synthesis error: {str(e)}",
+                            "status": "tts_error"
+                        }
+                else:
                     return {
                         "transcription": transcription,
                         "response": response.get("response", ""),
-                        "speech_audio": speech_audio,
                         "status": "success"
                     }
-                except Exception as e:
-                    logger.error(f"Error synthesizing speech with ElevenLabs: {e}")
-                    return {
-                        "transcription": transcription,
-                        "response": response.get("response", ""),
-                        "error": f"Speech synthesis error: {str(e)}",
-                        "status": "tts_error"
-                    }
-            else:
-                return {
-                    "transcription": transcription,
-                    "response": response.get("response", ""),
-                    "status": "success"
-                }
         else:
             logger.info("Invalid or empty transcription")
             return {
                 "status": "invalid_transcription",
                 "transcription": result.get("transcription", ""),
-                "error": "No valid speech detected"
+                "error": "No valid speech detected",
+                "barge_in_detected": result.get("barge_in_detected", False)
             }
     
     async def process_streaming_audio(
@@ -295,6 +312,7 @@ class VoiceAIAgent:
         start_time = time.time()
         chunks_processed = 0
         results_count = 0
+        barge_ins_detected = 0
         
         # Start streaming session
         await self.speech_recognizer.start_streaming()
@@ -304,14 +322,31 @@ class VoiceAIAgent:
             async for chunk in audio_stream:
                 chunks_processed += 1
                 
-                # Process audio for better recognition if it's numpy array
-                if isinstance(chunk, np.ndarray):
-                    chunk = self._process_audio(chunk)
-                
                 # Process through Google Cloud STT
                 async def process_result(result):
-                    # Only handle final results
-                    if result.is_final:
+                    # Handle barge-in detection
+                    if hasattr(result, 'barge_in_detected') and result.barge_in_detected and self.agent_is_speaking:
+                        logger.info("Barge-in detected during agent speech!")
+                        # Set flag for interruption
+                        self.current_response_interrupted = True
+                        
+                        nonlocal barge_ins_detected
+                        barge_ins_detected += 1
+                        
+                        # Forward barge-in event if callback provided
+                        if result_callback:
+                            barge_in_event = {
+                                "type": "barge_in",
+                                "timestamp": time.time(),
+                                "energy_level": result.energy_level if hasattr(result, 'energy_level') else 0.0,
+                                "transcription": result.text if hasattr(result, 'text') else "",
+                                "is_final": False,
+                                "barge_in_detected": True
+                            }
+                            await result_callback(barge_in_event)
+                    
+                    # Only handle final results for response generation
+                    if hasattr(result, 'is_final') and result.is_final and result.text:
                         # Clean up transcription
                         transcription = self.stt_integration.cleanup_transcription(result.text)
                         
@@ -326,10 +361,13 @@ class VoiceAIAgent:
                             
                             if response and response.get("response"):
                                 try:
+                                    self.set_agent_speaking(True)
                                     speech_audio = await self.tts_client.synthesize(response["response"])
                                 except Exception as e:
                                     logger.error(f"Error synthesizing speech with ElevenLabs: {e}")
                                     tts_error = str(e)
+                                finally:
+                                    self.set_agent_speaking(False)
                             
                             # Format result
                             result_data = {
@@ -337,9 +375,13 @@ class VoiceAIAgent:
                                 "response": response.get("response", ""),
                                 "speech_audio": speech_audio,
                                 "tts_error": tts_error,
-                                "confidence": result.confidence,
-                                "is_final": True
+                                "confidence": result.confidence if hasattr(result, 'confidence') else 0.0,
+                                "is_final": True,
+                                "was_barge_in": self.current_response_interrupted
                             }
+                            
+                            # Reset interruption flag
+                            self.current_response_interrupted = False
                             
                             nonlocal results_count
                             results_count += 1
@@ -359,6 +401,7 @@ class VoiceAIAgent:
                 "status": "complete",
                 "chunks_processed": chunks_processed,
                 "results_count": results_count,
+                "barge_ins_detected": barge_ins_detected,
                 "total_time": time.time() - start_time
             }
             
@@ -373,6 +416,7 @@ class VoiceAIAgent:
                 "error": str(e),
                 "chunks_processed": chunks_processed,
                 "results_count": results_count,
+                "barge_ins_detected": barge_ins_detected,
                 "total_time": time.time() - start_time
             }
     

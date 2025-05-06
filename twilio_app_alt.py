@@ -25,12 +25,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from telephony.twilio_handler import TwilioHandler
 from telephony.websocket_handler import WebSocketHandler
+from telephony.call_manager import CallManager
 from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
-from telephony.config import STT_INITIAL_PROMPT, STT_NO_CONTEXT, STT_TEMPERATURE, STT_PRESET
-from voice_ai_agent import VoiceAIAgent
+from telephony.audio_processor import AudioProcessor
+from knowledge_base.conversation_manager import ConversationManager
+from knowledge_base.llama_index.index_manager import IndexManager
+from knowledge_base.llama_index.query_engine import QueryEngine
+from knowledge_base.llama_index.document_store import DocumentStore
+from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
+from speech_to_text.stt_integration import STTIntegration
 from integration.tts_integration import TTSIntegration
 from integration.pipeline import VoiceAIAgentPipeline
-from text_to_speech import ElevenLabsTTS  # Import ElevenLabs TTS
 
 # Get Twilio credentials from environment
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
@@ -76,23 +81,46 @@ async def initialize_system():
         "monthly, subscription, support, upgrade, details, information."
     )
     
-    # Initialize Voice AI Agent with enhanced parameters that are knowledge-base agnostic
-    agent = VoiceAIAgent(
-        storage_dir='./storage',
-        model_name='mistral:7b-instruct-v0.2-q4_0',
-        whisper_model_path='models/base.en',
-        llm_temperature=0.7,
-        # Pass generic telephony-optimized parameters
-        whisper_initial_prompt=telephony_prompt,
-        whisper_temperature=0.0,  # Greedy decoding for more reliable transcription
-        whisper_no_context=True,  # Each utterance is independent
-        whisper_preset="default",
-        # Pass ElevenLabs parameters
-        elevenlabs_api_key=ELEVENLABS_API_KEY,
-        elevenlabs_voice_id=ELEVENLABS_VOICE_ID,
-        elevenlabs_model_id=ELEVENLABS_MODEL_ID
+    # Initialize document store and index manager
+    doc_store = DocumentStore()
+    index_manager = IndexManager(storage_dir='./storage')
+    await index_manager.init()
+    
+    # Initialize query engine
+    query_engine = QueryEngine(
+        index_manager=index_manager,
+        llm_model_name='mistral:7b-instruct-v0.2-q4_0',
+        llm_temperature=0.7
     )
-    await agent.init()
+    await query_engine.init()
+    
+    # Initialize conversation manager
+    conversation_manager = ConversationManager(
+        query_engine=query_engine,
+        llm_model_name='mistral:7b-instruct-v0.2-q4_0',
+        llm_temperature=0.7,
+        skip_greeting=True
+    )
+    await conversation_manager.init()
+    
+    # Initialize Google Cloud STT
+    speech_recognizer = GoogleCloudStreamingSTT(
+        language="en-US",
+        sample_rate=16000,
+        encoding="LINEAR16",
+        channels=1,
+        interim_results=True,
+        speech_context_phrases=["price", "plan", "cost", "subscription", "service", "features"],
+        enhanced_model=True,
+        vad_enabled=True,
+        barge_in_threshold=0.02
+    )
+    
+    # Initialize STT integration
+    stt_integration = STTIntegration(
+        speech_recognizer=speech_recognizer,
+        language="en-US"
+    )
     
     # Initialize TTS integration with ElevenLabs
     tts = TTSIntegration(
@@ -101,13 +129,19 @@ async def initialize_system():
     )
     await tts.init()
     
-    # Create pipeline
-    voice_ai_pipeline = VoiceAIAgentPipeline(
-        speech_recognizer=agent.speech_recognizer,
-        conversation_manager=agent.conversation_manager,
-        query_engine=agent.query_engine,
-        tts_integration=tts
-    )
+    # Create pipeline with all components
+    voice_ai_pipeline = VoiceAIAgentPipeline()
+    # Set attributes individually to avoid constructor argument issues
+    voice_ai_pipeline.speech_recognizer = speech_recognizer
+    voice_ai_pipeline.conversation_manager = conversation_manager
+    voice_ai_pipeline.query_engine = query_engine
+    voice_ai_pipeline.tts_integration = tts
+    
+    # Initialize STT helper
+    voice_ai_pipeline.stt_helper = stt_integration
+    
+    # Set using_google_cloud flag
+    voice_ai_pipeline.using_google_cloud = True
     
     # Get base URL from environment
     base_url = os.getenv('BASE_URL')
