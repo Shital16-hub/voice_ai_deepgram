@@ -1,65 +1,27 @@
 """
-Enhanced Google Cloud Speech-to-Text client for Voice AI Agent.
-
-This module provides real-time streaming speech recognition with advanced
-features like noise handling, barge-in detection, and adaptive thresholds.
+Google Cloud Speech-to-Text streaming implementation for real-time transcription.
 """
 import os
 import logging
 import asyncio
-import json
-import time
-from typing import Optional, Dict, Any, List, Callable, Awaitable, Union, AsyncGenerator
-import numpy as np
-import re
-from dataclasses import dataclass, field
-from queue import Queue
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import re
+from typing import Dict, Any, Optional, Union, List, AsyncGenerator, Callable, Awaitable, Iterator
+from dataclasses import dataclass, field
 
-try:
-    from google.cloud import speech
-    from google.api_core.exceptions import GoogleAPIError
-    GOOGLE_CLOUD_AVAILABLE = True
-except ImportError:
-    GOOGLE_CLOUD_AVAILABLE = False
+from google.cloud import speech
+import numpy as np
+
+from speech_to_text.config import config
+from speech_to_text.google_cloud.models import TranscriptionConfig
+from speech_to_text.google_cloud.exceptions import STTError, STTStreamingError
 
 logger = logging.getLogger(__name__)
 
-# Enhanced patterns for non-speech annotations
-NON_SPEECH_PATTERNS = [
-    r'\(.*?music.*?\)',         # (music), (tense music), etc.
-    r'\(.*?wind.*?\)',          # (wind), (wind blowing), etc.
-    r'\(.*?engine.*?\)',        # (engine), (engine revving), etc.
-    r'\(.*?noise.*?\)',         # (noise), (background noise), etc.
-    r'\(.*?sound.*?\)',         # (sound), (sounds), etc.
-    r'\(.*?silence.*?\)',       # (silence), etc.
-    r'\[.*?silence.*?\]',       # [silence], etc.
-    r'\[.*?BLANK.*?\]',         # [BLANK_AUDIO], etc.
-    r'\(.*?applause.*?\)',      # (applause), etc.
-    r'\(.*?laughter.*?\)',      # (laughter), etc.
-    r'\(.*?footsteps.*?\)',     # (footsteps), etc.
-    r'\(.*?breathing.*?\)',     # (breathing), etc.
-    r'\(.*?growling.*?\)',      # (growling), etc.
-    r'\(.*?coughing.*?\)',      # (coughing), etc.
-    r'\(.*?clap.*?\)',          # (clap), etc.
-    r'\(.*?laugh.*?\)',         # (laughing), etc.
-    r'\[.*?noise.*?\]',         # [noise], etc.
-    r'\(.*?background.*?\)',    # (background), etc.
-    r'\[.*?music.*?\]',         # [music], etc.
-    r'\(.*?static.*?\)',        # (static), etc.
-    r'\[.*?unclear.*?\]',       # [unclear], etc.
-    r'\(.*?inaudible.*?\)',     # (inaudible), etc.
-    r'\<.*?noise.*?\>',         # <noise>, etc.
-    r'music playing',           # Common transcription
-    r'background noise',        # Common transcription
-    r'static',                  # Common transcription
-    r'\b(um|uh|hmm|mmm)\b',     # Common filler words
-]
-
 @dataclass
 class StreamingTranscriptionResult:
-    """Result from streaming transcription with enhanced metadata."""
+    """Result from streaming transcription."""
     text: str
     is_final: bool
     confidence: float = 0.0
@@ -118,18 +80,16 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Enhanced Google Cloud Speech-to-Text streaming client for Voice AI Agent.
-
-    This class provides real-time streaming speech recognition with:
-    - Barge-in detection for interruptions
-    - Adaptive noise floor tracking
-    - Improved result filtering and formatting
-    - Robust error recovery
-    - Optimized for telephony applications
+    Google Cloud Speech-to-Text streaming client.
+    
+    This class provides real-time streaming speech recognition
+    optimized for telephony applications.
     """
     
     def __init__(
         self, 
+        credentials_file: Optional[str] = None,
+        model_name: Optional[str] = None,
         language: str = "en-US",
         sample_rate: int = 16000,
         encoding: str = "LINEAR16",
@@ -144,6 +104,8 @@ class GoogleCloudStreamingSTT:
         Initialize the Google Cloud STT client.
         
         Args:
+            credentials_file: Path to Google Cloud credentials JSON file
+            model_name: STT model to use (defaults to config)
             language: Language code (BCP-47)
             sample_rate: Audio sample rate in Hz
             encoding: Audio encoding format
@@ -154,9 +116,13 @@ class GoogleCloudStreamingSTT:
             vad_enabled: Whether to use Voice Activity Detection
             barge_in_threshold: Energy threshold for detecting user interruptions
         """
-        if not GOOGLE_CLOUD_AVAILABLE:
-            raise ImportError("Google Cloud Speech modules not installed. Please run: pip install google-cloud-speech")
-
+        self.credentials_file = credentials_file
+        
+        # Set environment variable for credentials if provided
+        if self.credentials_file:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_file
+            
+        self.model_name = model_name or "latest_long"
         self.language = language
         self.sample_rate = sample_rate
         self.encoding = encoding
@@ -172,20 +138,22 @@ class GoogleCloudStreamingSTT:
         
         # State management
         self.is_streaming = False
-        self.stream = None
-        self.streaming_client = None
+        self.client = None
         self.streaming_config = None
         self.utterance_id = 0
         self.last_result = None
+        
+        # Audio processing
+        self.audio_queue = None
+        self.stop_event = None
+        self.stream = None
+        self.responses_thread = None
+        self.result_callbacks = []
         
         # Ambient noise tracking for adaptive thresholds
         self.ambient_noise_level = 0.01  # Starting threshold
         self.noise_samples = []
         self.max_noise_samples = 20
-        
-        # Audio buffer for more context in processing
-        self.audio_buffer = []
-        self.max_buffer_frames = 10  # Maximum number of frames to keep
         
         # Barge-in detection state
         self.agent_is_speaking = False
@@ -194,9 +162,37 @@ class GoogleCloudStreamingSTT:
         self.min_barge_in_frames = 3  # Minimum frames of speech to confirm barge-in
         
         # Compile the non-speech pattern for efficient filtering
-        self.non_speech_pattern = re.compile('|'.join(NON_SPEECH_PATTERNS))
+        self.non_speech_pattern = re.compile('|'.join([
+            r'\(.*?music.*?\)',         # (music), (tense music), etc.
+            r'\(.*?wind.*?\)',          # (wind), (wind blowing), etc.
+            r'\(.*?engine.*?\)',        # (engine), (engine revving), etc.
+            r'\(.*?noise.*?\)',         # (noise), (background noise), etc.
+            r'\(.*?sound.*?\)',         # (sound), (sounds), etc.
+            r'\(.*?silence.*?\)',       # (silence), etc.
+            r'\[.*?silence.*?\]',       # [silence], etc.
+            r'\[.*?BLANK.*?\]',         # [BLANK_AUDIO], etc.
+            r'\(.*?applause.*?\)',      # (applause), etc.
+            r'\(.*?laughter.*?\)',      # (laughter), etc.
+            r'\(.*?footsteps.*?\)',     # (footsteps), etc.
+            r'\(.*?breathing.*?\)',     # (breathing), etc.
+            r'\(.*?growling.*?\)',      # (growling), etc.
+            r'\(.*?coughing.*?\)',      # (coughing), etc.
+            r'\(.*?clap.*?\)',          # (clap), etc.
+            r'\(.*?laugh.*?\)',         # (laughing), etc.
+            r'\[.*?noise.*?\]',         # [noise], etc.
+            r'\(.*?background.*?\)',    # (background), etc.
+            r'\[.*?music.*?\]',         # [music], etc.
+            r'\(.*?static.*?\)',        # (static), etc.
+            r'\[.*?unclear.*?\]',       # [unclear], etc.
+            r'\(.*?inaudible.*?\)',     # (inaudible), etc.
+            r'\<.*?noise.*?\>',         # <noise>, etc.
+            r'music playing',           # Common transcription
+            r'background noise',        # Common transcription
+            r'static',                  # Common transcription
+            r'\b(um|uh|hmm|mmm)\b',     # Common filler words
+        ]))
         
-        # Create the client
+        # Create the speech client
         try:
             self.client = speech.SpeechClient()
             logger.info("Initialized Google Cloud Speech-to-Text client")
@@ -207,7 +203,13 @@ class GoogleCloudStreamingSTT:
     def _get_recognition_config(self) -> speech.RecognitionConfig:
         """Get enhanced recognition configuration for Google Cloud Speech API."""
         # Get audio encoding enum
-        encoding_enum = getattr(speech.RecognitionConfig.AudioEncoding, self.encoding)
+        encoding_enum = None
+        if self.encoding.upper() == "LINEAR16":
+            encoding_enum = speech.RecognitionConfig.AudioEncoding.LINEAR16
+        elif self.encoding.upper() == "MULAW":
+            encoding_enum = speech.RecognitionConfig.AudioEncoding.MULAW
+        else:
+            encoding_enum = speech.RecognitionConfig.AudioEncoding.LINEAR16
         
         # Create RecognitionConfig
         config = speech.RecognitionConfig(
@@ -218,7 +220,7 @@ class GoogleCloudStreamingSTT:
             enable_automatic_punctuation=True,
             enable_word_time_offsets=True,
             profanity_filter=False,
-            model="telephony" if self.enhanced_model else "command_and_search",
+            model=self.model_name,
             use_enhanced=self.enhanced_model,
         )
         
@@ -244,7 +246,7 @@ class GoogleCloudStreamingSTT:
         
         return streaming_config
     
-    def _update_noise_floor(self, audio_data: np.ndarray) -> None:
+    def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
         Update ambient noise level based on audio energy.
         
@@ -315,39 +317,63 @@ class GoogleCloudStreamingSTT:
             from scipy import signal
             
             # 1. Apply high-pass filter to remove low-frequency noise (below 80Hz)
+            # Telephone lines often have low frequency hum
             b, a = signal.butter(4, 80/(self.sample_rate/2), 'highpass')
             filtered_audio = signal.filtfilt(b, a, audio_data)
             
-            # 2. Apply band-pass filter for speech frequencies (300-3400 Hz)
-            b, a = signal.butter(3, [300/(self.sample_rate/2), 3400/(self.sample_rate/2)], 'band')
-            filtered_audio = signal.filtfilt(b, a, filtered_audio)
+            # 2. Apply a mild de-emphasis filter to reduce hissing sounds in phone calls
+            b, a = signal.butter(1, 3000/(self.sample_rate/2), 'low')
+            de_emphasis = signal.filtfilt(b, a, filtered_audio)
             
-            # 3. Apply pre-emphasis to boost higher frequencies
-            pre_emphasized = np.append(filtered_audio[0], filtered_audio[1:] - 0.97 * filtered_audio[:-1])
+            # 3. Apply a simple noise gate to remove background noise
+            noise_threshold = max(0.005, self.ambient_noise_level)
+            noise_gate = np.where(np.abs(de_emphasis) < noise_threshold, 0, de_emphasis)
             
-            # 4. Simple noise gate (suppress very low amplitudes)
-            noise_gate_threshold = max(0.015, self.ambient_noise_level * 2)
-            noise_gate = np.where(np.abs(pre_emphasized) < noise_gate_threshold, 0, pre_emphasized)
+            # 4. Apply pre-emphasis filter to boost higher frequencies (for better speech detection)
+            pre_emphasis = np.append(noise_gate[0], noise_gate[1:] - 0.97 * noise_gate[:-1])
             
             # 5. Normalize audio to have consistent volume
-            if np.max(np.abs(noise_gate)) > 0:
-                normalized = noise_gate / np.max(np.abs(noise_gate)) * 0.95
+            if np.max(np.abs(pre_emphasis)) > 0:
+                normalized = pre_emphasis / np.max(np.abs(pre_emphasis)) * 0.95
             else:
-                normalized = noise_gate
-                
-            # Log audio statistics for debugging
-            orig_energy = np.mean(np.abs(audio_data))
-            proc_energy = np.mean(np.abs(normalized))
+                normalized = pre_emphasis
+            
+            # 6. Apply a mild compression to even out volumes
+            # Compression ratio 2:1 for values above threshold
+            threshold = 0.2
+            ratio = 0.5  # 2:1 compression
+            
+            def compressor(x, threshold, ratio):
+                # If below threshold, leave it alone
+                # If above threshold, compress it
+                mask = np.abs(x) > threshold
+                sign = np.sign(x)
+                mag = np.abs(x)
+                compressed = np.where(
+                    mask,
+                    threshold + (mag - threshold) * ratio,
+                    mag
+                )
+                return sign * compressed
+            
+            compressed = compressor(normalized, threshold, ratio)
+            
+            # Re-normalize after compression
+            if np.max(np.abs(compressed)) > 0:
+                result = compressed / np.max(np.abs(compressed)) * 0.95
+            else:
+                result = compressed
             
             # Detect barge-in if agent is speaking
             if self.agent_is_speaking:
-                self._detect_barge_in(normalized)
+                self._detect_barge_in(result)
                 
             # Update noise floor if energy is very low
-            if orig_energy < 0.01:
-                self._update_noise_floor(audio_data)
+            energy = np.mean(np.abs(audio_data))
+            if energy < 0.01:
+                self._update_ambient_noise_level(audio_data)
                 
-            return normalized
+            return result
             
         except Exception as e:
             logger.error(f"Error in audio preprocessing: {e}")
@@ -410,6 +436,7 @@ class GoogleCloudStreamingSTT:
         confidence_estimate = 1.0
         if "?" in text or "[" in text or "(" in text or "<" in text:
             confidence_estimate = 0.6  # Lower confidence if it contains uncertainty markers
+            logger.info(f"Reduced confidence due to uncertainty markers: {text}")
             
         if confidence_estimate < 0.7:
             logger.info(f"Transcription confidence too low: {confidence_estimate}")
@@ -431,45 +458,159 @@ class GoogleCloudStreamingSTT:
         
         logger.info("Starting new Google Cloud Speech streaming session")
         
-        # Create streaming client
-        self.streaming_client = speech.SpeechClient()
-        
-        # Create streaming config
-        self.streaming_config = self._get_streaming_config()
-        
-        # Initialize request generator
-        self.request_generator = self._create_request_generator()
-        
-        # Prime the generator by sending the config
-        next(self.request_generator)
-        
-        # Create bidirectional streaming RPC - Fixed to properly pass requests
-        self.stream = self.streaming_client.streaming_recognize(
-            requests=self.request_generator
-        )
-        
-        # Reset state
-        self.utterance_id = 0
-        self.last_result = None
-        self.is_streaming = True
-        self.audio_buffer = []
-        self.barge_in_frame_count = 0
-        self.potential_barge_in = False
-    
-    def _create_request_generator(self):
-        """Create a generator for streaming requests."""
-        # First, yield the streaming config
-        yield speech.StreamingRecognizeRequest(streaming_config=self.streaming_config)
-        
-        # This is a generator that will be used to send audio data
-        while True:
-            # This will block until audio data is sent
-            data = yield
-            if data is None:
-                break
+        try:
+            # Reset state
+            self.is_streaming = True
+            self.audio_queue = queue.Queue()
+            self.stop_event = threading.Event()
             
-            # Yield audio content
-            yield speech.StreamingRecognizeRequest(audio_content=data)
+            # Initialize variables
+            self.requests = []
+            
+            # Create the streaming configuration once
+            streaming_config = self._get_streaming_config()
+            
+            # Create the initial request with streaming config
+            initial_request = speech.StreamingRecognizeRequest(
+                streaming_config=streaming_config
+            )
+            
+            # Start a thread to handle streaming
+            self.responses_thread = threading.Thread(
+                target=self._stream_audio_data,
+                args=(initial_request,)
+            )
+            self.responses_thread.daemon = True
+            self.responses_thread.start()
+            
+            logger.info("Google Cloud Speech streaming session started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start streaming: {e}")
+            self.is_streaming = False
+            raise
+    
+    def _stream_audio_data(self, initial_request):
+        """Handle streaming in a background thread to avoid blocking."""
+        try:
+            # Create a request generator function
+            def request_generator():
+                # First, yield the initial config request
+                yield initial_request
+                
+                # Then keep yielding audio chunks from the queue
+                while not self.stop_event.is_set():
+                    try:
+                        chunk = self.audio_queue.get(timeout=0.5)
+                        yield speech.StreamingRecognizeRequest(audio_content=chunk)
+                        self.audio_queue.task_done()
+                    except queue.Empty:
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error in request generator: {e}")
+                        break
+            
+            # Start streaming recognize with the request generator
+            responses = self.client.streaming_recognize(
+                config=self._get_streaming_config(),  # Add config parameter
+                requests=request_generator()
+            )
+            
+            # Process results
+            for response in responses:
+                if self.stop_event.is_set():
+                    break
+                
+                # Process each result in the response
+                for result in response.results:
+                    transcription_result = StreamingTranscriptionResult.from_google_result(
+                        result,
+                        energy_level=0.0
+                    )
+                    
+                    # Set barge-in flag if detected
+                    transcription_result.barge_in_detected = self.potential_barge_in
+                    
+                    # Save final results for later use
+                    if result.is_final:
+                        self.last_result = transcription_result
+                    
+                    # Process callbacks
+                    for callback in self.result_callbacks:
+                        try:
+                            # Call callback in the event loop
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                asyncio.run_coroutine_threadsafe(
+                                    callback(transcription_result),
+                                    loop
+                                )
+                        except Exception as e:
+                            logger.error(f"Error calling callback: {e}")
+                
+        except Exception as e:
+            if "config" in str(e):
+                logger.error(f"Error in streaming: {e} - This appears to be an API version compatibility issue.")
+                # Try the v1 version
+                try:
+                    logger.info("Trying alternative API method...")
+                    # Recreate the generator for v1
+                    def request_generator_v1():
+                        yield speech.StreamingRecognizeRequest(
+                            streaming_config=self._get_streaming_config()
+                        )
+                        
+                        while not self.stop_event.is_set():
+                            try:
+                                chunk = self.audio_queue.get(timeout=0.5)
+                                yield speech.StreamingRecognizeRequest(audio_content=chunk)
+                                self.audio_queue.task_done()
+                            except queue.Empty:
+                                continue
+                            except Exception as e:
+                                logger.error(f"Error in v1 request generator: {e}")
+                                break
+                    
+                    # Try the v1 approach (without config parameter)
+                    responses = self.client.streaming_recognize(
+                        requests=request_generator_v1()
+                    )
+                    
+                    # Process results (same code as above)
+                    for response in responses:
+                        if self.stop_event.is_set():
+                            break
+                        
+                        # Process each result in the response
+                        for result in response.results:
+                            transcription_result = StreamingTranscriptionResult.from_google_result(
+                                result,
+                                energy_level=0.0
+                            )
+                            
+                            # Set barge-in flag if detected
+                            transcription_result.barge_in_detected = self.potential_barge_in
+                            
+                            # Save final results for later use
+                            if result.is_final:
+                                self.last_result = transcription_result
+                            
+                            # Process callbacks
+                            for callback in self.result_callbacks:
+                                try:
+                                    # Call callback in the event loop
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.run_coroutine_threadsafe(
+                                            callback(transcription_result),
+                                            loop
+                                        )
+                                except Exception as e:
+                                    logger.error(f"Error calling callback: {e}")
+                    
+                except Exception as e2:
+                    logger.error(f"Alternative API method also failed: {e2}")
+            else:
+                logger.error(f"Error in streaming audio: {e}")
     
     def set_agent_speaking(self, speaking: bool) -> None:
         """
@@ -512,6 +653,10 @@ class GoogleCloudStreamingSTT:
                 return None
         
         try:
+            # Add callback if provided
+            if callback and callback not in self.result_callbacks:
+                self.result_callbacks.append(callback)
+            
             # Ensure audio_chunk is numpy array for preprocessing
             if isinstance(audio_chunk, bytes):
                 # Convert from 16-bit PCM bytes to float32 array
@@ -525,94 +670,16 @@ class GoogleCloudStreamingSTT:
             # Process audio for better recognition and detect barge-in
             processed_audio = self._preprocess_audio(audio_data)
             
-            # Keep buffer of recent audio for context
-            self.audio_buffer.append(processed_audio)
-            if len(self.audio_buffer) > self.max_buffer_frames:
-                self.audio_buffer.pop(0)
-            
             # Convert to bytes for Google Cloud
             audio_bytes = (processed_audio * 32767).astype(np.int16).tobytes()
             
-            # Send audio to Google Cloud Speech API
-            try:
-                self.request_generator.send(audio_bytes)
-            except StopIteration:
-                # If generator has stopped, restart streaming session
-                logger.warning("Request generator stopped, restarting streaming session")
-                await self.start_streaming()
-                if not self.is_streaming:
-                    return None
-                    
-                # Try sending audio again
-                self.request_generator.send(audio_bytes)
+            # Add to queue if streaming is active
+            if self.is_streaming and not self.stop_event.is_set():
+                self.audio_queue.put(audio_bytes)
             
-            # Process available responses (non-blocking)
-            results = []
-            
-            def process_responses():
-                try:
-                    # Get responses from the stream
-                    for response in self.stream.responses:
-                        # Only process if still streaming
-                        if not self.is_streaming:
-                            break
-                            
-                        # Process each result in the response
-                        for result in response.results:
-                            self.utterance_id += 1
-                            
-                            # Create result object with energy level for barge-in detection
-                            transcription_result = StreamingTranscriptionResult.from_google_result(
-                                result, 
-                                energy_level=energy_level
-                            )
-                            
-                            # Set barge_in_detected flag if we detected a barge-in
-                            transcription_result.barge_in_detected = self.potential_barge_in
-                            
-                            # Add chunk_id for tracking
-                            transcription_result.chunk_id = self.utterance_id
-                            
-                            # Add to results
-                            results.append(transcription_result)
-                            
-                            # Save final results for stop_streaming
-                            if result.is_final:
-                                self.last_result = transcription_result
-                            
-                            # Call callback asynchronously
-                            if callback:
-                                loop = asyncio.get_event_loop()
-                                asyncio.run_coroutine_threadsafe(
-                                    callback(transcription_result), 
-                                    loop
-                                )
-                                
-                except Exception as e:
-                    logger.error(f"Error processing responses: {e}")
-                finally:
-                    return results
-            
-            # Run in thread pool to avoid blocking
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = asyncio.get_event_loop().run_in_executor(
-                    executor, 
-                    process_responses
-                )
-                
-                # Wait a short time for any results
-                try:
-                    response_results = await asyncio.wait_for(future, timeout=0.05)
-                    if response_results:
-                        # Return last result (most recent)
-                        return response_results[-1]
-                except asyncio.TimeoutError:
-                    # No results yet, that's ok
-                    pass
-            
-            # If no results from process_responses but barge-in detected, create a result
+            # If barge-in detected, create a fake result to signal it immediately
             if self.potential_barge_in and self.agent_is_speaking:
-                # Create a fake result to indicate barge-in detection
+                # Create a fake result for immediate barge-in handling
                 barge_in_result = StreamingTranscriptionResult(
                     text="",  # No text yet
                     is_final=False,
@@ -623,6 +690,7 @@ class GoogleCloudStreamingSTT:
                 )
                 return barge_in_result
                 
+            # No immediate result to return
             return None
                 
         except Exception as e:
@@ -631,7 +699,7 @@ class GoogleCloudStreamingSTT:
     
     async def stop_streaming(self) -> tuple[str, float]:
         """
-        Stop the streaming session and return final text.
+        Stop the streaming session and get final transcription.
         
         Returns:
             Tuple of (final_text, duration)
@@ -643,12 +711,12 @@ class GoogleCloudStreamingSTT:
         duration = 0.0
         
         try:
-            # Close the stream by sending None to the generator
-            if self.request_generator:
-                try:
-                    self.request_generator.send(None)
-                except (StopIteration, ValueError):
-                    pass
+            # Set stop event to signal request generator to stop
+            self.stop_event.set()
+            
+            # Wait for the responses thread to finish
+            if self.responses_thread and self.responses_thread.is_alive():
+                self.responses_thread.join(timeout=2.0)
             
             # Get the final result if available
             if self.last_result:
@@ -657,74 +725,18 @@ class GoogleCloudStreamingSTT:
                 
                 # Clean up the text
                 final_text = self.cleanup_transcription(final_text)
+                
         except Exception as e:
             logger.error(f"Error stopping streaming: {e}")
         finally:
+            # Reset state
             self.is_streaming = False
             self.stream = None
-            self.request_generator = None
+            self.responses_thread = None
+            self.result_callbacks = []
+            self.audio_queue = None
+            self.stop_event = None
             self.last_result = None
             logger.info(f"Stopped Google Cloud STT streaming session. Final text: '{final_text}'")
         
         return final_text, duration
-    
-    async def stream_file(
-        self,
-        file_path: str,
-        callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None,
-        chunk_size: int = 4096  # ~128ms at 16kHz, 16-bit mono
-    ) -> List[StreamingTranscriptionResult]:
-        """
-        Stream audio file through Google Cloud Speech.
-        
-        Args:
-            file_path: Path to audio file
-            callback: Optional callback for results
-            chunk_size: Size of audio chunks to process
-            
-        Returns:
-            List of final recognition results
-        """
-        # Start streaming session
-        await self.start_streaming()
-        
-        results = []
-        try:
-            # Open and read audio file
-            with open(file_path, 'rb') as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                        
-                    # Process chunk
-                    result = await self.process_audio_chunk(chunk, callback)
-                    
-                    # Save final results
-                    if result and result.is_final:
-                        results.append(result)
-                        
-                    # Simulate real-time audio
-                    await asyncio.sleep(0.02)  # Small delay for stability
-                        
-            # Stop streaming
-            final_text, duration = await self.stop_streaming()
-            
-            return results
-        except Exception as e:
-            logger.error(f"Error streaming file: {e}")
-            await self.stop_streaming()
-            return results
-    
-    def set_speech_context(self, phrases: List[str], boost: float = 15.0) -> None:
-        """
-        Update speech context phrases for improved recognition.
-        
-        Args:
-            phrases: List of phrases to boost
-            boost: Boost value (0-20)
-        """
-        self.speech_context_phrases = phrases
-        
-        # This will take effect next time streaming is started
-        logger.info(f"Updated speech context with {len(phrases)} phrases")
