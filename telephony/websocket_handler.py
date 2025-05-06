@@ -71,7 +71,6 @@ class StreamingRecognitionResult:
         self.start_time = 0.0
         self.end_time = 0.0
         self.chunk_id = 0
-        self.barge_in_detected = False
         
     @classmethod
     def from_google_result(cls, result):
@@ -376,20 +375,12 @@ class WebSocketHandler:
         self.noise_samples = []
         self.max_noise_samples = 20
         
-        # Set up Google Cloud Speech with barge-in detection
-        self.speech_client = GoogleCloudStreamingSTT(
-            language="en-US",
+        # Set up Google Cloud Speech
+        self.speech_client = SimpleGoogleSTT(
+            language_code="en-US",
             sample_rate=16000,
-            encoding="LINEAR16",
-            channels=1,
-            interim_results=True,
-            vad_enabled=True,  # Enable voice activity detection
-            barge_in_threshold=0.02  # Set barge-in sensitivity
+            enable_automatic_punctuation=True
         )
-        
-        # Track agent speaking state for barge-in detection
-        self.agent_is_speaking = False
-        self.response_interrupted = False
         
         # Ensure we start with a fresh speech recognition session
         self.google_speech_active = False
@@ -579,8 +570,6 @@ class WebSocketHandler:
         self.conversation_active = True
         self.noise_samples = []  # Reset noise samples
         self.google_speech_active = False  # Reset Google Speech session state
-        self.agent_is_speaking = False  # Reset agent speaking state
-        self.response_interrupted = False  # Reset interruption state
         
         # Initialize ElevenLabs TTS if not already
         if self.elevenlabs_tts is None:
@@ -652,7 +641,7 @@ class WebSocketHandler:
             
             # Check if we should process based on time since last response
             time_since_last_response = time.time() - self.last_response_time
-            if time_since_last_response < self.pause_after_response and not self.agent_is_speaking:
+            if time_since_last_response < self.pause_after_response:
                 # Still in pause period after last response, wait before processing new input
                 logger.debug(f"In pause period after response ({time_since_last_response:.1f}s < {self.pause_after_response:.1f}s)")
                 return
@@ -781,25 +770,11 @@ class WebSocketHandler:
             # Create a list to collect transcription results
             transcription_results = []
             
-            # Define a callback to collect results and handle barge-in
+            # Define a callback to collect results
             async def transcription_callback(result):
                 if hasattr(result, 'is_final') and result.is_final:
                     transcription_results.append(result)
                     logger.debug(f"Received final Google Speech result: {result.text}")
-                
-                # Check for barge-in detection
-                if hasattr(result, 'barge_in_detected') and result.barge_in_detected and self.agent_is_speaking:
-                    logger.info("Barge-in detected! User interrupted the agent.")
-                    self.response_interrupted = True
-                    # Stop current audio playback
-                    self.output_buffer.clear()
-                    # Process the interruption immediately
-                    if hasattr(result, 'text') and result.text:
-                        # Process this partial transcription immediately
-                        await self._handle_barge_in(result.text, ws)
-            
-            # Set agent speaking state for barge-in detection
-            self.speech_client.set_agent_speaking(self.agent_is_speaking)
             
             # Process audio through Google Cloud Speech
             try:
@@ -951,34 +926,6 @@ class WebSocketHandler:
                 
         except Exception as e:
             logger.error(f"Error processing audio: {e}", exc_info=True)
-
-    async def _handle_barge_in(self, partial_text: str, ws) -> None:
-        """
-        Handle user interruption (barge-in) with partial text.
-        
-        Args:
-            partial_text: Partial transcription from the interruption
-            ws: WebSocket connection
-        """
-        logger.info(f"Handling barge-in with partial text: '{partial_text}'")
-        
-        # Stop any current speech output
-        self.output_buffer.clear()
-        
-        # Set flag that agent is no longer speaking
-        self.agent_is_speaking = False
-        self.speech_client.set_agent_speaking(False)
-        
-        # Clear the input buffer to start fresh
-        self.input_buffer.clear()
-        
-        # Optional: Send a small audio cue that the agent was interrupted
-        try:
-            interrupt_message = "I'm listening."
-            interrupt_audio = await self.elevenlabs_tts.synthesize(interrupt_message)
-            await self._send_audio(interrupt_audio, ws)
-        except Exception as e:
-            logger.error(f"Error sending interruption cue: {e}")
     
     def _contains_speech(self, audio_data: np.ndarray) -> bool:
         """
@@ -1093,11 +1040,6 @@ class WebSocketHandler:
             ws: WebSocket connection
         """
         try:
-            # Set flag that agent is speaking for barge-in detection
-            self.agent_is_speaking = True
-            self.speech_client.set_agent_speaking(True)
-            self.response_interrupted = False
-            
             # Convert text to speech with ElevenLabs
             if self.elevenlabs_tts:
                 try:
@@ -1139,10 +1081,6 @@ class WebSocketHandler:
                 logger.error("TTS integration not available")
         except Exception as e:
             logger.error(f"Error sending text response: {e}", exc_info=True)
-        finally:
-            # Reset speaking state
-            self.agent_is_speaking = False
-            self.speech_client.set_agent_speaking(False)
     
     async def _keep_alive_loop(self, ws) -> None:
         """
