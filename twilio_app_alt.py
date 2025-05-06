@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced Twilio application using WebSocket streaming with ElevenLabs TTS integration.
+Enhanced Twilio application using WebSocket streaming with ElevenLabs TTS integration
+and improved barge-in detection.
 """
 import os
 import sys
@@ -154,30 +155,37 @@ def handle_incoming_call():
         # Add call to manager
         twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
         
-        # Create TwiML response
+        # Create TwiML response with improved barge-in configuration
         response = VoiceResponse()
         
-        # Add initial greeting with barge-in enabled
+        # Add initial greeting with barge-in explicitly enabled (make sure it's recognized)
+        # Use explicit attributes to ensure barge-in is enabled
         response.say("Welcome to the Voice AI Agent. I'm here to help you.", 
                     voice='alice', 
-                    bargeIn=True)
+                    bargeIn="true")  # Use string "true" instead of Python boolean
         response.pause(length=1)
         
         # Use WebSocket streaming for real-time conversation with barge-in support
         ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
         logger.info(f"Setting up WebSocket stream at: {ws_url}")
         
-        # Create the streaming connection with barge-in enabled
+        # Create the streaming connection with explicit barge-in enabled
         connect = Connect()
-        stream = Stream(url=ws_url, bargeIn=True)
+        # Add customParameters to explicitly set bargeIn=true in the stream data
+        stream = Stream(
+            url=ws_url, 
+            bargeIn="true",  # Use string "true" to ensure proper XML attribute 
+            track="inbound_track"
+        )
         connect.append(stream)
         response.append(connect)
         
-        # Add TwiML to keep connection alive if needed
+        # Add TwiML to keep connection alive if needed, also with barge-in enabled
         response.say("The AI assistant is now listening. Please speak clearly.", 
                     voice='alice',
-                    bargeIn=True)
+                    bargeIn="true")  # Use string "true" instead of Python boolean
         
+        # Log the TwiML for verification
         logger.info(f"Generated TwiML for WebSocket streaming with barge-in: {response}")
         return Response(str(response), mimetype='text/xml')
     except Exception as e:
@@ -222,8 +230,11 @@ def handle_status_callback():
                 thread.join(timeout=1.0)
                 
             # Remove from tracking
-            del call_event_loops[call_sid]
-            logger.info(f"Cleaned up event loop resources for call {call_sid}")
+            try:
+                del call_event_loops[call_sid]
+                logger.info(f"Cleaned up event loop resources for call {call_sid}")
+            except KeyError:
+                logger.error(f"Error handling status callback: '{call_sid}'")
                 
         return Response('', status=204)
     except Exception as e:
@@ -268,7 +279,7 @@ def run_event_loop_in_thread(loop, ws_handler, ws, call_sid, terminate_flag):
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream with ElevenLabs TTS."""
+    """Handle WebSocket media stream with enhanced barge-in detection."""
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
     if not twilio_handler or not voice_ai_pipeline:
@@ -280,8 +291,12 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Create WebSocket handler with ElevenLabs TTS
+        # Create WebSocket handler with enhanced barge-in detection
         ws_handler = WebSocketHandler(call_sid, voice_ai_pipeline)
+        # Force enable barge-in for better user experience
+        ws_handler.barge_in_enabled = True
+        ws_handler.barge_in_check_enabled = True
+        ws_handler.barge_in_energy_threshold = 0.008  # Set lower threshold for faster response
         
         # Create an event loop for this connection
         loop = asyncio.new_event_loop()
@@ -360,128 +375,3 @@ def handle_media_stream(call_sid):
         
         # Return empty response
         return ""
-
-@app.route('/ws-test')
-def ws_test():
-    """WebSocket connection test page."""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>WebSocket Test</title>
-        <script>
-            function startTest() {
-                const wsUrl = document.getElementById('wsUrl').value;
-                const output = document.getElementById('output');
-                
-                output.innerHTML += `<p>Connecting to ${wsUrl}...</p>`;
-                
-                const ws = new WebSocket(wsUrl);
-                
-                ws.onopen = () => {
-                    output.innerHTML += '<p style="color:green">Connection opened!</p>';
-                    ws.send(JSON.stringify({event: 'test', message: 'Hello WebSocket'}));
-                };
-                
-                ws.onmessage = (event) => {
-                    output.innerHTML += `<p>Received: ${event.data}</p>`;
-                };
-                
-                ws.onerror = (error) => {
-                    output.innerHTML += `<p style="color:red">Error: ${error}</p>`;
-                };
-                
-                ws.onclose = () => {
-                    output.innerHTML += '<p>Connection closed</p>';
-                };
-            }
-        </script>
-    </head>
-    <body>
-        <h1>WebSocket Connection Test with ElevenLabs TTS</h1>
-        <input id="wsUrl" type="text" value="wss://your-runpod-url.proxy.runpod.net/ws/test" style="width:400px" />
-        <button onclick="startTest()">Test Connection</button>
-        <div id="output"></div>
-    </body>
-    </html>
-    """
-
-@app.route('/ws/test', websocket=True)
-def ws_test_endpoint():
-    """WebSocket test endpoint."""
-    try:
-        ws = Server.accept(request.environ)
-        logger.info("WebSocket test connection established")
-        
-        ws.send(json.dumps({"status": "connected", "message": "WebSocket test with ElevenLabs TTS successful!"}))
-        
-        try:
-            while True:
-                message = ws.receive(timeout=10)
-                if message is None:
-                    break
-                logger.info(f"Received WebSocket test message: {message}")
-                ws.send(json.dumps({"status": "echo", "message": message}))
-        except Exception as e:
-            logger.error(f"Error in WebSocket test: {e}")
-        finally:
-            ws.close()
-    except Exception as e:
-        logger.error(f"Error establishing WebSocket test connection: {e}")
-    
-    return ""
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint."""
-    if not twilio_handler or not voice_ai_pipeline:
-        return Response(json.dumps({"status": "unhealthy"}), 
-                       mimetype='application/json', 
-                       status=503)
-    
-    return Response(json.dumps({
-        "status": "healthy",
-        "tts_provider": "ElevenLabs",
-        "voice_id": ELEVENLABS_VOICE_ID
-    }), mimetype='application/json')
-
-@app.route('/tts/voices', methods=['GET'])
-def list_voices():
-    """List available ElevenLabs voices."""
-    if not ELEVENLABS_API_KEY:
-        return Response(json.dumps({"error": "ElevenLabs API key not configured"}),
-                       mimetype='application/json',
-                       status=400)
-    
-    try:
-        # Call ElevenLabs API to get voices
-        response = requests.get(
-            "https://api.elevenlabs.io/v1/voices",
-            headers={
-                "xi-api-key": ELEVENLABS_API_KEY
-            }
-        )
-        
-        if response.status_code == 200:
-            voices = response.json()
-            return Response(json.dumps(voices),
-                          mimetype='application/json')
-        else:
-            return Response(json.dumps({"error": f"Failed to retrieve voices: {response.text}"}),
-                          mimetype='application/json',
-                          status=response.status_code)
-    except Exception as e:
-        return Response(json.dumps({"error": f"Failed to retrieve voices: {str(e)}"}),
-                      mimetype='application/json',
-                      status=500)
-
-if __name__ == '__main__':
-    # Initialize the system
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(initialize_system())
-    
-    # Run the server
-    logger.info(f"Server starting on {HOST}:{PORT}")
-    logger.info(f"BASE_URL: {os.getenv('BASE_URL')}")
-    logger.info(f"Using ElevenLabs TTS with voice ID: {ELEVENLABS_VOICE_ID}")
-    app.run(host=HOST, port=PORT, debug=DEBUG)

@@ -1,6 +1,6 @@
 """
 WebSocket handler for Twilio media streams with Google Cloud Speech integration
-and ElevenLabs TTS.
+and ElevenLabs TTS with enhanced barge-in detection.
 """
 import json
 import base64
@@ -325,7 +325,7 @@ class GoogleCloudSpeechHandler:
 class WebSocketHandler:
     """
     Handles WebSocket connections for Twilio media streams with Google Cloud Speech integration
-    and ElevenLabs TTS.
+    and ElevenLabs TTS with enhanced barge-in detection.
     """
     
     def __init__(self, call_sid: str, pipeline):
@@ -348,7 +348,8 @@ class WebSocketHandler:
         # State tracking
         self.is_speaking = False
         self.speech_interrupted = False
-        self.barge_in_enabled = False  # Will be set based on stream configuration
+        # IMPORTANT: Always enable barge-in for better user experience
+        self.barge_in_enabled = True  # Force enable barge-in
         self.current_audio_chunks = []
         self.is_processing = False
         self.conversation_active = True
@@ -369,7 +370,7 @@ class WebSocketHandler:
         self.non_speech_pattern = re.compile('|'.join(NON_SPEECH_PATTERNS))
         
         # Conversation flow management
-        self.pause_after_response = 2.0  # Wait 2 seconds after response before processing new input
+        self.pause_after_response = 1.0  # Reduced from 2.0 to 1.0 for better barge-in response
         self.min_words_for_valid_query = 2  # Minimum words for a valid query
         
         # Add ambient noise tracking for adaptive thresholds
@@ -390,7 +391,11 @@ class WebSocketHandler:
         # Set up ElevenLabs TTS with optimized settings for Twilio
         self.elevenlabs_tts = None
         
-        logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support")
+        # Add barge-in sensitivity settings
+        self.barge_in_energy_threshold = 0.008  # Lower threshold specifically for barge-in detection
+        self.barge_in_check_enabled = True  # Additional flag to control audio-based barge-in detection
+        
+        logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support (FORCED ENABLED)")
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
@@ -453,7 +458,6 @@ class WebSocketHandler:
         return cleaned_text
     
     def is_valid_transcription(self, text: str) -> bool:
-        
         """
         Check if a transcription is valid and worth processing.
         Modified to handle questions properly for barge-in scenarios.
@@ -536,7 +540,7 @@ class WebSocketHandler:
                 await self._handle_stop(data)
             elif event_type == 'mark':
                 await self._handle_mark(data)
-            elif event_type == 'bargein':  # New event type for barge-in detection
+            elif event_type == 'bargein':  # Handler for explicit barge-in events
                 await self._handle_bargein(data, ws)
             else:
                 logger.warning(f"Unknown event type: {event_type}")
@@ -577,9 +581,12 @@ class WebSocketHandler:
         logger.info(f"Stream started - SID: {self.stream_sid}, Call: {self.call_sid}")
         logger.info(f"Start data: {data}")
         
-        # Extract barge-in configuration if available
-        self.barge_in_enabled = data.get('bargeIn', False)
-        logger.info(f"Barge-in detection: {'Enabled' if self.barge_in_enabled else 'Disabled'}")
+        # Extract barge-in configuration if available and FORCE ENABLE for better user experience
+        barge_in_from_twilio = data.get('start', {}).get('customParameters', {}).get('bargeIn', False)
+        self.barge_in_enabled = True  # Force enable barge-in regardless of what Twilio says
+        
+        # Log both the received value and our forced setting
+        logger.info(f"Barge-in from Twilio: {barge_in_from_twilio}, but FORCING ENABLE for better experience")
         
         # Reset state for new stream
         self.input_buffer.clear()
@@ -631,7 +638,7 @@ class WebSocketHandler:
     
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
         """
-        Handle media event with audio data.
+        Handle media event with audio data, with enhanced barge-in detection.
         
         Args:
             data: Media event data
@@ -662,10 +669,37 @@ class WebSocketHandler:
                 self.input_buffer = self.input_buffer[excess:]
                 logger.debug(f"Trimmed input buffer to {len(self.input_buffer)} bytes")
             
+            # Convert to PCM for speech detection (only if speaking and barge-in enabled)
+            if self.is_speaking and self.barge_in_enabled and self.barge_in_check_enabled:
+                # Convert and process with enhanced noise handling
+                pcm_audio = self.audio_processor.mulaw_to_pcm(audio_data)
+                
+                # Check for speech with lower threshold for barge-in detection
+                audio_energy = np.mean(np.abs(pcm_audio))
+                is_speech = audio_energy > self.barge_in_energy_threshold
+                
+                # Log audio energy when system is speaking (for debugging)
+                logger.debug(f"Barge-in check: audio_energy={audio_energy:.6f}, threshold={self.barge_in_energy_threshold:.6f}, is_speech={is_speech}")
+                
+                if is_speech:
+                    # Audio-based barge-in detection!
+                    logger.info(f"AUDIO-BASED BARGE-IN DETECTED! Energy: {audio_energy:.6f} > Threshold: {self.barge_in_energy_threshold:.6f}")
+                    self.speech_interrupted = True
+                    
+                    # Clear current audio chunks to stop sending
+                    self.current_audio_chunks = []
+                    
+                    # Process this interrupting audio immediately
+                    self.is_speaking = False  # Important: mark that we're no longer speaking
+                    
+                    # Set immediate processing regardless of pause after response
+                    self.last_response_time = 0
+            
             # Check if we should process based on time since last response
             time_since_last_response = time.time() - self.last_response_time
-            if time_since_last_response < self.pause_after_response:
+            if time_since_last_response < self.pause_after_response and not self.speech_interrupted:
                 # Still in pause period after last response, wait before processing new input
+                # But continue if we detected a barge-in
                 logger.debug(f"In pause period after response ({time_since_last_response:.1f}s < {self.pause_after_response:.1f}s)")
                 return
             
@@ -720,7 +754,7 @@ class WebSocketHandler:
             data: Barge-in event data
             ws: WebSocket connection
         """
-        logger.info(f"Barge-in detected - user interrupted the system. Data: {data}")
+        logger.info(f"EXPLICIT BARGE-IN DETECTED - user interrupted the system. Data: {data}")
         
         # Stop any ongoing speech
         self.speech_interrupted = True
@@ -736,11 +770,7 @@ class WebSocketHandler:
         self.is_processing = False
         self.last_response_time = 0  # Reset to allow immediate processing
         
-        # Send a small acknowledgment if desired
-        # await self.send_text_response("I'm listening", ws)
-        
         logger.info("Barge-in processed - ready for new user input")
-
     
     async def _handle_mark(self, data: Dict[str, Any]) -> None:
         """
@@ -982,7 +1012,8 @@ class WebSocketHandler:
     
     def _contains_speech(self, audio_data: np.ndarray) -> bool:
         """
-        Enhanced speech detection with better noise filtering.
+        Enhanced speech detection with better noise filtering,
+        optimized for barge-in detection with lower thresholds.
         
         Args:
             audio_data: Audio data as numpy array
@@ -996,27 +1027,14 @@ class WebSocketHandler:
         # Calculate RMS energy
         energy = np.sqrt(np.mean(np.square(audio_data)))
         
-        # Calculate zero-crossing rate (helps distinguish speech from noise)
-        zero_crossings = np.sum(np.abs(np.diff(np.signbit(audio_data)))) / len(audio_data)
+        # Lower speech threshold specifically for barge-in detection
+        speech_threshold = max(0.008, self.ambient_noise_level * 2.0)  # Lower threshold for barge-in
         
-        # Calculate spectral centroid (speech typically has higher centroids than noise)
-        fft_data = np.abs(np.fft.rfft(audio_data))
-        freqs = np.fft.rfftfreq(len(audio_data), 1/16000)
-        spectral_centroid = np.sum(freqs * fft_data) / (np.sum(fft_data) + 1e-10)
-        
-        # Get threshold based on ambient noise
-        speech_threshold = max(0.01, self.ambient_noise_level * 2.5)
+        # Simpler detection logic for faster barge-in detection
+        is_speech = energy > speech_threshold
         
         # Log values for debugging
-        logger.debug(f"Audio energy: {energy:.6f} (threshold: {speech_threshold:.6f}), "
-                    f"zero crossings: {zero_crossings:.6f}, "
-                    f"spectral centroid: {spectral_centroid:.2f}Hz")
-        
-        # Combined speech detection logic
-        is_speech = (energy > speech_threshold) and \
-                   (zero_crossings > 0.01) and \
-                   (zero_crossings < 0.15) and \
-                   (spectral_centroid > 500)  # Speech typically > 500Hz
+        logger.debug(f"Barge-in speech detection: energy={energy:.6f}, threshold={speech_threshold:.6f}, is_speech={is_speech}")
         
         return is_speech
     
@@ -1045,8 +1063,8 @@ class WebSocketHandler:
                 self.is_speaking = False
                 return
             
-            # Split audio into smaller chunks for better responsiveness
-            chunk_size = 1000  # Smaller chunks (62.5ms of audio at 8kHz mono)
+            # Split audio into smaller chunks for better responsiveness and barge-in
+            chunk_size = 800  # Smaller chunks (50ms of audio at 8kHz mono) for better barge-in
             chunks = [audio_data[i:i+chunk_size] for i in range(0, len(audio_data), chunk_size)]
             
             logger.debug(f"Splitting {len(audio_data)} bytes into {len(chunks)} chunks for playback")
@@ -1078,7 +1096,7 @@ class WebSocketHandler:
                     
                     # Add a small delay between chunks to allow for interruption
                     if i < len(chunks) - 1:  # Don't delay after the last chunk
-                        await asyncio.sleep(0.02)  # 20ms delay between chunks
+                        await asyncio.sleep(0.05)  # 50ms delay between chunks for better barge-in opportunity
                     
                 except Exception as e:
                     if "Connection closed" in str(e):

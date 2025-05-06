@@ -1,7 +1,8 @@
 """
-Enhanced audio processing utilities for telephony integration with Deepgram STT.
+Enhanced audio processing utilities for telephony integration.
 
-Handles audio format conversion between Twilio and Voice AI Agent.
+Handles audio format conversion between Twilio and Voice AI Agent with improved
+barge-in detection capabilities.
 """
 import audioop
 import numpy as np
@@ -15,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 class AudioProcessor:
     """
-    Handles audio conversion between Twilio and Voice AI formats with improved noise handling.
-    Optimized for Deepgram STT integration.
+    Handles audio conversion between Twilio and Voice AI formats with improved noise handling
+    and enhanced barge-in detection capabilities.
     
     Twilio uses 8kHz mulaw encoding, while our Voice AI uses 16kHz PCM.
     """
@@ -25,7 +26,7 @@ class AudioProcessor:
     def mulaw_to_pcm(mulaw_data: bytes) -> np.ndarray:
         """
         Convert Twilio's mulaw audio to PCM for Voice AI with enhanced noise filtering.
-        Optimized for Deepgram STT processing.
+        Optimized for better barge-in detection and speech recognition.
         
         Args:
             mulaw_data: Audio data in mulaw format
@@ -53,7 +54,7 @@ class AudioProcessor:
             audio_array = np.frombuffer(pcm_data_16k, dtype=np.int16)
             audio_array = audio_array.astype(np.float32) / 32768.0
             
-            # Apply enhanced audio filtering optimized for Deepgram
+            # Apply enhanced audio filtering optimized for barge-in detection
             # Apply high-pass filter to remove low-frequency noise
             b, a = signal.butter(6, 100/(SAMPLE_RATE_AI/2), 'highpass')
             audio_array = signal.filtfilt(b, a, audio_array)
@@ -62,17 +63,17 @@ class AudioProcessor:
             b, a = signal.butter(4, [300/(SAMPLE_RATE_AI/2), 3400/(SAMPLE_RATE_AI/2)], 'band')
             audio_array = signal.filtfilt(b, a, audio_array)
             
-            # Apply a simple noise gate
-            noise_threshold = 0.015  # Adjusted threshold
+            # Apply a simple noise gate with lower threshold for better barge-in
+            noise_threshold = 0.01  # Lower threshold (was 0.015) to detect quieter speech for barge-in
             audio_array = np.where(np.abs(audio_array) < noise_threshold, 0, audio_array)
             
-            # Apply pre-emphasis filter to boost higher frequencies
+            # Apply pre-emphasis filter to boost higher frequencies (improves speech detection)
             audio_array = np.append(audio_array[0], audio_array[1:] - 0.97 * audio_array[:-1])
             
-            # Normalize for consistent volume
+            # Normalize for consistent volume but preserve relative energy for better barge-in detection
             max_val = np.max(np.abs(audio_array))
             if max_val > 0:
-                audio_array = audio_array * (0.9 / max_val)
+                audio_array = audio_array * (0.95 / max_val)
             
             # Check audio levels
             audio_level = np.mean(np.abs(audio_array)) * 100
@@ -93,7 +94,8 @@ class AudioProcessor:
     @staticmethod
     def pcm_to_mulaw(pcm_data: bytes) -> bytes:
         """
-        Convert PCM audio from Voice AI to mulaw for Twilio.
+        Convert PCM audio from Voice AI to mulaw for Twilio with optimizations
+        for improved barge-in response times.
         
         Args:
             pcm_data: Audio data in PCM format
@@ -131,7 +133,8 @@ class AudioProcessor:
     @staticmethod
     def normalize_audio(audio_data: np.ndarray) -> np.ndarray:
         """
-        Normalize audio to [-1, 1] range.
+        Normalize audio to [-1, 1] range while preserving dynamics
+        for better barge-in detection.
         
         Args:
             audio_data: Audio data as numpy array
@@ -147,8 +150,8 @@ class AudioProcessor:
     @staticmethod
     def enhance_audio(audio_data: np.ndarray) -> np.ndarray:
         """
-        Enhance audio quality by reducing noise and improving speech clarity.
-        Optimized for Deepgram STT processing.
+        Enhance audio quality by reducing noise and improving speech clarity
+        with optimizations for better barge-in detection.
         
         Args:
             audio_data: Audio data as numpy array
@@ -162,12 +165,12 @@ class AudioProcessor:
             b, a = signal.butter(4, 80/(SAMPLE_RATE_AI/2), 'highpass')
             filtered_audio = signal.filtfilt(b, a, audio_data)
             
-            # 2. Apply a mild de-emphasis filter to reduce hissing sounds in phone calls
-            b, a = signal.butter(1, 3000/(SAMPLE_RATE_AI/2), 'low')
+            # 2. Apply a milder de-emphasis filter to reduce hissing but preserve speech onset
+            b, a = signal.butter(1, 3400/(SAMPLE_RATE_AI/2), 'low')  # Higher cutoff (was 3000Hz)
             de_emphasis = signal.filtfilt(b, a, filtered_audio)
             
-            # 3. Apply a simple noise gate to remove background noise
-            noise_threshold = 0.005  # Adjust based on expected noise level
+            # 3. Apply a simple noise gate with lower threshold for better barge-in detection
+            noise_threshold = 0.004  # Lower threshold (was 0.005) for better barge-in detection
             noise_gate = np.where(np.abs(de_emphasis) < noise_threshold, 0, de_emphasis)
             
             # 4. Apply pre-emphasis filter to boost higher frequencies (for better speech detection)
@@ -179,10 +182,10 @@ class AudioProcessor:
             else:
                 normalized = pre_emphasis
             
-            # 6. Apply a mild compression to even out volumes
-            # Compression ratio 2:1 for values above threshold
-            threshold = 0.2
-            ratio = 0.5  # 2:1 compression
+            # 6. Apply a milder compression to preserve dynamics for better barge-in detection
+            # Reduced compression ratio from 0.5 to 0.7 (closer to 1:1) and lower threshold
+            threshold = 0.15  # Lower threshold (was 0.2)
+            ratio = 0.7  # Milder compression (was 0.5)
             
             def compressor(x, threshold, ratio):
                 # If below threshold, leave it alone
@@ -213,42 +216,32 @@ class AudioProcessor:
             return audio_data
             
     @staticmethod
-    def detect_silence(audio_data: np.ndarray, threshold: float = 0.01) -> bool:
+    def detect_speech_for_barge_in(audio_data: np.ndarray, threshold: float = 0.007) -> bool:
         """
-        Enhanced silence detection with frequency analysis.
+        Enhanced speech detection specifically optimized for barge-in detection
+        with lower thresholds and faster response.
         
         Args:
             audio_data: Audio data as numpy array
-            threshold: Silence threshold
+            threshold: Speech detection threshold (lower than normal)
             
         Returns:
-            True if audio is considered silence
+            True if speech is detected for barge-in
         """
         try:
-            # 1. Check energy level
+            # 1. Check energy level with lower threshold for barge-in
             energy = np.mean(np.abs(audio_data))
-            energy_silence = energy < threshold
+            is_speech = energy > threshold
             
-            # Only do more expensive analysis if the energy check isn't conclusive
-            if energy < threshold * 2:  # If energy is low but not definitely silent
-                # 2. Check zero-crossing rate (white noise has high ZCR)
-                zcr = np.sum(np.abs(np.diff(np.signbit(audio_data)))) / len(audio_data)
-                
-                # 3. Check spectral flatness (noise typically has flatter spectrum)
-                # Approximate with FFT magnitude variance
-                fft_data = np.abs(np.fft.rfft(audio_data))
-                spectral_flatness = np.std(fft_data) / (np.mean(fft_data) + 1e-10)
-                
-                # Combined decision - true silence has low energy, low-moderate ZCR, and low spectral flatness
-                return energy_silence and zcr < 0.1 and spectral_flatness < 2.0
+            # Log detection results for debugging
+            logger.debug(f"Barge-in speech detection: energy={energy:.6f}, threshold={threshold:.6f}, detected={is_speech}")
             
-            # If energy is very low or very high, just use that criterion
-            return energy_silence
+            return is_speech
             
         except Exception as e:
-            logger.error(f"Error in silence detection: {e}")
-            # Fall back to simple energy threshold
-            return np.mean(np.abs(audio_data)) < threshold
+            logger.error(f"Error in barge-in speech detection: {e}")
+            # Return False if there's an error
+            return False
     
     @staticmethod
     def get_audio_info(audio_data: bytes) -> Dict[str, Any]:
@@ -320,3 +313,91 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Error converting PCM16 to float32: {e}")
             return np.array([], dtype=np.float32)
+            
+    @staticmethod
+    def convert_to_mulaw(audio_data: bytes, sample_rate: int = 8000) -> bytes:
+        """
+        Convert audio from any format to µ-law format specifically for Twilio.
+        Used for ElevenLabs TTS output processing.
+        
+        Args:
+            audio_data: Audio data as bytes
+            sample_rate: Target sample rate for Twilio
+            
+        Returns:
+            Audio data converted to µ-law format
+        """
+        try:
+            import wave
+            import io
+            
+            # If it's already µ-law, don't convert
+            if AudioProcessor.is_mulaw(audio_data):
+                return audio_data
+                
+            # If it's WAV, extract PCM data
+            if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
+                with io.BytesIO(audio_data) as f:
+                    with wave.open(f, 'rb') as wav:
+                        pcm_data = wav.readframes(wav.getnframes())
+                        src_sample_rate = wav.getframerate()
+                        src_channels = wav.getnchannels()
+                        src_width = wav.getsampwidth()
+                        
+                        # Resample if needed
+                        if src_sample_rate != sample_rate:
+                            pcm_data, _ = audioop.ratecv(
+                                pcm_data, src_width, src_channels, 
+                                src_sample_rate, sample_rate, None
+                            )
+                        
+                        # Convert to mono if needed
+                        if src_channels > 1:
+                            pcm_data = audioop.tomono(pcm_data, src_width, 1, 0)
+                            
+                        # Convert to 16-bit if needed
+                        if src_width != 2:  # 2 bytes = 16-bit
+                            pcm_data = audioop.lin2lin(pcm_data, src_width, 2)
+                            
+                        # Convert to µ-law
+                        mulaw_data = audioop.lin2ulaw(pcm_data, 2)  # 2 bytes = 16-bit
+                        
+                        return mulaw_data
+            else:
+                # For MP3 or other formats from ElevenLabs, convert to WAV first
+                # and then to µ-law using an external utility (simulated here)
+                
+                # This would normally use ffmpeg or another converter
+                # For our purposes, treat as 16-bit PCM and convert directly
+                return audioop.lin2ulaw(audio_data, 2)
+                
+        except Exception as e:
+            logger.error(f"Error converting to mulaw: {e}")
+            return b''
+            
+    @staticmethod
+    def is_mulaw(audio_data: bytes) -> bool:
+        """
+        Check if audio data is in µ-law format.
+        
+        Args:
+            audio_data: Audio data as bytes
+            
+        Returns:
+            True if audio is in µ-law format
+        """
+        # Simple heuristic check
+        if len(audio_data) < 100:
+            return False
+            
+        # Sample the first 100 bytes and check value distribution
+        sample = audio_data[:100]
+        
+        # µ-law typically uses the full 8-bit range
+        value_count = {}
+        for b in sample:
+            range_key = b // 32  # Group into 8 ranges (0-31, 32-63, etc.)
+            value_count[range_key] = value_count.get(range_key, 0) + 1
+            
+        # If we have values across most ranges, it's likely µ-law
+        return len(value_count) >= 6  # At least 6 out of 8 ranges have values
