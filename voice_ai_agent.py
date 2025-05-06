@@ -58,8 +58,9 @@ class VoiceAIAgent:
         
         # TTS Parameters for ElevenLabs
         self.elevenlabs_api_key = kwargs.get('elevenlabs_api_key', os.getenv('ELEVENLABS_API_KEY'))
-        self.elevenlabs_voice_id = kwargs.get('elevenlabs_voice_id', os.getenv('TTS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM'))  # Default to Rachel voice
-        self.elevenlabs_model_id = kwargs.get('elevenlabs_model_id', os.getenv('TTS_MODEL_ID', 'eleven_monolingual_v1'))
+        # Updated to use environment variables with better defaults
+        self.elevenlabs_voice_id = kwargs.get('elevenlabs_voice_id', os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'))  # Bella voice
+        self.elevenlabs_model_id = kwargs.get('elevenlabs_model_id', os.getenv('TTS_MODEL_ID', 'eleven_turbo_v2'))  # Latest model
         
         # Component placeholders
         self.speech_recognizer = None
@@ -186,7 +187,7 @@ class VoiceAIAgent:
         )
         await self.conversation_manager.init()
         
-        # Initialize ElevenLabs TTS client
+        # Initialize ElevenLabs TTS client with optimized parameters
         try:
             if not self.elevenlabs_api_key:
                 raise ValueError("ElevenLabs API key is required. Please set ELEVENLABS_API_KEY in environment variables.")
@@ -195,8 +196,9 @@ class VoiceAIAgent:
                 api_key=self.elevenlabs_api_key,
                 voice_id=self.elevenlabs_voice_id,
                 model_id=self.elevenlabs_model_id,
-                container_format="mulaw", # For Twilio compatibility
-                sample_rate=8000  # For Twilio compatibility
+                container_format="mulaw",  # For Twilio compatibility
+                sample_rate=8000,  # For Twilio compatibility
+                optimize_streaming_latency=4  # Maximum optimization for real-time performance
             )
             
             logger.info(f"Initialized ElevenLabs TTS with voice ID: {self.elevenlabs_voice_id}, model ID: {self.elevenlabs_model_id}")

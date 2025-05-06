@@ -1,14 +1,14 @@
-# integration/tts_integration.py
-
 """
-TTS Integration module for Voice AI Agent.
+Text-to-Speech integration module for Voice AI Agent.
 
-This module provides functions for integrating text-to-speech
+This module provides classes and functions for integrating text-to-speech
 capabilities with the Voice AI Agent system using ElevenLabs.
 """
+import os
 import logging
+import asyncio
 import time
-from typing import Optional, Dict, Any, AsyncIterator, Union, List, Callable, Awaitable
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Union, AsyncIterator
 
 from text_to_speech import ElevenLabsTTS, RealTimeResponseHandler, AudioProcessor
 
@@ -55,14 +55,16 @@ class TTSIntegration:
                 voice_id=self.voice_id, 
                 enable_caching=self.enable_caching,
                 container_format="mulaw",  # Use mulaw for Twilio compatibility
-                sample_rate=8000  # Set sample rate for telephony
+                sample_rate=8000,  # Set sample rate for telephony
+                model_id=os.getenv("TTS_MODEL_ID", "eleven_turbo_v2"),  # Use the latest model
+                optimize_streaming_latency=4  # Maximum optimization for real-time performance
             )
             
             # Initialize the RealTimeResponseHandler
             self.tts_handler = RealTimeResponseHandler(tts_streamer=None, tts_client=self.tts_client)
             
             self.initialized = True
-            logger.info(f"Initialized TTS with ElevenLabs, voice: {self.voice_id or 'default'}, format: mulaw for Twilio")
+            logger.info(f"Initialized TTS with ElevenLabs, voice: {self.voice_id or 'default'}, model: {self.tts_client.model_id}, format: mulaw for Twilio")
         except Exception as e:
             logger.error(f"Error initializing TTS: {e}")
             raise
@@ -112,10 +114,10 @@ class TTSIntegration:
         Stream text to speech conversion.
         
         Args:
-            text_generator: Async generator yielding text chunks
+            text_generator: Async generator producing text chunks
             
         Yields:
-            Audio data chunks
+            Audio data chunks as they are generated
         """
         if not self.initialized:
             await self.init()
@@ -124,14 +126,20 @@ class TTSIntegration:
             # Track if we need to add the final pause
             needs_final_pause = False
             
-            async for audio_chunk in self.tts_client.synthesize_with_streaming(text_generator):
+            async for text_chunk in text_generator:
+                if not text_chunk:
+                    continue
+                    
+                # Convert text chunk to speech
+                audio_data = await self.tts_client.synthesize(text_chunk)
+                
                 # Ensure each chunk has an even number of bytes
-                if len(audio_chunk) % 2 != 0:
-                    audio_chunk = audio_chunk + b'\x00'
+                if len(audio_data) % 2 != 0:
+                    audio_data = audio_data + b'\x00'
                 
                 # Only the last chunk should get the pause
                 needs_final_pause = True
-                yield audio_chunk
+                yield audio_data
             
             # Add a pause at the end of the complete audio stream
             if needs_final_pause and self.add_pause_after_speech:

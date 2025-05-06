@@ -22,17 +22,17 @@ class TTSConfig(BaseSettings):
     
     # TTS settings
     model_id: str = Field(
-        default="eleven_monolingual_v1",  # or "eleven_multilingual_v2" for multilingual support
+        default=os.getenv("TTS_MODEL_ID", "eleven_turbo_v2"),  # Upgraded to latest model
         description="ElevenLabs model ID to use"
     )
     
     voice_id: str = Field(
-        default="21m00Tcm4TlvDq8ikWAM",  # Rachel voice ID
+        default=os.getenv("TTS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),  # Default to Rachel voice
         description="Voice ID for the TTS system"
     )
     
     sample_rate: int = Field(
-        default=16000,
+        default=8000,  # Set to 8000Hz for Twilio compatibility
         description="Audio sample rate in Hz"
     )
     
@@ -66,6 +66,12 @@ class TTSConfig(BaseSettings):
     cache_dir: str = Field(
         default="./cache/tts_cache",
         description="Directory for caching TTS results"
+    )
+    
+    # Optimization settings for telephony
+    optimize_streaming_latency: int = Field(
+        default=4,  # Maximum optimization
+        description="Streaming latency optimization level (1-4)"
     )
     
     class Config:

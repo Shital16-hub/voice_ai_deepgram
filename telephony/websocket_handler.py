@@ -321,8 +321,6 @@ class GoogleCloudSpeechHandler:
             logger.error(f"Error in streaming recognition: {e}")
         finally:
             self.is_streaming = False
-    
-    
 
 class WebSocketHandler:
     """
@@ -387,7 +385,7 @@ class WebSocketHandler:
         # Ensure we start with a fresh speech recognition session
         self.google_speech_active = False
         
-        # Set up ElevenLabs TTS
+        # Set up ElevenLabs TTS with optimized settings for Twilio
         self.elevenlabs_tts = None
         
         logger.info(f"WebSocketHandler initialized for call {call_sid} with Google Cloud Speech and ElevenLabs TTS")
@@ -579,18 +577,19 @@ class WebSocketHandler:
                 # Get API key from environment if not explicitly provided
                 import os
                 api_key = os.environ.get("ELEVENLABS_API_KEY")
-                voice_id = os.environ.get("TTS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default to Rachel voice
-                model_id = os.environ.get("TTS_MODEL_ID", "eleven_monolingual_v1")
+                voice_id = os.environ.get("TTS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")  # Default to Bella voice
+                model_id = os.environ.get("TTS_MODEL_ID", "eleven_turbo_v2")  # Use the latest model
                 
-                # Create ElevenLabs TTS client
+                # Create ElevenLabs TTS client with improved parameters for telephony
                 self.elevenlabs_tts = ElevenLabsTTS(
                     api_key=api_key,
                     voice_id=voice_id,
                     model_id=model_id,
                     container_format="mulaw",  # For Twilio compatibility
-                    sample_rate=8000  # For Twilio compatibility
+                    sample_rate=8000,  # For Twilio compatibility
+                    optimize_streaming_latency=4  # Maximum optimization for real-time performance
                 )
-                logger.info(f"Initialized ElevenLabs TTS with voice ID: {voice_id}")
+                logger.info(f"Initialized ElevenLabs TTS with voice ID: {voice_id}, model ID: {model_id}")
             except Exception as e:
                 logger.error(f"Error initializing ElevenLabs TTS: {e}")
                 # Will fall back to pipeline TTS integration

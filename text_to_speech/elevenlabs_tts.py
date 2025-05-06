@@ -35,7 +35,8 @@ class ElevenLabsTTS:
         model_id: Optional[str] = None,
         sample_rate: Optional[int] = None,
         container_format: Optional[str] = None,
-        enable_caching: Optional[bool] = None
+        enable_caching: Optional[bool] = None,
+        optimize_streaming_latency: int = 4  # Added for better streaming
     ):
         """
         Initialize the ElevenLabs TTS client.
@@ -47,6 +48,7 @@ class ElevenLabsTTS:
             sample_rate: Audio sample rate (defaults to config)
             container_format: Audio format (defaults to config)
             enable_caching: Whether to cache results (defaults to config)
+            optimize_streaming_latency: Latency optimization level (1-4)
         """
         self.api_key = api_key or config.elevenlabs_api_key
         if not self.api_key:
@@ -60,11 +62,13 @@ class ElevenLabsTTS:
         self.sample_rate = sample_rate or config.sample_rate
         self.container_format = container_format or config.container_format
         self.enable_caching = enable_caching if enable_caching is not None else config.enable_caching
+        self.optimize_streaming_latency = max(1, min(4, optimize_streaming_latency))  # Ensure 1-4 range
         
         # Create cache directory if enabled
         if self.enable_caching:
             self.cache_dir = Path(config.cache_dir)
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"TTS caching enabled. Cache directory: {self.cache_dir}")
     
     def _get_headers(self) -> Dict[str, str]:
         """Get the headers for ElevenLabs API requests."""
@@ -251,7 +255,7 @@ class ElevenLabsTTS:
             "text": text,
             "model_id": model_id,
             "voice_settings": {
-                "stability": 0.5,
+                "stability": 0.7,  # Increased for telephony clarity
                 "similarity_boost": 0.75
             }
         }
@@ -263,7 +267,7 @@ class ElevenLabsTTS:
             url += f"?output_format={output_format}"
             
             # Add streaming optimization for lower latency
-            url += "&optimize_streaming_latency=3"
+            url += f"&optimize_streaming_latency={self.optimize_streaming_latency}"
         
         # Make API request
         try:
@@ -358,13 +362,13 @@ class ElevenLabsTTS:
             "text": text,
             "model_id": model_id,
             "voice_settings": {
-                "stability": 0.5,
+                "stability": 0.7,  # Increased for telephony clarity
                 "similarity_boost": 0.75
             }
         }
         
         # Add streaming optimization for lower latency
-        url = f"{self.BASE_URL}/{voice_id}/stream?output_format={output_format}&optimize_streaming_latency=3"
+        url = f"{self.BASE_URL}/{voice_id}/stream?output_format={output_format}&optimize_streaming_latency={self.optimize_streaming_latency}"
         
         try:
             async with aiohttp.ClientSession() as session:

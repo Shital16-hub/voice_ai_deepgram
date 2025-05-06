@@ -204,30 +204,28 @@ def handle_status_callback():
         # Handle status update
         twilio_handler.handle_status_callback(call_sid, call_status)
         
-        # Clean up event loop if call is completed
-        if call_status in ['completed', 'failed', 'busy', 'no-answer']:
-            # Clean up the event loop for this call
-            if call_sid in call_event_loops:
-                loop_info = call_event_loops[call_sid]
-                # Signal termination
-                if 'terminate_flag' in loop_info:
-                    loop_info['terminate_flag'].set()
-                    
-                # Remove from dictionary
-                if loop_info.get('thread'):
-                    # Wait for thread to join with timeout
-                    thread = loop_info['thread']
-                    thread.join(timeout=1.0)
-                    
-                # Remove from tracking
-                del call_event_loops[call_sid]
-                logger.info(f"Cleaned up event loop resources for call {call_sid}")
+        # Clean up event loop if call is completed and exists in call_event_loops
+        if call_status in ['completed', 'failed', 'busy', 'no-answer'] and call_sid in call_event_loops:
+            loop_info = call_event_loops[call_sid]
+            # Signal termination
+            if 'terminate_flag' in loop_info:
+                loop_info['terminate_flag'].set()
+                
+            # Remove from dictionary
+            if loop_info.get('thread'):
+                # Wait for thread to join with timeout
+                thread = loop_info['thread']
+                thread.join(timeout=1.0)
+                
+            # Remove from tracking
+            del call_event_loops[call_sid]
+            logger.info(f"Cleaned up event loop resources for call {call_sid}")
                 
         return Response('', status=204)
     except Exception as e:
-        logger.error(f"Error handling status callback: {e}", exc_info=True)
+        logger.error(f"Error handling status callback: {e}")
         return Response('', status=204)
-
+        
 def run_event_loop_in_thread(loop, ws_handler, ws, call_sid, terminate_flag):
     """Run event loop in a separate thread."""
     try:
