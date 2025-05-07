@@ -23,10 +23,10 @@ class AudioProcessor:
     """
     
     @staticmethod
-    def mulaw_to_pcm(self, mulaw_data: bytes) -> np.ndarray:
+    def mulaw_to_pcm(mulaw_data: bytes) -> np.ndarray:
         """
         Convert Twilio's mulaw audio to PCM for Voice AI with enhanced noise filtering.
-        Modified to handle small chunks more efficiently.
+        Optimized for better barge-in detection and speech recognition.
         
         Args:
             mulaw_data: Audio data in mulaw format
@@ -35,12 +35,9 @@ class AudioProcessor:
             Audio data as numpy array (float32)
         """
         try:
-            # Check if we have enough data to convert - log at debug level instead of warning
+            # Check if we have enough data to convert
             if len(mulaw_data) < 1000:
-                logger.debug(f"Small mulaw data: {len(mulaw_data)} bytes - accumulating")
-                # Return empty array for very small chunks instead of processing
-                if len(mulaw_data) < 320:  # Less than 20ms at 16kHz
-                    return np.array([], dtype=np.float32)
+                logger.warning(f"Very small mulaw data: {len(mulaw_data)} bytes")
             
             # Convert mulaw to 16-bit PCM
             pcm_data = audioop.ulaw2lin(mulaw_data, 2)
@@ -78,10 +75,9 @@ class AudioProcessor:
             if max_val > 0:
                 audio_array = audio_array * (0.95 / max_val)
             
-            # Check audio levels at debug level instead of always logging
+            # Check audio levels
             audio_level = np.mean(np.abs(audio_array)) * 100
-            if audio_level > 5.0:  # Only log significant audio
-                logger.debug(f"Converted {len(mulaw_data)} bytes to {len(audio_array)} samples. Audio level: {audio_level:.1f}%")
+            logger.debug(f"Converted {len(mulaw_data)} bytes to {len(audio_array)} samples. Audio level: {audio_level:.1f}%")
             
             # Apply a gain if audio is very quiet
             if audio_level < 1.0:  # Very quiet audio

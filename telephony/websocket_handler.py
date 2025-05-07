@@ -317,7 +317,7 @@ class WebSocketHandler:
 
     def _detect_barge_in_during_speech(self, audio_data: np.ndarray, time_since_output: float) -> bool:
         """
-        Special barge-in detection during system speech with improved thresholds.
+        Special barge-in detection during system speech with higher confidence requirements.
         
         Args:
             audio_data: Incoming audio data
@@ -326,13 +326,11 @@ class WebSocketHandler:
         Returns:
             True if confident this is a real barge-in, not an echo
         """
-        # Ignore very small audio samples
-        if len(audio_data) < 1600:  # Need at least 100ms at 16kHz
-            return False
-            
+        # Apply more stringent tests during speech
+        
         # 1. Energy must be significantly higher than typical echo
         energy = np.mean(np.abs(audio_data))
-        min_energy_threshold = 0.08  # REDUCED from 0.1 for better sensitivity
+        min_energy_threshold = 0.1  # Higher energy requirement during speech
         
         # 2. Must have speech-like patterns (not just noise or echo)
         frame_size = min(len(audio_data), 320)  # 20ms at 16kHz
@@ -349,12 +347,12 @@ class WebSocketHandler:
             variation_ratio = energy_std / energy_mean if energy_mean > 0 else 0
             
             # 3. Check spectral variety (more speech-like)
-            has_speech_pattern = variation_ratio > 0.3  # REDUCED from 0.4 for better sensitivity
+            has_speech_pattern = variation_ratio > 0.4  # Much higher than echo (typically <0.2)
             
             # 4. Has strong peak-to-average ratio (speech has peaks)
             peak = np.max(np.abs(audio_data))
             peak_ratio = peak / energy if energy > 0 else 0
-            has_peaks = peak_ratio > 4.0  # REDUCED from 5.0 for better sensitivity
+            has_peaks = peak_ratio > 5.0  # Speech has stronger peaks than echo
             
             # 5. Dynamic energy growth (speech tends to increase in volume)
             has_energy_growth = False
@@ -363,7 +361,7 @@ class WebSocketHandler:
                 second_half = frame_energies[len(frame_energies)//2:]
                 first_avg = np.mean(first_half)
                 second_avg = np.mean(second_half)
-                has_energy_growth = second_avg > (first_avg * 1.3)  # REDUCED from 1.5 for better sensitivity
+                has_energy_growth = second_avg > (first_avg * 1.5)  # 50% growth from first to second half
             
             # Log detailed detection info
             logger.debug(f"Speech barge-in check: energy={energy:.4f}, min_threshold={min_energy_threshold:.4f}, "
@@ -371,11 +369,10 @@ class WebSocketHandler:
                         f"energy_growth={has_energy_growth}")
             
             # COMBINED DECISION - need multiple factors to confirm real interruption
-            # RELAXED from requiring all conditions to requiring only 2 out of 3
             is_interruption = (
                 energy > min_energy_threshold and
-                (has_speech_pattern or has_peaks or has_energy_growth) and
-                (sum([has_speech_pattern, has_peaks, has_energy_growth]) >= 2)
+                has_speech_pattern and
+                (has_peaks or has_energy_growth)
             )
             
             # Check against audio fingerprinting for additional confirmation
@@ -749,7 +746,6 @@ class WebSocketHandler:
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
         """
         Handle media event with audio data, with enhanced barge-in detection.
-        Modified to handle small audio chunks more efficiently.
         
         Args:
             data: Media event data
@@ -770,11 +766,6 @@ class WebSocketHandler:
             # Decode audio data
             audio_data = base64.b64decode(payload)
             
-            # Skip processing for very small chunks - just add to buffer
-            if len(audio_data) < 320:  # Less than 20ms at 8kHz
-                self.input_buffer.extend(audio_data)
-                return
-            
             # Add to input buffer
             self.input_buffer.extend(audio_data)
             
@@ -788,12 +779,41 @@ class WebSocketHandler:
             # Calculate time since last audio output
             time_since_output = time.time() - self.last_audio_output_time
             
-            # Only process if buffer is large enough - increased minimum size
-            # from original AUDIO_BUFFER_SIZE to ensure enough data for proper analysis
-            min_process_size = 16000  # Require at least 1 second of audio at 8kHz for better detection
+            # Convert to PCM for speech detection
+            pcm_audio = self.audio_processor.mulaw_to_pcm(audio_data)
+            
+            # SPECIAL HANDLING DURING SYSTEM SPEECH
+            if self.is_speaking and self.barge_in_enabled:
+                # Apply echo detection first - if it's an echo, ignore it
+                if self._is_likely_echo(pcm_audio, time_since_output):
+                    logger.debug("Detected echo during system speech, ignoring")
+                    return
+                    
+                # Apply stronger barge-in detection with higher threshold for true interruptions
+                # We need to be more certain this is an interruption during our speech
+                barge_in_detected = self._detect_barge_in_during_speech(pcm_audio, time_since_output)
+                
+                if barge_in_detected:
+                    logger.info("BARGE-IN DETECTED during system speech! Interrupting...")
+                    self.speech_interrupted = True
+                    # Clear current audio chunks to stop sending
+                    self.current_audio_chunks = []
+                    # Reset the state
+                    self.is_speaking = False
+                    # Process this interrupting audio immediately
+                    await self._process_audio(ws)
+                    return
+            
+            # Check if we should process based on time since last response
+            time_since_last_response = time.time() - self.last_response_time
+            if time_since_last_response < self.pause_after_response and not self.speech_interrupted:
+                # Still in pause period after last response, wait before processing new input
+                # But continue if we detected a barge-in
+                logger.debug(f"In pause period after response ({time_since_last_response:.1f}s < {self.pause_after_response:.1f}s)")
+                return
             
             # Process buffer when it's large enough and not already processing
-            if len(self.input_buffer) >= min_process_size and not self.is_processing:
+            if len(self.input_buffer) >= AUDIO_BUFFER_SIZE and not self.is_processing:
                 async with self.processing_lock:
                     if not self.is_processing:  # Double-check within lock
                         self.is_processing = True
@@ -805,7 +825,6 @@ class WebSocketHandler:
             
         except Exception as e:
             logger.error(f"Error processing media payload: {e}", exc_info=True)
-
     
     async def _handle_stop(self, data: Dict[str, Any]) -> None:
         """
