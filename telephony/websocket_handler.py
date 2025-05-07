@@ -86,242 +86,6 @@ class StreamingRecognitionResult:
             alternatives=[a.transcript for a in result.alternatives[1:]]
         )
 
-class GoogleCloudSpeechHandler:
-    """Handler for Google Cloud Speech API streaming recognition."""
-    
-    def __init__(self, language_code="en-US", sample_rate=16000, enable_automatic_punctuation=True):
-        """
-        Initialize the Google Cloud Speech client.
-        
-        Args:
-            language_code: Language code for recognition
-            sample_rate: Audio sample rate in Hz
-            enable_automatic_punctuation: Whether to enable automatic punctuation
-        """
-        self.language_code = language_code
-        self.sample_rate = sample_rate
-        self.enable_automatic_punctuation = enable_automatic_punctuation
-        
-        # Create a speech client
-        self.client = speech.SpeechClient()
-        
-        # State tracking
-        self.is_streaming = False
-        self.streaming_config = None
-        self.result_callbacks = []
-        
-        # Audio streaming data
-        self.audio_queue = asyncio.Queue()
-        self.stream_task = None
-        self._stop_event = asyncio.Event()
-        
-    async def start_streaming(self):
-        """Start a new streaming recognition session."""
-        if self.is_streaming:
-            await self.stop_streaming()
-            
-        self.is_streaming = True
-        self._stop_event.clear()
-        
-        # Configure recognition
-        config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=self.sample_rate,
-            language_code=self.language_code,
-            enable_automatic_punctuation=self.enable_automatic_punctuation,
-            use_enhanced=True,  # Use enhanced model for better accuracy
-            model="phone_call",  # Optimized for phone calls
-            audio_channel_count=1  # Mono audio
-        )
-        
-        # Create streaming config
-        self.streaming_config = speech.StreamingRecognitionConfig(
-            config=config,
-            interim_results=True,
-            single_utterance=False  # Allow multiple utterances in a stream
-        )
-        
-        # Start the streaming task
-        self.stream_task = asyncio.create_task(self._stream_recognition())
-        
-        logger.info("Started Google Cloud Speech streaming session")
-        
-    async def process_audio_chunk(self, audio_chunk, callback=None):
-        """
-        Process an audio chunk through Google Cloud Speech.
-        
-        Args:
-            audio_chunk: Audio data as bytes or numpy array
-            callback: Optional callback for results
-            
-        Returns:
-            None, as results are delivered via callback
-        """
-        if not self.is_streaming:
-            logger.warning("Called process_audio_chunk but streaming is not active")
-            try:
-                await self.start_streaming()
-            except Exception as e:
-                logger.error(f"Error starting streaming session: {e}")
-                return None
-            
-        # Convert numpy array to bytes if needed
-        if isinstance(audio_chunk, np.ndarray):
-            # Ensure the data is float32 in [-1.0, 1.0] range
-            audio_chunk = np.clip(audio_chunk, -1.0, 1.0)
-            # Convert to int16
-            audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
-        else:
-            audio_bytes = audio_chunk
-            
-        # Add callback if provided
-        if callback and callback not in self.result_callbacks:
-            self.result_callbacks.append(callback)
-            
-        # Add audio chunk to the queue
-        if self.is_streaming and not self._stop_event.is_set():
-            await self.audio_queue.put(audio_bytes)
-            
-        return None  # Results come via callback
-            
-    async def stop_streaming(self):
-        """Stop the streaming recognition session and get final transcription."""
-        if not self.is_streaming:
-            return "", 0.0
-            
-        try:
-            # Signal that we're done adding audio
-            self._stop_event.set()
-            
-            # Cancel the stream task if it's running
-            if self.stream_task and not self.stream_task.done():
-                try:
-                    # Give it a moment to complete gracefully
-                    await asyncio.wait_for(self.stream_task, timeout=2.0)
-                except asyncio.TimeoutError:
-                    # Cancel if it takes too long
-                    self.stream_task.cancel()
-                    try:
-                        await self.stream_task
-                    except asyncio.CancelledError:
-                        pass
-                        
-            # Cleanup
-            self.is_streaming = False
-            self.result_callbacks = []
-            
-            # Return empty string as this matches the expected interface
-            return "", 0.0
-            
-        except Exception as e:
-            logger.error(f"Error stopping streaming: {e}")
-            self.is_streaming = False
-            return "", 0.0
-    
-    async def _stream_recognition(self):
-        """Main function to handle the streaming recognition."""
-        try:
-            # Create a generator that yields requests
-            def generate_requests():
-                # First request contains only the config
-                yield speech.StreamingRecognizeRequest(
-                    streaming_config=self.streaming_config
-                )
-                
-                # Create a buffer for audio data
-                audio_buffer = []
-                
-                # Set up a signal for stopping
-                stop_event = threading.Event()
-                
-                # Thread function to collect audio data from the queue
-                def audio_collector():
-                    try:
-                        while not stop_event.is_set() and not self._stop_event.is_set():
-                            try:
-                                # Get audio from queue with timeout
-                                loop = asyncio.get_event_loop()
-                                future = asyncio.run_coroutine_threadsafe(
-                                    self.audio_queue.get(), loop
-                                )
-                                # Wait with timeout
-                                audio_data = future.result(timeout=0.5)
-                                
-                                # Add to buffer
-                                audio_buffer.append(audio_data)
-                                
-                                # Mark as done
-                                loop.call_soon_threadsafe(self.audio_queue.task_done)
-                            except concurrent.futures.TimeoutError:
-                                # No data available yet
-                                continue
-                            except Exception as e:
-                                logger.error(f"Error in audio collector: {e}")
-                                break
-                    except Exception as e:
-                        logger.error(f"Error in audio collector thread: {e}")
-                
-                # Start the collector thread
-                collector_thread = threading.Thread(target=audio_collector)
-                collector_thread.daemon = True
-                collector_thread.start()
-                
-                try:
-                    # Yield audio data as it becomes available
-                    while not self._stop_event.is_set():
-                        # Check if we have audio data to send
-                        if audio_buffer:
-                            # Get the next audio chunk
-                            audio_chunk = audio_buffer.pop(0)
-                            
-                            # Create and yield the request
-                            req = speech.StreamingRecognizeRequest(
-                                audio_content=audio_chunk
-                            )
-                            yield req
-                        else:
-                            # No audio available, wait a bit
-                            time.sleep(0.1)
-                finally:
-                    # Signal thread to stop
-                    stop_event.set()
-                    collector_thread.join(timeout=1.0)
-            
-            # Create the requests
-            request_generator = generate_requests()
-            
-            # Start streaming recognition
-            responses = self.client.streaming_recognize(
-                    requests=request_generator,
-                    config=self.streaming_config
-            )
-            
-            # Process responses
-            for response in responses:
-                if self._stop_event.is_set():
-                    break
-                    
-                if not response.results:
-                    continue
-                    
-                for result in response.results:
-                    # Convert Google result to our format
-                    streaming_result = StreamingRecognitionResult.from_google_result(result)
-                    
-                    # Call all registered callbacks
-                    for callback in self.result_callbacks:
-                        try:
-                            # Create a task for each callback
-                            loop = asyncio.get_event_loop()
-                            loop.create_task(callback(streaming_result))
-                        except Exception as e:
-                            logger.error(f"Error in callback: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error in streaming recognition: {e}")
-        finally:
-            self.is_streaming = False
-
 class WebSocketHandler:
     """
     Handles WebSocket connections for Twilio media streams with Google Cloud Speech integration
@@ -363,6 +127,7 @@ class WebSocketHandler:
         # Transcription tracker to avoid duplicate processing
         self.last_transcription = ""
         self.last_response_time = time.time()
+        self.last_audio_output_time = 0  # Track when we last sent audio
         self.processing_lock = asyncio.Lock()
         self.keep_alive_task = None
         
@@ -391,13 +156,17 @@ class WebSocketHandler:
         # Set up ElevenLabs TTS with optimized settings for Twilio
         self.elevenlabs_tts = None
         
-        # Add barge-in sensitivity settings
-        self.barge_in_energy_threshold = 0.005  # Reduced from 0.008 to improve sensitivity
+        # Add barge-in sensitivity settings - INCREASED THRESHOLD
+        self.barge_in_energy_threshold = 0.015  # Increased from 0.005 to reduce false detections
         self.barge_in_check_enabled = True
         
         # Track recent audio segments to detect echo
         self.recent_audio_energy = []
         self.max_recent_audio = 5  # Track last 5 audio segments
+        
+        # Track own audio output timestamps for echo detection
+        self.own_audio_segments = []  # List of (timestamp, duration) tuples
+        self.max_audio_segments = 10  # Keep track of last 10 segments
         
         logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support (FORCED ENABLED)")
     
@@ -426,6 +195,62 @@ class WebSocketHandler:
                     np.percentile(self.noise_samples, 95) * 2.0  # Set threshold just above noise
                 )
                 logger.debug(f"Updated ambient noise level to {self.ambient_noise_level:.6f}")
+
+    def _is_likely_echo(self, audio_data: np.ndarray, time_since_output: float) -> bool:
+        """
+        Determine if incoming audio is likely an echo of our own speech.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            time_since_output: Time since our last audio output
+            
+        Returns:
+            True if the audio is likely an echo
+        """
+        # If we haven't sent audio recently, it's not an echo
+        if time_since_output > 1.5:
+            return False
+            
+        # Immediately after sending audio (within 300ms), almost certainly echo
+        if time_since_output < 0.3:
+            return True
+            
+        # For the time window 300ms-1.5s after our speech, do more analysis
+        # Compute energy level
+        audio_energy = np.mean(np.abs(audio_data))
+        
+        # Check for speech pattern variations (speech has more variation than echo)
+        frame_size = min(len(audio_data), 320)  # 20ms at 16kHz
+        if frame_size > 0:
+            frames = [audio_data[i:i+frame_size] for i in range(0, len(audio_data), frame_size)]
+            frame_energies = [np.mean(np.abs(frame)) for frame in frames if len(frame) == frame_size]
+            
+            if len(frame_energies) >= 3:
+                # Calculate energy variance (speech has more variance than steady echo)
+                energy_std = np.std(frame_energies)
+                energy_mean = np.mean(frame_energies)
+                variation_ratio = energy_std / energy_mean if energy_mean > 0 else 0
+                
+                # Low variation typically indicates echo
+                is_echo = variation_ratio < 0.2
+                
+                logger.debug(f"Echo analysis: energy={audio_energy:.6f}, variation={variation_ratio:.4f}, "
+                           f"time_since_output={time_since_output:.3f}s, is_echo={is_echo}")
+                
+                return is_echo
+        
+        # If we can't analyze patterns, use a time-decaying threshold
+        # Higher threshold right after our speech, gradually lowering
+        decay_factor = 1.0 - (time_since_output / 1.5)  # 1.0 at 0s, 0.0 at 1.5s
+        dynamic_threshold = self.barge_in_energy_threshold * (1.0 + 9.0 * decay_factor)  # 10x to 1x
+        
+        # It's an echo if energy is below our dynamic threshold
+        is_echo = audio_energy < dynamic_threshold
+        
+        logger.debug(f"Echo time-decay check: energy={audio_energy:.6f}, threshold={dynamic_threshold:.6f}, "
+                   f"time_since_output={time_since_output:.3f}s, is_echo={is_echo}")
+        
+        return is_echo
 
     def _is_echo_of_system_speech(self, transcription: str) -> bool:
         """
@@ -653,8 +478,10 @@ class WebSocketHandler:
         self.silence_start_time = None
         self.last_transcription = ""
         self.last_response_time = time.time()
+        self.last_audio_output_time = 0  # Reset audio output tracking
         self.conversation_active = True
         self.noise_samples = []  # Reset noise samples
+        self.own_audio_segments = []  # Reset audio segment tracking
         self.google_speech_active = False  # Reset Google Speech session state
         
         # Initialize ElevenLabs TTS if not already
@@ -725,31 +552,47 @@ class WebSocketHandler:
                 self.input_buffer = self.input_buffer[excess:]
                 logger.debug(f"Trimmed input buffer to {len(self.input_buffer)} bytes")
             
+            # Calculate time since last audio output
+            time_since_output = time.time() - self.last_audio_output_time
+            
             # Convert to PCM for speech detection (only if speaking and barge-in enabled)
             if self.is_speaking and self.barge_in_enabled and self.barge_in_check_enabled:
                 # Convert and process with enhanced noise handling
                 pcm_audio = self.audio_processor.mulaw_to_pcm(audio_data)
                 
-                # Check for speech with lower threshold for barge-in detection
-                audio_energy = np.mean(np.abs(pcm_audio))
-                is_speech = audio_energy > self.barge_in_energy_threshold
-                
-                # Log audio energy when system is speaking (for debugging)
-                logger.debug(f"Barge-in check: audio_energy={audio_energy:.6f}, threshold={self.barge_in_energy_threshold:.6f}, is_speech={is_speech}")
-                
-                if is_speech:
-                    # Audio-based barge-in detection!
-                    logger.info(f"AUDIO-BASED BARGE-IN DETECTED! Energy: {audio_energy:.6f} > Threshold: {self.barge_in_energy_threshold:.6f}")
-                    self.speech_interrupted = True
+                # Check if this is likely an echo of our own speech
+                if not self._is_likely_echo(pcm_audio, time_since_output):
+                    # Dynamic threshold based on time since our last output
+                    dynamic_threshold = self.barge_in_energy_threshold
+                    if time_since_output < 0.5:
+                        # Much higher threshold right after speaking (first 500ms)
+                        dynamic_threshold = self.barge_in_energy_threshold * 10.0
+                    elif time_since_output < 1.0:
+                        # Higher threshold for the next 500ms
+                        dynamic_threshold = self.barge_in_energy_threshold * 5.0
                     
-                    # Clear current audio chunks to stop sending
-                    self.current_audio_chunks = []
+                    # Check for speech with enhanced pattern detection
+                    is_speech = self._contains_speech_pattern(pcm_audio, dynamic_threshold)
                     
-                    # Process this interrupting audio immediately
-                    self.is_speaking = False  # Important: mark that we're no longer speaking
+                    # Log detailed info for debugging
+                    audio_energy = np.mean(np.abs(pcm_audio))
+                    logger.debug(f"Barge-in check: audio_energy={audio_energy:.6f}, threshold={dynamic_threshold:.6f}, "
+                               f"time_since_output={time_since_output:.3f}s, is_speech={is_speech}")
                     
-                    # Set immediate processing regardless of pause after response
-                    self.last_response_time = 0
+                    if is_speech:
+                        # Audio-based barge-in detection!
+                        logger.info(f"AUDIO-BASED BARGE-IN DETECTED! Energy: {audio_energy:.6f} > "
+                                  f"Threshold: {dynamic_threshold:.6f}, Time since output: {time_since_output:.3f}s")
+                        self.speech_interrupted = True
+                        
+                        # Clear current audio chunks to stop sending
+                        self.current_audio_chunks = []
+                        
+                        # Process this interrupting audio immediately
+                        self.is_speaking = False  # Important: mark that we're no longer speaking
+                        
+                        # Set immediate processing regardless of pause after response
+                        self.last_response_time = 0
             
             # Check if we should process based on time since last response
             time_since_last_response = time.time() - self.last_response_time
@@ -804,29 +647,31 @@ class WebSocketHandler:
 
     async def _handle_bargein(self, data: Dict[str, Any], ws) -> None:
         """
-        Handle barge-in event when user interrupts the system.
+        Handle explicit barge-in event from Twilio.
         
         Args:
             data: Barge-in event data
             ws: WebSocket connection
         """
-        logger.info(f"EXPLICIT BARGE-IN DETECTED - user interrupted the system. Data: {data}")
+        logger.info(f"EXPLICIT TWILIO BARGE-IN EVENT RECEIVED: {data}")
         
-        # Stop any ongoing speech
+        # Immediate stop any ongoing speech
         self.speech_interrupted = True
         
         # Clear current audio chunks to stop sending
         self.current_audio_chunks = []
         
-        # Clear input buffer to start fresh with new user input
-        self.input_buffer.clear()
-        
-        # Reset state for new input
+        # Update state
         self.is_speaking = False
         self.is_processing = False
-        self.last_response_time = 0  # Reset to allow immediate processing
         
-        logger.info("Barge-in processed - ready for new user input")
+        # Reset time tracking to allow immediate processing
+        self.last_response_time = 0
+        
+        # Add a small wait to ensure audio buffers are cleared
+        await asyncio.sleep(0.1)
+        
+        logger.info("Explicit barge-in processed - ready for new user input")
     
     async def _handle_mark(self, data: Dict[str, Any]) -> None:
         """
@@ -874,6 +719,55 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Error in audio preprocessing: {e}", exc_info=True)
             return audio_data  # Return original audio if preprocessing fails
+    
+    def _contains_speech_pattern(self, audio_data: np.ndarray, threshold: float) -> bool:
+        """
+        Enhanced speech pattern detection beyond simple energy levels.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            threshold: Energy threshold to use
+            
+        Returns:
+            True if the audio contains speech patterns
+        """
+        if len(audio_data) < 1000:
+            return False
+            
+        # 1. Calculate energy level
+        energy_level = np.mean(np.abs(audio_data))
+        
+        # 2. Check for energy variations (speech has variations)
+        frame_size = 320  # 20ms frames at 16kHz
+        frames = [audio_data[i:i+frame_size] for i in range(0, len(audio_data), frame_size) 
+                 if i+frame_size <= len(audio_data)]
+        
+        if len(frames) >= 3:
+            frame_energies = [np.mean(np.abs(frame)) for frame in frames]
+            energy_std = np.std(frame_energies)
+            energy_mean = np.mean(frame_energies)
+            
+            # Speech typically has variations in energy
+            variation_ratio = energy_std / energy_mean if energy_mean > 0 else 0
+            has_variations = variation_ratio > 0.3  # Speech has higher variation
+        else:
+            has_variations = False
+        
+        # 3. Check for significant peaks (speech has stronger peaks)
+        if len(audio_data) > 0:
+            peaks = np.max(np.abs(audio_data))
+            has_peaks = peaks > (threshold * 4)
+        else:
+            has_peaks = False
+        
+        # Combine factors - need both energy and either variations or peaks
+        is_speech = energy_level > threshold and (has_variations or has_peaks)
+        
+        logger.debug(f"Speech pattern check: energy={energy_level:.6f}, "
+                   f"variation={variation_ratio if 'variation_ratio' in locals() else 0:.3f}, "
+                   f"peaks={peaks if 'peaks' in locals() else 0:.3f}, is_speech={is_speech}")
+        
+        return is_speech
     
     async def _process_audio(self, ws) -> None:
         """
@@ -1073,34 +967,6 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Error processing audio: {e}", exc_info=True)
     
-    def _contains_speech(self, audio_data: np.ndarray) -> bool:
-        """
-        Enhanced speech detection with better noise filtering,
-        optimized for barge-in detection with lower thresholds.
-        
-        Args:
-            audio_data: Audio data as numpy array
-            
-        Returns:
-            True if audio contains potential speech
-        """
-        if len(audio_data) < 100:
-            return False
-            
-        # Calculate RMS energy
-        energy = np.sqrt(np.mean(np.square(audio_data)))
-        
-        # Lower speech threshold specifically for barge-in detection
-        speech_threshold = max(0.008, self.ambient_noise_level * 2.0)  # Lower threshold for barge-in
-        
-        # Simpler detection logic for faster barge-in detection
-        is_speech = energy > speech_threshold
-        
-        # Log values for debugging
-        logger.debug(f"Barge-in speech detection: energy={energy:.6f}, threshold={speech_threshold:.6f}, is_speech={is_speech}")
-        
-        return is_speech
-    
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """
         Send audio data to Twilio with improved barge-in handling.
@@ -1110,9 +976,18 @@ class WebSocketHandler:
             ws: WebSocket connection
         """
         try:
-            # Mark that we're speaking
+            # Mark that we're speaking and update timing
             self.is_speaking = True
             self.speech_interrupted = False
+            self.last_audio_output_time = time.time()
+            
+            # Add to own audio segments tracking
+            audio_duration = len(audio_data) / 8000  # Assuming 8kHz mono mulaw
+            self.own_audio_segments.append((self.last_audio_output_time, audio_duration))
+            
+            # Keep only recent segments
+            if len(self.own_audio_segments) > self.max_audio_segments:
+                self.own_audio_segments.pop(0)
             
             # Ensure the audio data is valid
             if not audio_data or len(audio_data) == 0:
@@ -1166,17 +1041,19 @@ class WebSocketHandler:
                     if i < len(chunks) - 1:  # Don't delay after the last chunk
                         await asyncio.sleep(0.05)  # 50ms delay between chunks for better barge-in opportunity
                     
-                    # Every 10 chunks, check the input buffer for potential speech
-                    # This helps detect barge-in even between audio chunk processing
+                    # Check for barge-in every 10 chunks
                     if i % 10 == 0 and len(self.input_buffer) > 4000:
-                        # Process any incoming audio
+                        # Process any incoming audio for barge-in detection
                         try:
                             # Sample a small portion of the input buffer
                             sample_size = min(len(self.input_buffer), 4000)
                             sample_data = self.audio_processor.mulaw_to_pcm(bytes(self.input_buffer[-sample_size:]))
                             
-                            # Check for speech
-                            if self.audio_processor.detect_speech_for_barge_in(sample_data, threshold=self.barge_in_energy_threshold):
+                            # Check for speech but with a higher threshold during playback to avoid false detections
+                            playback_threshold = self.barge_in_energy_threshold * 3.0  # Higher threshold during playback
+                            
+                            # Use enhanced pattern detection instead of just energy level
+                            if self._contains_speech_pattern(sample_data, playback_threshold):
                                 logger.info(f"AUDIO-BASED BARGE-IN DETECTED during audio playback at chunk {i}/{len(chunks)}")
                                 self.speech_interrupted = True
                                 break
