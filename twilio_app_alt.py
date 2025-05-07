@@ -317,7 +317,9 @@ def handle_incoming_call():
         stream.parameter(name="bargeInEnabled", value="true") 
         
         # Set additional parameters to improve echo handling
-        stream.parameter(name="sensitivity", value="high")
+        stream.parameter(name="sensitivity", value="medium")
+        stream.parameter(name="bargeInMinimumDuration", value="400")  # 400ms minimum duration for barge-in
+
         
         # Add stream to connect
         connect.append(stream)
@@ -444,11 +446,11 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Create speech detector for barge-in support
+        # Create speech detector for barge-in support with conservative settings
         speech_detector = SpeechActivityDetector(
-            energy_threshold=0.04,
-            consecutive_frames=2,
-            frame_duration=0.02
+            energy_threshold=0.08,  # Increased from 0.04
+            consecutive_frames=3,   # Increased from 2
+            frame_duration=0.02     # Keep the same
         )
         
         # Initialize WebSocketHandler with pipeline
@@ -457,29 +459,29 @@ def handle_media_stream(call_sid):
         # Assign the speech detector to the handler
         ws_handler.speech_detector = speech_detector
         
-        # Add the audio fingerprinter for echo detection
-        ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=30)
+        # Add the audio fingerprinter for echo detection - increased sensitivity
+        ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=40)  # More fingerprints
         # Updated fingerprinter threshold - lower for more echo detection
-        ws_handler.audio_fingerprinter.similarity_threshold = 0.55  # Was 0.60
+        ws_handler.audio_fingerprinter.similarity_threshold = 0.45  # Was 0.55
         
-        # Force enable barge-in for better user experience but make it more conservative
+        # Force enable barge-in for better user experience but with more conservative settings
         ws_handler.barge_in_enabled = True
         ws_handler.barge_in_check_enabled = True
         
-        # Adjust thresholds for more conservative operation to prevent false positives
-        ws_handler.barge_in_energy_threshold = 0.05  # Increased from 0.04
-        ws_handler.echo_decay_time = 2.0  # 2 seconds of echo sensitivity decay
-        ws_handler.barge_in_debounce_time = 3.0  # Wait 3 seconds between barge-in detections
+        # Adjust thresholds to prevent false positives
+        ws_handler.barge_in_energy_threshold = 0.08  # Increased from 0.05
+        ws_handler.echo_decay_time = 3.0  # Increased from 2.0 seconds
+        ws_handler.barge_in_debounce_time = 5.0  # Increased from 3.0 seconds
         
-        # Add tracking for barge-in confirmation
+        # Add tracking for barge-in confirmation with longer confirmation time
         ws_handler.potential_barge_in = False
         ws_handler.barge_in_start_time = 0
         
-        # Set shorter pause after system speech to avoid echo confusion  
-        ws_handler.pause_after_response = 0.3
+        # Set longer pause after system speech to avoid echo confusion  
+        ws_handler.pause_after_response = 0.5  # Increased from 0.3
         
-        # Increase buffer size for better detection
-        ws_handler.min_words_for_valid_query = 1
+        # Set minimum words for a valid query
+        ws_handler.min_words_for_valid_query = 2  # Increased from 1 for more reliable detection
         
         # Create a new event loop for this WebSocket connection
         loop = asyncio.new_event_loop()

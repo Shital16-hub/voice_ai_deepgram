@@ -465,3 +465,24 @@ class STTIntegration:
             logger.info(f"Cleaned final transcription: '{final_text}' -> '{cleaned_text}'")
         
         return cleaned_text, duration
+
+    def optimize_for_telephony(self):
+        """Optimize STT settings for telephony environments."""
+        # Increase minimum word count for valid detection
+        self.min_words_for_valid_query = 2
+        
+        # Add more telephony-specific terms to the non-speech patterns
+        additional_patterns = [
+            r'\(.*?static.*?\)',
+            r'\(.*?telephone.*?\)',
+            r'\(.*?ring.*?\)',
+            r'\(.*?beep.*?\)',
+            r'\(.*?tone.*?\)',
+        ]
+        
+        # Recompile pattern with additional patterns
+        import re
+        all_patterns = NON_SPEECH_PATTERNS + additional_patterns
+        self.non_speech_pattern = re.compile('|'.join(all_patterns))
+        
+        logger.info("STT integration optimized for telephony environment")
