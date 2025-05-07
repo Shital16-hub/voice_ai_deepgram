@@ -21,7 +21,7 @@ from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from speech_to_text.utils.speech_detector import SpeechActivityDetector
 from telephony.audio_processor import MulawBufferProcessor, AudioProcessor
 from telephony.twilio_handler import TwilioHandler
-from telephony.websocket_handler import WebSocketHandler, AudioFingerprinter
+from telephony.websocket_handler import WebSocketHandler, AudioFingerprinter, SpeechPatternDetector
 from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
 from voice_ai_agent import VoiceAIAgent
 from integration.pipeline import VoiceAIAgentPipeline
