@@ -21,6 +21,210 @@ class AudioProcessor:
     
     Twilio uses 8kHz mulaw encoding, while our Voice AI uses 16kHz PCM.
     """
+
+    # Add these new methods to the AudioProcessor class in telephony/audio_processor.py
+
+    def apply_fade(self, audio_data: np.ndarray, fade_ms: int = 15, fade_type: str = "in") -> np.ndarray:
+        """
+        Apply fade-in or fade-out to audio data to prevent pops and clicks.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            fade_ms: Length of fade in milliseconds
+            fade_type: "in" for fade-in, "out" for fade-out
+            
+        Returns:
+            Audio data with fade applied
+        """
+        if len(audio_data) == 0:
+            return audio_data
+            
+        # Calculate fade length in samples
+        fade_samples = int(16000 * fade_ms / 1000)  # Assuming 16kHz sample rate
+        
+        # Make sure fade length isn't longer than the audio
+        fade_samples = min(fade_samples, len(audio_data) // 3)
+        
+        if fade_samples <= 1:
+            return audio_data
+        
+        # Create fade curve (using raised cosine for smoother transition)
+        if fade_type == "in":
+            fade_curve = 0.5 * (1 - np.cos(np.pi * np.arange(fade_samples) / fade_samples))
+            audio_data[:fade_samples] *= fade_curve
+        else:  # fade out
+            fade_curve = 0.5 * (1 - np.cos(np.pi * (1 - np.arange(fade_samples) / fade_samples)))
+            audio_data[-fade_samples:] *= fade_curve
+            
+        return audio_data
+    
+    def create_better_silence(self, duration_ms: int = 100, sample_rate: int = 8000) -> bytes:
+        """
+        Create better silence with smooth transitions to prevent clicks and pops.
+        
+        Args:
+            duration_ms: Duration in milliseconds
+            sample_rate: Sample rate in Hz
+            
+        Returns:
+            Silence audio data as bytes
+        """
+        # Calculate number of samples
+        samples = int(sample_rate * duration_ms / 1000)
+        
+        # Create silence with extremely low-level noise (more natural than pure zeros)
+        # Using very low amplitude noise around -80dB
+        noise_floor = 0.0001  # -80dB
+        silence = np.random.normal(0, noise_floor, samples).astype(np.float32)
+        
+        # Apply fade-in and fade-out to the silence
+        fade_ms = min(10, duration_ms // 4)  # 10ms or 1/4 of duration, whichever is smaller
+        fade_samples = int(sample_rate * fade_ms / 1000)
+        
+        if fade_samples > 0:
+            # Apply fade-in
+            fade_in = np.linspace(0.0, 1.0, fade_samples)
+            silence[:fade_samples] *= fade_in
+            
+            # Apply fade-out
+            fade_out = np.linspace(1.0, 0.0, fade_samples)
+            silence[-fade_samples:] *= fade_out
+        
+        # Convert to mulaw bytes
+        import audioop
+        pcm_bytes = (silence * 32767).astype(np.int16).tobytes()
+        mulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)
+        
+        return mulaw_bytes
+    
+    def add_pre_buffer(self, audio_data: bytes) -> bytes:
+        """
+        Add a short pre-buffer silence with fade-in to prevent initial pops.
+        
+        Args:
+            audio_data: Audio data as bytes
+            
+        Returns:
+            Audio data with pre-buffer added
+        """
+        # Create a short silence (30ms)
+        silence = self.create_better_silence(duration_ms=30, sample_rate=8000)
+        
+        # Combine silence with audio data
+        return silence + audio_data
+    
+    # Update these existing methods in AudioProcessor
+    
+    def pcm_to_mulaw(self, pcm_data: bytes) -> bytes:
+        """
+        Convert PCM audio from Voice AI to mulaw for Twilio with optimizations
+        for improved barge-in response times and better audio quality.
+        
+        Args:
+            pcm_data: Audio data in PCM format
+            
+        Returns:
+            Audio data in mulaw format
+        """
+        try:
+            # Check if the data length is a multiple of 2 (for 16-bit samples)
+            if len(pcm_data) % 2 != 0:
+                # Pad with a zero byte to make it even
+                pcm_data = pcm_data + b'\x00'
+                logger.debug("Padded audio data to make even length")
+            
+            # Convert to numpy array for processing
+            pcm_array = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+            
+            # Apply fade-in and fade-out to prevent pops/clicks
+            pcm_array = self.apply_fade(pcm_array, fade_ms=15, fade_type="in")
+            pcm_array = self.apply_fade(pcm_array, fade_ms=15, fade_type="out")
+            
+            # Convert back to bytes
+            pcm_data = (pcm_array * 32767).astype(np.int16).tobytes()
+            
+            # Resample from 16kHz to 8kHz
+            import audioop
+            pcm_data_8k, _ = audioop.ratecv(
+                pcm_data, 2, 1, 
+                SAMPLE_RATE_AI, 
+                SAMPLE_RATE_TWILIO, 
+                None
+            )
+            
+            # Convert to mulaw
+            mulaw_data = audioop.lin2ulaw(pcm_data_8k, 2)
+            
+            # Add pre-buffer silence if audio is long enough (adds a little latency but improves quality)
+            if len(mulaw_data) > 1000:  # Only for non-tiny chunks
+                mulaw_data = self.add_pre_buffer(mulaw_data)
+            
+            logger.debug(f"Converted {len(pcm_data)} bytes of PCM to {len(mulaw_data)} bytes of mulaw")
+            
+            return mulaw_data
+            
+        except Exception as e:
+            logger.error(f"Error converting PCM to mulaw: {e}")
+            # Return empty data rather than raising an exception
+            return b''
+    
+    def _split_audio_into_chunks_with_silence_detection(self, audio_data: bytes) -> list:
+        """
+        Split audio into chunks with silence detection for improved barge-in opportunities.
+        Add improved silence at sentence boundaries for better audio quality.
+        
+        Args:
+            audio_data: Audio data to split
+            
+        Returns:
+            List of chunks with appropriate silences
+        """
+        # Convert to PCM for analysis
+        pcm_data = self.mulaw_to_pcm(audio_data)
+        
+        # Check if we have enough data to process
+        if len(pcm_data) < 3200:  # Less than 200ms at 16kHz
+            return [audio_data]  # Return original if too short
+        
+        # Simple sentence boundary detection from audio (rough approximation)
+        # Looking for prolonged drops in energy that might represent pauses
+        frame_size = 1600  # 100ms at 16kHz
+        frames = [pcm_data[i:i+frame_size] for i in range(0, len(pcm_data), frame_size) if i+frame_size <= len(pcm_data)]
+        
+        if not frames:
+            return [audio_data]  # Return original if too short
+            
+        frame_energies = [np.mean(np.abs(frame)) for frame in frames]
+        
+        # Detect potential sentence boundaries as places where energy drops significantly
+        boundaries = []
+        for i in range(1, len(frame_energies)):
+            if frame_energies[i] < frame_energies[i-1] * 0.3:  # 70% drop in energy
+                boundaries.append(i * frame_size)
+        
+        # Now split the audio with improved silences at these boundaries
+        chunk_size = 400  # Smaller chunks for more frequent barge-in checks
+        chunks = []
+        last_pos = 0
+        
+        for boundary in boundaries:
+            # Add chunks up to this boundary
+            for i in range(last_pos, min(boundary, len(audio_data)), chunk_size):
+                end = min(i + chunk_size, boundary, len(audio_data))
+                chunks.append(audio_data[i:end])
+            
+            # Add better silence at sentence boundaries (100ms)
+            better_silence = self.create_better_silence(duration_ms=100, sample_rate=8000)
+            chunks.append(better_silence)
+            
+            last_pos = min(boundary, len(audio_data))
+        
+        # Add any remaining chunks
+        for i in range(last_pos, len(audio_data), chunk_size):
+            end = min(i + chunk_size, len(audio_data))
+            chunks.append(audio_data[i:end])
+        
+        return chunks
     
     def mulaw_to_pcm(self, mulaw_data: bytes) -> np.ndarray:
         """

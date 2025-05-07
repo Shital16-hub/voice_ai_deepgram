@@ -73,6 +73,25 @@ class VoiceAIAgent:
         self.noise_floor = 0.005
         self.noise_samples = []
         self.max_noise_samples = 20
+
+        try:
+            
+        if not self.elevenlabs_api_key:
+            raise ValueError("ElevenLabs API key is required. Please set ELEVENLABS_API_KEY in environment variables.")
+            
+        self.tts_client = ElevenLabsTTS(
+            api_key=self.elevenlabs_api_key,
+            voice_id=self.elevenlabs_voice_id,
+            model_id=self.elevenlabs_model_id,
+            container_format="mulaw",  # For Twilio compatibility
+            sample_rate=8000,  # For Twilio compatibility
+            optimize_streaming_latency=2  # Reduced from 4 to balance quality and latency
+        )
+        
+        logger.info(f"Initialized ElevenLabs TTS with voice ID: {self.elevenlabs_voice_id}, model ID: {self.elevenlabs_model_id}")
+    except Exception as e:
+        logger.error(f"Error initializing ElevenLabs TTS: {e}")
+        rais
         
     def _process_audio(self, audio: np.ndarray) -> np.ndarray:
         """
