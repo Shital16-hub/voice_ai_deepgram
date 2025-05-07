@@ -14,11 +14,14 @@ import time
 import threading
 import numpy as np
 from scipy import signal
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 from simple_websocket import Server, ConnectionClosed
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from twilio.rest import Client
+
+from speech_to_text.utils.speech_detector import SpeechActivityDetector
+from telephony.audio_processor import MulawBufferProcessor, AudioProcessor
 
 # Load environment variables
 load_dotenv()
@@ -44,8 +47,50 @@ ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
 ELEVENLABS_VOICE_ID = os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL')  # Default to Bella voice
 ELEVENLABS_MODEL_ID = os.getenv('TTS_MODEL_ID', 'eleven_turbo_v2')
 
-# Configure logging with more debug info
-logging.basicConfig(level=getattr(logging, LOG_LEVEL), format=LOG_FORMAT)
+def configure_logging():
+    """Configure logging to reduce noise from small audio chunks."""
+    # Set up root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers to avoid duplication
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Create a handler for console output
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # Create a formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(formatter)
+    
+    # Add handler to root logger
+    root_logger.addHandler(console_handler)
+    
+    # Set specific loggers to higher levels to reduce noise
+    logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)  # Only show errors
+    
+    # Create a filter to ignore specific messages
+    class IgnoreSmallMulawFilter(logging.Filter):
+        def filter(self, record):
+            return not (record.getMessage().startswith("Very small mulaw data"))
+    
+    # Add filter to the handlers
+    for handler in root_logger.handlers:
+        handler.addFilter(IgnoreSmallMulawFilter())
+    
+    # Optionally create a file handler for full logs
+    file_handler = logging.FileHandler('full_debug.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    # Don't apply the filter to the file handler so we have complete logs
+    root_logger.addHandler(file_handler)
+    
+    return root_logger
+
+# Configure logging at application start
+configure_logging()
 logger = logging.getLogger(__name__)
 
 # Flask app setup
@@ -129,6 +174,190 @@ class AudioFingerprinter:
                     return True
         
         return False
+
+# Enhanced helper function to detect speech vs echo
+def contains_human_speech_pattern(audio_data: np.ndarray) -> bool:
+    """
+    Specialized detector that identifies human speech patterns vs. echoes.
+    Uses speech-specific features that distinguish it from echoes and noise.
+    """
+    if len(audio_data) < 1600:  # Need at least 100ms at 16kHz
+        return False
+    
+    # 1. Check overall energy
+    energy = np.mean(np.abs(audio_data))
+    if energy < 0.01:  # Very quiet
+        return False
+    
+    # 2. Get spectral features that distinguish speech
+    # Generate spectrum
+    freqs, power = signal.welch(audio_data, fs=16000, nperseg=512)
+    
+    # Define speech-relevant frequency bands
+    # Focus on bands where human speech is concentrated (formants)
+    formant1_band = (300, 1000)   # First formant region
+    formant2_band = (1000, 2500)  # Second formant region
+    high_band = (2500, 4000)      # Higher frequencies
+    
+    # Extract power in each band
+    f1_power = np.mean(power[(freqs >= formant1_band[0]) & (freqs <= formant1_band[1])])
+    f2_power = np.mean(power[(freqs >= formant2_band[0]) & (freqs <= formant2_band[1])])
+    high_power = np.mean(power[(freqs >= high_band[0]) & (freqs <= high_band[1])])
+    
+    # Calculate ratios that are characteristic of speech
+    f1_f2_ratio = f1_power / f2_power if f2_power > 0 else 0
+    speech_high_ratio = (f1_power + f2_power) / high_power if high_power > 0 else 0
+    
+    # 3. Check spectral balance - speech has specific formant patterns
+    is_speech_spectrum = (
+        f1_f2_ratio > 0.8 and f1_f2_ratio < 3.0 and  # Typical range for speech formants
+        speech_high_ratio > 2.0                       # Speech has more energy in formant regions
+    )
+    
+    # 4. Check for energy variations over time (syllable-like patterns)
+    frame_size = 320  # 20ms
+    frames = [audio_data[i:i+frame_size] for i in range(0, len(audio_data), frame_size)]
+    frame_energies = [np.mean(np.abs(frame)) for frame in frames if len(frame) == frame_size]
+    
+    if len(frame_energies) >= 5:
+        # Speech typically has syllabic pattern (energy goes up and down)
+        peaks = 0
+        for i in range(1, len(frame_energies)-1):
+            if (frame_energies[i] > frame_energies[i-1] * 1.2 and 
+                frame_energies[i] > frame_energies[i+1] * 1.2 and
+                frame_energies[i] > 0.015):  # Real peak, not just noise
+                peaks += 1
+        
+        has_syllabic_pattern = peaks >= 2  # At least 2 energy peaks (syllables)
+    else:
+        has_syllabic_pattern = False
+    
+    # Combine spectral and temporal features
+    return is_speech_spectrum and has_syllabic_pattern
+
+# Improved function to detect barge-in during speech
+def detect_barge_in_during_speech(audio_data: np.ndarray, time_since_output: float) -> bool:
+    """
+    Special barge-in detection during system speech with improved thresholds.
+    
+    Args:
+        audio_data: Incoming audio data
+        time_since_output: Time since last audio output
+        
+    Returns:
+        True if confident this is a real barge-in, not an echo
+    """
+    # Ignore very small audio samples
+    if len(audio_data) < 1600:  # Need at least 100ms at 16kHz
+        return False
+        
+    # 1. Energy must be significantly higher than typical echo
+    energy = np.mean(np.abs(audio_data))
+    min_energy_threshold = 0.08  # REDUCED from 0.1 for better sensitivity
+    
+    # 2. Must have speech-like patterns (not just noise or echo)
+    frame_size = min(len(audio_data), 320)  # 20ms at 16kHz
+    if frame_size <= 0:
+        return False
+        
+    frames = [audio_data[i:i+frame_size] for i in range(0, len(audio_data), frame_size)]
+    frame_energies = [np.mean(np.abs(frame)) for frame in frames if len(frame) == frame_size]
+    
+    if len(frame_energies) >= 3:
+        # Calculate energy variance (speech has more variance than steady noise/echo)
+        energy_std = np.std(frame_energies)
+        energy_mean = np.mean(frame_energies)
+        variation_ratio = energy_std / energy_mean if energy_mean > 0 else 0
+        
+        # 3. Check spectral variety (more speech-like)
+        has_speech_pattern = variation_ratio > 0.3  # REDUCED from 0.4 for better sensitivity
+        
+        # 4. Has strong peak-to-average ratio (speech has peaks)
+        peak = np.max(np.abs(audio_data))
+        peak_ratio = peak / energy if energy > 0 else 0
+        has_peaks = peak_ratio > 4.0  # REDUCED from 5.0 for better sensitivity
+        
+        # 5. Dynamic energy growth (speech tends to increase in volume)
+        has_energy_growth = False
+        if len(frame_energies) > 5:
+            first_half = frame_energies[:len(frame_energies)//2]
+            second_half = frame_energies[len(frame_energies)//2:]
+            first_avg = np.mean(first_half)
+            second_avg = np.mean(second_half)
+            has_energy_growth = second_avg > (first_avg * 1.3)  # REDUCED from 1.5 for better sensitivity
+        
+        # Log detailed detection info
+        logger.debug(f"Speech barge-in check: energy={energy:.4f}, min_threshold={min_energy_threshold:.4f}, "
+                    f"variation={variation_ratio:.3f}, peak_ratio={peak_ratio:.1f}, "
+                    f"energy_growth={has_energy_growth}")
+        
+        # COMBINED DECISION - need multiple factors to confirm real interruption
+        # RELAXED from requiring all conditions to requiring only 2 out of 3
+        conditions_met = sum([has_speech_pattern, has_peaks, has_energy_growth])
+        is_interruption = (
+            energy > min_energy_threshold and
+            conditions_met >= 2
+        )
+        
+        return is_interruption
+    
+    return False  # Not enough frames to analyze
+
+# Helper function to split audio with improved pausing
+def split_audio_into_chunks_with_silence_detection(audio_data: bytes) -> list:
+    """
+    Split audio into chunks with silence detection for improved barge-in.
+    Add longer pauses at sentence boundaries for better barge-in opportunities.
+    """
+    # Create an AudioProcessor instance
+    audio_processor = AudioProcessor()
+    
+    # Convert to PCM for analysis
+    pcm_data = audio_processor.mulaw_to_pcm(audio_data)
+    
+    # Check if we have enough data to process
+    if len(pcm_data) < 3200:  # Less than 200ms at 16kHz
+        return [audio_data]  # Return original if too short
+    
+    # Simple sentence boundary detection from audio (rough approximation)
+    # Looking for prolonged drops in energy that might represent pauses
+    frame_size = 1600  # 100ms at 16kHz
+    frames = [pcm_data[i:i+frame_size] for i in range(0, len(pcm_data), frame_size) if i+frame_size <= len(pcm_data)]
+    
+    if not frames:
+        return [audio_data]  # Return original if too short
+        
+    frame_energies = [np.mean(np.abs(frame)) for frame in frames]
+    
+    # Detect potential sentence boundaries as places where energy drops significantly
+    boundaries = []
+    for i in range(1, len(frame_energies)):
+        if frame_energies[i] < frame_energies[i-1] * 0.3:  # 70% drop in energy
+            boundaries.append(i * frame_size)
+    
+    # Now split the audio with extended silence at these boundaries
+    chunk_size = 800  # Base chunk size (100ms at 8kHz)
+    chunks = []
+    last_pos = 0
+    
+    for boundary in boundaries:
+        # Add chunks up to this boundary
+        for i in range(last_pos, min(boundary, len(audio_data)), chunk_size):
+            end = min(i + chunk_size, boundary, len(audio_data))
+            chunks.append(audio_data[i:end])
+        
+        # Add explicit silence at sentence boundaries (100ms)
+        silence_chunk = b'\x00' * 800  # 100ms of silence at 8kHz
+        chunks.append(silence_chunk)
+        
+        last_pos = min(boundary, len(audio_data))
+    
+    # Add any remaining chunks
+    for i in range(last_pos, len(audio_data), chunk_size):
+        end = min(i + chunk_size, len(audio_data))
+        chunks.append(audio_data[i:end])
+    
+    return chunks
 
 async def initialize_system():
     """Initialize all system components with ElevenLabs TTS integration."""
@@ -305,157 +534,137 @@ def handle_status_callback():
                 del call_event_loops[call_sid]
                 logger.info(f"Cleaned up event loop resources for call {call_sid}")
             except KeyError:
-                logger.error(f"Error handling status callback: '{call_sid}'")
+                logger.warning(f"Call {call_sid} not found in event loops - already cleaned up")
                 
         return Response('', status=204)
     except Exception as e:
         logger.error(f"Error handling status callback: {e}")
         return Response('', status=204)
         
-def run_event_loop_in_thread(loop, ws_handler, ws, call_sid, terminate_flag):
-    """Run event loop in a separate thread."""
+def run_event_loop_in_thread(call_sid, ws):
+    """
+    Run WebSocket event loop in a separate thread.
+    
+    Args:
+        call_sid: Twilio call SID
+        ws: WebSocket connection
+    """
     try:
-        # Set this loop as the event loop for this thread
+        # Create a new asyncio event loop for this thread
+        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Create a task for the keep-alive mechanism
+        # Initialize voice pipeline if needed
+        voice_pipeline = get_voice_pipeline()
+        
+        # Create speech detector for barge-in support
+        speech_detector = SpeechActivityDetector(
+            energy_threshold=0.04,  # Adjust based on your audio levels
+            consecutive_frames=2,   # Detect quickly for better responsiveness
+            frame_duration=0.02     # 20ms frames
+        )
+        
+        # Initialize WebSocketHandler with pipeline and speech detector
+        ws_handler = WebSocketHandler(call_sid=call_sid, voice_pipeline=voice_pipeline,speech_detector=speech_detector)
+        
+        # Assign the speech detector to the handler
+        ws_handler.speech_detector = speech_detector
+        
+        # Create mulaw buffer processor to handle small audio chunks
+        ws_handler.mulaw_processor = MulawBufferProcessor(min_chunk_size=640)  # 80ms at 8kHz
+        
+        # Start keep-alive loop
         keep_alive_task = asyncio.ensure_future(ws_handler._keep_alive_loop(ws))
         
-        # Run the loop until the terminate flag is set or an error occurs
-        while not terminate_flag.is_set():
-            try:
-                # Run the loop for a short duration
-                loop.run_until_complete(asyncio.sleep(0.1))
-            except Exception as e:
-                logger.error(f"Error in event loop for call {call_sid}: {e}")
-                break
+        # Setup on_message callback
+        async def on_message(message):
+            await ws_handler.handle_message(message, ws)
         
-        # Cancel the keep-alive task
-        keep_alive_task.cancel()
-        try:
-            loop.run_until_complete(keep_alive_task)
-        except (asyncio.CancelledError, Exception):
-            pass
+        # Setup on_close callback
+        async def on_close():
+            logger.info(f"WebSocket closed for call {call_sid}")
+            # Cancel keep-alive task
+            if keep_alive_task and not keep_alive_task.done():
+                keep_alive_task.cancel()
+                try:
+                    await keep_alive_task
+                except asyncio.CancelledError:
+                    pass
             
-        # Close the loop
-        loop.close()
-        logger.info(f"Event loop for call {call_sid} has been closed")
+            # Cleanup
+            if ws_handler.google_speech_active:
+                try:
+                    await ws_handler.speech_client.stop_streaming()
+                    logger.info("Stopped Google Cloud Speech streaming session")
+                except Exception as e:
+                    logger.error(f"Error stopping Google Speech session: {e}")
         
+        # Register callbacks
+        ws.on_message = on_message
+        ws.on_close = on_close
+        
+        # Run the event loop
+        loop.run_forever()
     except Exception as e:
         logger.error(f"Error in event loop thread for call {call_sid}: {e}", exc_info=True)
     finally:
-        # Clean up call_event_loops entry if it still exists
-        if call_sid in call_event_loops:
-            del call_event_loops[call_sid]
+        # Cleanup
+        try:
+            # Close the loop
+            loop.close()
+            logger.info(f"Event loop closed for call {call_sid}")
+        except Exception as e:
+            logger.error(f"Error closing event loop for call {call_sid}: {e}")
 
-# Helper function to detect speech vs echo
-def contains_human_speech_pattern(audio_data: np.ndarray) -> bool:
+@app.route('/diagnostic/barge-in', methods=['POST'])
+def barge_in_diagnostic():
     """
-    Specialized detector that identifies human speech patterns vs. echoes.
-    Uses speech-specific features that distinguish it from echoes and noise.
+    Endpoint for testing barge-in detection parameters.
+    Send audio samples for analysis without actual call handling.
     """
-    if len(audio_data) < 1600:  # Need at least 100ms at 16kHz
-        return False
-    
-    # 1. Check overall energy
-    energy = np.mean(np.abs(audio_data))
-    if energy < 0.01:  # Very quiet
-        return False
-    
-    # 2. Get spectral features that distinguish speech
-    # Generate spectrum
-    freqs, power = signal.welch(audio_data, fs=16000, nperseg=512)
-    
-    # Define speech-relevant frequency bands
-    # Focus on bands where human speech is concentrated (formants)
-    formant1_band = (300, 1000)   # First formant region
-    formant2_band = (1000, 2500)  # Second formant region
-    high_band = (2500, 4000)      # Higher frequencies
-    
-    # Extract power in each band
-    f1_power = np.mean(power[(freqs >= formant1_band[0]) & (freqs <= formant1_band[1])])
-    f2_power = np.mean(power[(freqs >= formant2_band[0]) & (freqs <= formant2_band[1])])
-    high_power = np.mean(power[(freqs >= high_band[0]) & (freqs <= high_band[1])])
-    
-    # Calculate ratios that are characteristic of speech
-    f1_f2_ratio = f1_power / f2_power if f2_power > 0 else 0
-    speech_high_ratio = (f1_power + f2_power) / high_power if high_power > 0 else 0
-    
-    # 3. Check spectral balance - speech has specific formant patterns
-    is_speech_spectrum = (
-        f1_f2_ratio > 0.8 and f1_f2_ratio < 3.0 and  # Typical range for speech formants
-        speech_high_ratio > 2.0                       # Speech has more energy in formant regions
-    )
-    
-    # 4. Check for energy variations over time (syllable-like patterns)
-    frame_size = 320  # 20ms
-    frames = [audio_data[i:i+frame_size] for i in range(0, len(audio_data), frame_size)]
-    frame_energies = [np.mean(np.abs(frame)) for frame in frames if len(frame) == frame_size]
-    
-    if len(frame_energies) >= 5:
-        # Speech typically has syllabic pattern (energy goes up and down)
-        peaks = 0
-        for i in range(1, len(frame_energies)-1):
-            if (frame_energies[i] > frame_energies[i-1] * 1.2 and 
-                frame_energies[i] > frame_energies[i+1] * 1.2 and
-                frame_energies[i] > 0.015):  # Real peak, not just noise
-                peaks += 1
+    try:
+        # Get audio data from request
+        audio_data = request.data
+        if not audio_data:
+            return jsonify({"error": "No audio data provided"}), 400
+            
+        # Create audio processor
+        processor = AudioProcessor()
         
-        has_syllabic_pattern = peaks >= 2  # At least 2 energy peaks (syllables)
-    else:
-        has_syllabic_pattern = False
-    
-    # Combine spectral and temporal features
-    return is_speech_spectrum and has_syllabic_pattern
-
-# Helper function to split audio with improved pausing
-def split_audio_into_chunks_with_silence_detection(audio_data: bytes, audio_processor: AudioProcessor) -> list:
-    """
-    Split audio into chunks with silence detection for improved barge-in.
-    Add longer pauses at sentence boundaries for better barge-in opportunities.
-    """
-    # Convert to PCM for analysis
-    pcm_data = audio_processor.mulaw_to_pcm(audio_data)
-    
-    # Simple sentence boundary detection from audio (rough approximation)
-    # Looking for prolonged drops in energy that might represent pauses
-    frame_size = 1600  # 100ms at 16kHz
-    frames = [pcm_data[i:i+frame_size] for i in range(0, len(pcm_data), frame_size) if i+frame_size <= len(pcm_data)]
-    
-    if not frames:
-        return [audio_data]  # Return original if too short
+        # Convert mulaw to PCM
+        pcm_audio = processor.mulaw_to_pcm(audio_data)
         
-    frame_energies = [np.mean(np.abs(frame)) for frame in frames]
-    
-    # Detect potential sentence boundaries as places where energy drops significantly
-    boundaries = []
-    for i in range(1, len(frame_energies)):
-        if frame_energies[i] < frame_energies[i-1] * 0.3:  # 70% drop in energy
-            boundaries.append(i * frame_size)
-    
-    # Now split the audio with extended silence at these boundaries
-    chunk_size = 800  # Base chunk size (100ms at 8kHz)
-    chunks = []
-    last_pos = 0
-    
-    for boundary in boundaries:
-        # Add chunks up to this boundary
-        for i in range(last_pos, min(boundary, len(audio_data)), chunk_size):
-            end = min(i + chunk_size, boundary, len(audio_data))
-            chunks.append(audio_data[i:end])
+        # Calculate audio metrics
+        audio_energy = float(np.mean(np.abs(pcm_audio)) if len(pcm_audio) > 0 else 0)
         
-        # Add explicit silence at sentence boundaries (100ms)
-        silence_chunk = b'\x00' * 800  # 100ms of silence at 8kHz
-        chunks.append(silence_chunk)
+        # Test speech detection methods
+        speech_detected = contains_human_speech_pattern(pcm_audio)
+        is_barge_in = detect_barge_in_during_speech(pcm_audio, 0.5)
         
-        last_pos = min(boundary, len(audio_data))
-    
-    # Add any remaining chunks
-    for i in range(last_pos, len(audio_data), chunk_size):
-        end = min(i + chunk_size, len(audio_data))
-        chunks.append(audio_data[i:end])
-    
-    return chunks
+        # Create test fingerprinter to check echo detection
+        fingerprinter = AudioFingerprinter(max_fingerprints=10)
+        is_echo = fingerprinter.is_echo(pcm_audio)
+        
+        # Analyze using lower threshold for comparison
+        is_barge_in_sensitive = False
+        if len(pcm_audio) >= 1600:
+            energy = np.mean(np.abs(pcm_audio))
+            is_barge_in_sensitive = energy > 0.05  # Lower threshold for comparison
+        
+        results = {
+            "audio_size": len(audio_data),
+            "pcm_size": len(pcm_audio),
+            "audio_energy": audio_energy,
+            "speech_detected": speech_detected,
+            "is_barge_in": is_barge_in,
+            "is_barge_in_sensitive": is_barge_in_sensitive,
+            "is_echo": is_echo
+        }
+            
+        return jsonify(results), 200
+    except Exception as e:
+        logger.error(f"Error in barge-in diagnostic: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
@@ -472,27 +681,33 @@ def handle_media_stream(call_sid):
         logger.info(f"WebSocket connection established for call {call_sid}")
         
         # Create WebSocket handler with enhanced barge-in detection
-        ws_handler = WebSocketHandler(call_sid, voice_ai_pipeline)
+        ws_handler = WebSocketHandler(call_sid, voice_pipeline=voice_pipeline,speech_detector=speech_detector)
         
         # Add the audio fingerprinter for echo detection
         ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=20)
         
-        # Provide our enhanced speech detection function
+        # Override the speech detection functions with our improved versions
         ws_handler._contains_human_speech_pattern = contains_human_speech_pattern
+        ws_handler._detect_barge_in_during_speech = detect_barge_in_during_speech
         
-        # Provide improved audio splitting function
-        ws_handler._split_audio_into_chunks_with_silence_detection = lambda audio_data: split_audio_into_chunks_with_silence_detection(
-            audio_data, ws_handler.audio_processor)
+        # Replace the method with a proper function that doesn't rely on 'self'
+        def custom_split_audio_chunks(audio_data):
+            return split_audio_into_chunks_with_silence_detection(audio_data)
+        
+        ws_handler._split_audio_into_chunks_with_silence_detection = custom_split_audio_chunks
         
         # Force enable barge-in for better user experience
         ws_handler.barge_in_enabled = True
         ws_handler.barge_in_check_enabled = True
         
         # Lower threshold for faster response
-        ws_handler.barge_in_energy_threshold = 0.005  # Reduced for better sensitivity
+        ws_handler.barge_in_energy_threshold = 0.05  # Reduced from 0.015 for better sensitivity
         
         # Set longer pause after system speech to avoid echo confusion  
         ws_handler.pause_after_response = 0.5  # Increased from default
+        
+        # Increase buffer size for better detection
+        ws_handler.min_words_for_valid_query = 1  # Reduced from 2 for better responsiveness
         
         # Create an event loop for this connection
         loop = asyncio.new_event_loop()

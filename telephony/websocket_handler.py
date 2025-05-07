@@ -18,8 +18,9 @@ from google.api_core.exceptions import GoogleAPIError
 
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 from speech_to_text.simple_google_stt import SimpleGoogleSTT
+from speech_to_text.utils.speech_detector import SpeechActivityDetector
 
-from telephony.audio_processor import AudioProcessor
+from telephony.audio_processor import AudioProcessor, MulawBufferProcessor
 from telephony.config import CHUNK_SIZE, AUDIO_BUFFER_SIZE, SILENCE_THRESHOLD, SILENCE_DURATION, MAX_BUFFER_SIZE
 import concurrent.futures
 import threading
@@ -181,6 +182,9 @@ class WebSocketHandler:
         self.input_buffer = bytearray()
         self.output_buffer = bytearray()
         
+        # Add Mulaw buffer processor to address small mulaw data warnings
+        self.mulaw_processor = MulawBufferProcessor(min_chunk_size=640)  # 80ms at 8kHz
+        
         # State tracking
         self.is_speaking = False
         self.speech_interrupted = False
@@ -225,6 +229,13 @@ class WebSocketHandler:
             enable_automatic_punctuation=True
         )
         
+        # Create speech detector for barge-in
+        self.speech_detector = SpeechActivityDetector(
+            energy_threshold=0.04,  # Adjusted threshold for better detection
+            consecutive_frames=2,   # Reduced for faster detection
+            frame_duration=0.02     # 20ms frames
+        )
+        
         # Ensure we start with a fresh speech recognition session
         self.google_speech_active = False
         
@@ -246,7 +257,7 @@ class WebSocketHandler:
         # Track recent system responses for content-based echo detection
         self.recent_system_responses = []
         
-        logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support (FORCED ENABLED)")
+        logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support (FORCED ENABLED) and mulaw buffering")
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
@@ -326,6 +337,13 @@ class WebSocketHandler:
         Returns:
             True if confident this is a real barge-in, not an echo
         """
+        # Check for speech activity using our specialized detector
+        if hasattr(self, 'speech_detector'):
+            is_speech = self.speech_detector.detect(audio_data)
+            if is_speech:
+                logger.info(f"Speech detector detected active speech during agent output")
+                return True
+        
         # Apply more stringent tests during speech
         
         # 1. Energy must be significantly higher than typical echo
@@ -766,8 +784,15 @@ class WebSocketHandler:
             # Decode audio data
             audio_data = base64.b64decode(payload)
             
+            # Process with MulawBufferProcessor to solve "Very small mulaw data" warnings
+            processed_data = self.mulaw_processor.process(audio_data)
+            
+            # Skip if still buffering
+            if processed_data is None:
+                return
+            
             # Add to input buffer
-            self.input_buffer.extend(audio_data)
+            self.input_buffer.extend(processed_data)
             
             # Limit buffer size to prevent memory issues
             if len(self.input_buffer) > MAX_BUFFER_SIZE:
@@ -780,7 +805,10 @@ class WebSocketHandler:
             time_since_output = time.time() - self.last_audio_output_time
             
             # Convert to PCM for speech detection
-            pcm_audio = self.audio_processor.mulaw_to_pcm(audio_data)
+            pcm_audio = self.audio_processor.mulaw_to_pcm(processed_data)
+            
+            # Update ambient noise level (adaptive threshold)
+            self._update_ambient_noise_level(pcm_audio)
             
             # SPECIAL HANDLING DURING SYSTEM SPEECH
             if self.is_speaking and self.barge_in_enabled:
@@ -789,6 +817,20 @@ class WebSocketHandler:
                     logger.debug("Detected echo during system speech, ignoring")
                     return
                     
+                # Use speech detector for more reliable barge-in detection during speech
+                if hasattr(self, 'speech_detector'):
+                    is_speech = self.speech_detector.detect(pcm_audio)
+                    if is_speech:
+                        logger.info("BARGE-IN DETECTED by speech detector! Interrupting...")
+                        self.speech_interrupted = True
+                        # Clear current audio chunks to stop sending
+                        self.current_audio_chunks = []
+                        # Reset the state
+                        self.is_speaking = False
+                        # Process this interrupting audio immediately
+                        await self._process_audio(ws)
+                        return
+                
                 # Apply stronger barge-in detection with higher threshold for true interruptions
                 # We need to be more certain this is an interruption during our speech
                 barge_in_detected = self._detect_barge_in_during_speech(pcm_audio, time_since_output)
@@ -1275,6 +1317,14 @@ class WebSocketHandler:
                             # Sample a small portion of the input buffer
                             sample_size = min(len(self.input_buffer), 4000)
                             sample_data = self.audio_processor.mulaw_to_pcm(bytes(self.input_buffer[-sample_size:]))
+                            
+                            # Use the specialized speech detector for more reliable detection
+                            if hasattr(self, 'speech_detector'):
+                                is_speech = self.speech_detector.detect(sample_data)
+                                if is_speech:
+                                    logger.info(f"BARGE-IN DETECTED by speech detector during playback at chunk {i}/{len(chunks)}")
+                                    self.speech_interrupted = True
+                                    break
                             
                             # Check for speech but with a higher threshold during playback to avoid false detections
                             # Use the special barge-in detection during speech
