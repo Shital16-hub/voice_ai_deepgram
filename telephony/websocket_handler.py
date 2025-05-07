@@ -323,12 +323,12 @@ class WebSocketHandler:
         # Add tracking for barge-in confirmation
         self.potential_barge_in = False
         self.barge_in_start_time = 0
-        self.barge_in_debounce_time = 3.0  # Don't check for barge-in again for 3 seconds after detection
+        self.barge_in_debounce_time = 5.0  # Don't check for barge-in again for 3 seconds after detection
 
         self.debug_echo_detection = False  # Set to True for detailed debugging
         
         # Add fingerprinting for echo detection
-        self.audio_fingerprinter = AudioFingerprinter(max_fingerprints=30)
+        self.audio_fingerprinter = AudioFingerprinter(max_fingerprints=50)
 
         # Tracking for barge-in detection
         self.last_barge_in_time = 0  # Track last time we detected a barge-in
@@ -342,8 +342,8 @@ class WebSocketHandler:
         
         # Create speech detector for barge-in
         self.speech_detector = SpeechActivityDetector(
-            energy_threshold=0.08,  # Adjusted threshold for better detection
-            consecutive_frames=3,   # Reduced for faster detection
+            energy_threshold=0.10,  # Adjusted threshold for better detection
+            consecutive_frames=5,   # Reduced for faster detection
             frame_duration=0.02     # 20ms frames
         )
 
@@ -358,7 +358,7 @@ class WebSocketHandler:
         self.elevenlabs_tts = None
         
         # Add barge-in sensitivity settings - REDUCED THRESHOLD
-        self.barge_in_energy_threshold = 0.05  # Reduced from 0.015 for more sensitive detection
+        self.barge_in_energy_threshold = 0.12  # Reduced from 0.015 for more sensitive detection
         self.barge_in_check_enabled = True
 
         self.barge_in_debounce_time = 5.0  # Don't allow another barge-in for 3 seconds after a detection
@@ -374,12 +374,17 @@ class WebSocketHandler:
         # Track recent system responses for content-based echo detection
         self.recent_system_responses = []
 
+        self.post_speech_dead_zone = 0.5
+        self.barge_in_min_duration = 0.6
+
         # Improve audio fingerprinting configuration for better echo detection
         if hasattr(self, 'audio_fingerprinter'):
             # Lower threshold for more aggressive echo detection
-            self.audio_fingerprinter.similarity_threshold = 0.45  # More conservative to detect more echoes
+            self.audio_fingerprinter.similarity_threshold = 0.65  # More conservative to detect more echoes
             # Increase maximum fingerprints to track more audio history
             self.audio_fingerprinter.max_fingerprints = 30  # Was 20
+
+        self.speech_pattern_detector = SpeechPatternDetector()
         
         logger.info(f"WebSocketHandler initialized for call {call_sid} with barge-in support (FORCED ENABLED) and mulaw buffering")
     
@@ -478,6 +483,105 @@ class WebSocketHandler:
         # Fallback to simple energy check
         is_echo = audio_energy < dynamic_threshold
         return is_echo
+
+    def _is_likely_echo_enhanced(self, audio_data: np.ndarray, time_since_output: float) -> bool:
+        """
+        Enhanced echo detection with multi-factor analysis.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            time_since_output: Time since our last audio output
+            
+        Returns:
+            True if the audio is likely an echo
+        """
+        # STAGE 1: Immediate rejection for very recent output
+        if time_since_output < 0.6:  # Increased from 0.5s to 0.6s
+            return True
+            
+        # STAGE 2: Strong echo likelihood for medium recency (0.6-1.5s)
+        if time_since_output < 1.5:
+            # Use fingerprinting as primary detection 
+            if self.audio_fingerprinter.is_echo(audio_data):
+                return True
+                
+            # Add spectral analysis for medium recency echo
+            spectral_features = self._analyze_spectral_features(audio_data)
+            if spectral_features.get('is_echo', False):
+                return True
+        
+        # STAGE 3: Lower likelihood but still possible (1.5-3.0s)
+        if time_since_output < 3.0:
+            # Check energy with dynamic threshold
+            audio_energy = np.mean(np.abs(audio_data))
+            
+            # Dynamic threshold scaled by time
+            decay_factor = 1.0 - (time_since_output / 3.0)
+            decay_factor = max(0.0, decay_factor)
+            
+            # Higher base threshold (0.12) scaled by decay
+            dynamic_threshold = 0.12 * (1.0 + 10.0 * decay_factor)
+            
+            # Energy-based rejection
+            if audio_energy < dynamic_threshold:
+                return True
+                
+            # Fingerprint check for distance echoes
+            if self.audio_fingerprinter.is_echo(audio_data):
+                return True
+        
+        # Not likely an echo
+        return False
+    
+    def _analyze_spectral_features(self, audio_data: np.ndarray) -> Dict[str, Any]:
+        """
+        Analyze spectral features of audio to distinguish echo from speech.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            
+        Returns:
+            Dictionary with spectral analysis results
+        """
+        if len(audio_data) < 1600:  # Need at least 100ms at 16kHz
+            return {"is_echo": False}
+        
+        try:
+            # Generate spectrum
+            freqs, power = signal.welch(audio_data, fs=16000, nperseg=512)
+            
+            # Define frequency bands
+            formant1_band = (300, 1000)   # First formant region
+            formant2_band = (1000, 2500)  # Second formant region
+            high_band = (2500, 4000)      # Higher frequencies
+            
+            # Extract power in each band
+            f1_power = np.mean(power[(freqs >= formant1_band[0]) & (freqs <= formant1_band[1])])
+            f2_power = np.mean(power[(freqs >= formant2_band[0]) & (freqs <= formant2_band[1])])
+            high_power = np.mean(power[(freqs >= high_band[0]) & (freqs <= high_band[1])])
+            
+            # Calculate spectral ratios
+            f1_f2_ratio = f1_power / f2_power if f2_power > 0 else 0
+            speech_high_ratio = (f1_power + f2_power) / high_power if high_power > 0 else 0
+            
+            # Echoes typically have flatter spectrum than speech
+            # Echo detection criteria:
+            is_echo = (f1_f2_ratio < 0.7 or  # Flatter spectrum
+                      f1_f2_ratio > 3.0 or   # Or very skewed spectrum 
+                      speech_high_ratio < 1.5)  # Less energy in speech formant regions
+            
+            return {
+                "is_echo": is_echo,
+                "f1_power": f1_power,
+                "f2_power": f2_power,
+                "high_power": high_power,
+                "f1_f2_ratio": f1_f2_ratio,
+                "speech_high_ratio": speech_high_ratio
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in spectral analysis: {e}")
+            return {"is_echo": False}
 
     
     def _detect_barge_in_during_speech(self, audio_data: np.ndarray, time_since_output: float) -> bool:
@@ -1003,6 +1107,13 @@ class WebSocketHandler:
             # Decode audio data
             audio_data = base64.b64decode(payload)
             
+            # CRITICAL IMPROVEMENT: Hard rejection during dead zone after system speech
+            time_since_output = time.time() - self.last_audio_output_time
+            if time_since_output < self.post_speech_dead_zone:
+                # In dead zone after system speech, completely ignore audio
+                logger.debug(f"In dead zone after speech ({time_since_output:.3f}s < {self.post_speech_dead_zone:.3f}s)")
+                return
+            
             # Skip processing if system is speaking and we just detected a barge-in
             # This prevents repeated barge-in detection during speech interruption
             if self.speech_interrupted and self.is_speaking:
@@ -1010,7 +1121,7 @@ class WebSocketHandler:
                 self.input_buffer.extend(audio_data)
                 logger.debug("Still handling previous barge-in, buffering audio")
                 return
-            
+                
             # Process with MulawBufferProcessor to solve "Very small mulaw data" warnings
             processed_data = self.mulaw_processor.process(audio_data)
             
@@ -1028,97 +1139,96 @@ class WebSocketHandler:
                 self.input_buffer = self.input_buffer[excess:]
                 logger.debug(f"Trimmed input buffer to {len(self.input_buffer)} bytes")
             
-            # Calculate time since last audio output
-            time_since_output = time.time() - self.last_audio_output_time
-            
             # Convert to PCM for speech detection
             pcm_audio = self.audio_processor.mulaw_to_pcm(processed_data)
             
             # Update ambient noise level (adaptive threshold)
             self._update_ambient_noise_level(pcm_audio)
             
-            # SPECIAL HANDLING DURING SYSTEM SPEECH
+            # Update speech pattern detector if available
+            if hasattr(self, 'speech_pattern_detector'):
+                self.speech_pattern_detector.add_frame(pcm_audio)
+            
+            # ENHANCED BARGE-IN DETECTION DURING SYSTEM SPEECH
             if self.is_speaking and self.barge_in_enabled:
-                # Add debounce check to prevent too frequent barge-in detections
+                # Check debounce period first - don't allow frequent barge-in detections
                 time_since_last_barge_in = time.time() - getattr(self, 'last_barge_in_time', 0)
                 if time_since_last_barge_in < self.barge_in_debounce_time:
                     logger.debug(f"Skipping barge-in check due to debounce period ({time_since_last_barge_in:.1f}s < {self.barge_in_debounce_time:.1f}s)")
                     return
                     
-                # Apply echo detection first - if it's an echo, ignore it
-                if self._is_likely_echo(pcm_audio, time_since_output):
+                # STEP 1: Always check for echo first with enhanced detection
+                if self._is_likely_echo_enhanced(pcm_audio, time_since_output):
                     logger.debug("Detected echo during system speech, ignoring")
                     return
+                
+                # STEP 2: Check speech pattern confidence
+                speech_confidence = 0.0
+                if hasattr(self, 'speech_pattern_detector'):
+                    speech_confidence = self.speech_pattern_detector.detect_speech()
                     
-                # Use speech detector for more reliable barge-in detection during speech
-                if hasattr(self, 'speech_detector'):
-                    is_speech = self.speech_detector.detect(pcm_audio)
-                    if is_speech:
-                        # Confirm with fingerprinting to avoid false positives
-                        if hasattr(self, 'audio_fingerprinter') and self.audio_fingerprinter.is_echo(pcm_audio):
-                            logger.debug("Speech detected but confirmed as echo by fingerprinting, ignoring")
-                            return
-                            
-                        logger.info("BARGE-IN DETECTED by speech detector! Interrupting...")
-                        self.speech_interrupted = True
-                        self.last_barge_in_time = time.time()
-                        # Clear current audio chunks to stop sending
-                        self.current_audio_chunks = []
-                        # Reset the state
-                        self.is_speaking = False
-                        # Process this interrupting audio immediately
-                        await self._process_audio(ws)
+                    # Only consider high-confidence speech
+                    if speech_confidence < 0.6:  # Require 60% confidence
+                        logger.debug(f"Speech pattern confidence too low: {speech_confidence:.2f}")
                         return
                 
-                # Apply stronger barge-in detection with additional checks for more confidence
-                barge_in_detected = self._detect_barge_in_during_speech(pcm_audio, time_since_output)
+                # STEP 3: Use speech detector for more reliable barge-in detection
+                is_speech = self.speech_detector.detect(pcm_audio)
                 
-                if barge_in_detected:
-                    # Additional validation: check speech timing pattern - human speech typically lasts at least 500ms
-                    if not hasattr(self, 'barge_in_start_time'):
-                        self.barge_in_start_time = time.time()
-                        self.potential_barge_in = True
+                # STEP 4: Track potential barge-in over time for confirmation
+                if is_speech:
+                    if not hasattr(self, 'potential_barge_in_time'):
+                        # Start tracking potential barge-in
+                        self.potential_barge_in_time = time.time()
                         logger.debug("Potential barge-in detected, waiting for confirmation")
                         return
-                    elif self.potential_barge_in:
-                        barge_in_duration = time.time() - self.barge_in_start_time
-                        # Only interrupt if the speech has been happening for at least 300ms
-                        if barge_in_duration >= 0.3:
+                    else:
+                        # Check if we've had sustained speech for minimum duration
+                        barge_in_duration = time.time() - self.potential_barge_in_time
+                        if barge_in_duration >= self.barge_in_min_duration:
                             logger.info(f"BARGE-IN CONFIRMED after {barge_in_duration:.2f}s! Interrupting...")
                             self.speech_interrupted = True
                             self.last_barge_in_time = time.time()
-                            self.potential_barge_in = False
+                            
+                            # Reset potential flag
+                            delattr(self, 'potential_barge_in_time')
+                            
                             # Clear current audio chunks to stop sending
                             self.current_audio_chunks = []
+                            
                             # Reset the state
                             self.is_speaking = False
+                            
                             # Process this interrupting audio immediately
                             await self._process_audio(ws)
-                        return
+                            return
                 else:
                     # Reset potential barge-in if no longer detected
-                    self.potential_barge_in = False
+                    if hasattr(self, 'potential_barge_in_time'):
+                        delattr(self, 'potential_barge_in_time')
+                    
+                # Emergency backup detection - only for very clear high-energy speech
+                # This is a fallback in case primary detection fails
+                audio_energy = np.mean(np.abs(pcm_audio))
+                peak_value = np.max(np.abs(pcm_audio))
                 
-                # Modified emergency interrupt check with confirmation requirement
-                if await self._quick_interrupt_check(pcm_audio):
-                    if not hasattr(self, 'emergency_barge_in_start'):
-                        self.emergency_barge_in_start = time.time()
-                        logger.debug("Emergency barge-in candidate detected, waiting for confirmation")
-                        return
-                    elif time.time() - self.emergency_barge_in_start > 0.25:  # 250ms confirmation
-                        logger.info("EMERGENCY BARGE-IN DETECTED! Interrupting immediately...")
-                        self.speech_interrupted = True
-                        self.last_barge_in_time = time.time()
-                        self.current_audio_chunks = []
-                        self.is_speaking = False
-                        # Reset emergency barge-in tracking
-                        delattr(self, 'emergency_barge_in_start')
-                        await self._process_audio(ws)
-                    return
-                else:
-                    # Reset emergency barge-in tracking if no longer detected
-                    if hasattr(self, 'emergency_barge_in_start'):
-                        delattr(self, 'emergency_barge_in_start')
+                if audio_energy > 0.15 and peak_value > 0.5:
+                    # High energy + high peak is a strong indicator of human speech
+                    # Additional verification: check if the energy is sustained
+                    if len(pcm_audio) > 3200:  # At least 200ms at 16kHz
+                        # Divide into segments to check for sustained energy
+                        segments = np.array_split(pcm_audio, 4)
+                        segment_energies = [np.mean(np.abs(seg)) for seg in segments]
+                        
+                        # If most segments are high energy, it's likely speech
+                        if sum(e > 0.1 for e in segment_energies) >= 3:
+                            logger.info(f"EMERGENCY BARGE-IN DETECTED! Energy={audio_energy:.4f}, Peak={peak_value:.4f}")
+                            self.speech_interrupted = True
+                            self.last_barge_in_time = time.time()
+                            self.current_audio_chunks = []
+                            self.is_speaking = False
+                            await self._process_audio(ws)
+                            return
             
             # Check if we should process based on time since last response
             time_since_last_response = time.time() - self.last_response_time
@@ -1797,3 +1907,60 @@ class WebSocketHandler:
             logger.debug("Keep-alive loop cancelled")
         except Exception as e:
             logger.error(f"Error in keep-alive loop: {e}")
+
+# Add near the top of telephony/websocket_handler.py, after imports
+class SpeechPatternDetector:
+    """Detects human speech patterns based on multiple factors."""
+    
+    def __init__(self):
+        self.frame_buffer = []
+        self.max_frames = 50  # 1 second at 20ms frames
+    
+    def add_frame(self, frame):
+        """Add a frame of audio data."""
+        self.frame_buffer.append(frame)
+        if len(self.frame_buffer) > self.max_frames:
+            self.frame_buffer.pop(0)
+    
+    def detect_speech(self) -> float:
+        """
+        Analyze buffer for speech-like patterns.
+        Returns confidence score 0-1.0
+        """
+        if len(self.frame_buffer) < 10:
+            return 0.0
+            
+        # Calculate key speech metrics
+        energies = [np.mean(np.abs(frame)) for frame in self.frame_buffer]
+        
+        # 1. Calculate energy variation (speech has more variance than noise/echo)
+        if np.mean(energies) > 0:
+            variation = np.std(energies) / np.mean(energies)
+        else:
+            variation = 0.0
+            
+        # 2. Detect syllabic pattern (energy peaks and valleys)
+        peaks = 0
+        for i in range(1, len(energies)-1):
+            if (energies[i] > energies[i-1] * 1.2 and 
+                energies[i] > energies[i+1] * 1.2):
+                peaks += 1
+        
+        # 3. Check for energy growth (speech often starts with increasing energy)
+        if len(energies) > 5:
+            first_half = energies[:len(energies)//2]
+            second_half = energies[len(energies)//2:]
+            growth = np.mean(second_half) > np.mean(first_half) * 1.1
+        else:
+            growth = False
+        
+        # Combined score
+        speech_score = 0.0
+        if variation > 0.3:
+            speech_score += 0.4
+        if peaks >= 2:
+            speech_score += 0.4
+        if growth:
+            speech_score += 0.2
+            
+        return min(1.0, speech_score)

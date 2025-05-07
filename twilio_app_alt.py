@@ -269,7 +269,7 @@ def index():
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
-    """Handle incoming voice calls with optimized barge-in support."""
+    """Handle incoming voice calls with improved Twilio barge-in integration."""
     logger.info("Received incoming call request")
     logger.info(f"Request headers: {request.headers}")
     logger.info(f"Request form data: {request.form}")
@@ -293,7 +293,7 @@ def handle_incoming_call():
         # Add call to manager
         twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
         
-        # Create TwiML response
+        # Create TwiML response with improved barge-in handling
         response = VoiceResponse()
         
         # Add a 1 second silence before starting - this helps avoid initial echo problems
@@ -305,21 +305,21 @@ def handle_incoming_call():
         # Create Connect with Stream for bi-directional audio
         connect = Connect()
         
-        # Create Stream with explicit parameters for reliability
+        # Create Stream with explicit parameters for optimal Twilio barge-in support
         stream = Stream(
             name="stream", 
             url=ws_url, 
             track="inbound_track"
         )
         
-        # Add complete set of parameters for better audio handling and barge-in
+        # IMPROVED TWILIO BARGE-IN PARAMETERS
         stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
         stream.parameter(name="bargeInEnabled", value="true") 
         
-        # Set additional parameters to improve echo handling
-        stream.parameter(name="sensitivity", value="medium")
-        stream.parameter(name="bargeInMinimumDuration", value="400")  # 400ms minimum duration for barge-in
-
+        # More conservative barge-in settings
+        stream.parameter(name="sensitivity", value="low")  # Lower sensitivity to avoid false positives
+        stream.parameter(name="bargeInMinimumDuration", value="600")  # 600ms minimum duration
+        stream.parameter(name="detectVoiceDuringPlayback", value="true")  # Critical for barge-in
         
         # Add stream to connect
         connect.append(stream)
@@ -446,39 +446,36 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Create speech detector for barge-in support with conservative settings
+        # Create improved speech detector with conservative settings
         speech_detector = SpeechActivityDetector(
-            energy_threshold=0.08,  # Increased from 0.04
-            consecutive_frames=3,   # Increased from 2
-            frame_duration=0.02     # Keep the same
+            energy_threshold=0.10,  # Increased threshold
+            consecutive_frames=5,   # Require more frames
+            frame_duration=0.02     # 20ms frames
         )
         
-        # Initialize WebSocketHandler with pipeline
+        # Initialize WebSocketHandler with better barge-in handling
         ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
         
-        # Assign the speech detector to the handler
+        # IMPROVED CONFIGURATION
+        # Set speech detector
         ws_handler.speech_detector = speech_detector
         
-        # Add the audio fingerprinter for echo detection - increased sensitivity
-        ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=40)  # More fingerprints
-        # Updated fingerprinter threshold - lower for more echo detection
-        ws_handler.audio_fingerprinter.similarity_threshold = 0.45  # Was 0.55
+        # Enhance echo detection
+        ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=50)
+        ws_handler.audio_fingerprinter.similarity_threshold = 0.65
         
-        # Force enable barge-in for better user experience but with more conservative settings
+        # Conservative barge-in settings
         ws_handler.barge_in_enabled = True
-        ws_handler.barge_in_check_enabled = True
+        ws_handler.barge_in_energy_threshold = 0.12
+        ws_handler.post_speech_dead_zone = 0.5  # 500ms dead zone after speech
+        ws_handler.barge_in_min_duration = 0.6  # 600ms minimum speech duration
+        ws_handler.barge_in_debounce_time = 6.0  # 6s between barge-in attempts
         
-        # Adjust thresholds to prevent false positives
-        ws_handler.barge_in_energy_threshold = 0.08  # Increased from 0.05
-        ws_handler.echo_decay_time = 3.0  # Increased from 2.0 seconds
-        ws_handler.barge_in_debounce_time = 5.0  # Increased from 3.0 seconds
+        # Increase pause after system response
+        ws_handler.pause_after_response = 0.8  # Longer pause between turns
         
-        # Add tracking for barge-in confirmation with longer confirmation time
-        ws_handler.potential_barge_in = False
-        ws_handler.barge_in_start_time = 0
-        
-        # Set longer pause after system speech to avoid echo confusion  
-        ws_handler.pause_after_response = 0.5  # Increased from 0.3
+        # Create speech pattern detector
+        ws_handler.speech_pattern_detector = SpeechPatternDetector()
         
         # Set minimum words for a valid query
         ws_handler.min_words_for_valid_query = 2  # Increased from 1 for more reliable detection
