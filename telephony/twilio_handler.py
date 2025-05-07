@@ -1,5 +1,5 @@
 """
-Main Twilio handler for voice calls with barge-in support.
+Main Twilio handler for voice calls with enhanced barge-in support.
 """
 import logging
 from typing import Optional, Dict, Any
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class TwilioHandler:
     """
-    Handles Twilio voice call operations with barge-in support.
+    Handles Twilio voice call operations with enhanced barge-in support.
     """
     
     def __init__(self, pipeline, base_url: str):
@@ -47,7 +47,7 @@ class TwilioHandler:
     
     def handle_incoming_call(self, from_number: str, to_number: str, call_sid: str) -> str:
         """
-        Handle incoming voice call with WebSocket streaming and barge-in detection.
+        Handle incoming voice call with WebSocket streaming and enhanced barge-in detection.
         
         Args:
             from_number: Caller phone number
@@ -65,30 +65,35 @@ class TwilioHandler:
         # Create TwiML response
         response = VoiceResponse()
         
-        # Add initial greeting with barge-in enabled
-        response.say("Welcome to the Voice AI Agent. I'm here to help.", 
-                    voice='alice', 
-                    playBeep=False,
-                    bargeIn=True)  # Enable barge-in
-        
-        response.pause(length=1)
+        # Skip initial greeting and go straight to streaming for faster response
+        ws_url = f'{self.base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
+        logger.info(f"Setting up WebSocket stream at: {ws_url}")
         
         try:
-            # Define WebSocket URL for streaming
-            ws_url = f'{self.base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
-            logger.info(f"Setting up WebSocket stream at: {ws_url}")
-            
-            # Use Connect and Stream for bidirectional audio streaming
+            # Use Connect and Stream for bidirectional audio streaming with enhanced barge-in
             connect = Connect()
-            # Add barge-in detector to the stream
-            stream = Stream(url=ws_url, bargeIn=True)
+            
+            # Add barge-in detector to the stream with explicit parameters
+            stream = Stream(
+                url=ws_url, 
+                bargeIn="true",  # Explicit string attribute
+                track="inbound_track"
+            )
+            
+            # Add extra parameters to ensure best audio quality and barge-in support
+            stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
+            stream.parameter(name="bargeInEnabled", value="true")  # Redundant but explicit
+            
             connect.append(stream)
             response.append(connect)
             
-            # Add followup instruction to user, also with barge-in enabled
-            response.say("You can start speaking now. The AI assistant is listening.", 
+            # Add a minimal greeting to start the interaction - keep it short for barge-in
+            response.say("Welcome. How can I help you today?", 
                         voice='alice', 
-                        bargeIn=True)
+                        bargeIn="true")  # Enable barge-in for the greeting too
+            
+            # Log the TwiML for verification
+            logger.info(f"Generated TwiML with enhanced barge-in: {response}")
             
             return str(response)
         except Exception as e:
@@ -123,7 +128,7 @@ class TwilioHandler:
         status_callback: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Place an outbound call with barge-in support.
+        Place an outbound call with enhanced barge-in support.
         
         Args:
             to_number: Destination phone number
@@ -142,9 +147,11 @@ class TwilioHandler:
         # Set up TwiML for outbound call with barge-in support
         twiml = f"""
         <Response>
-            <Say voice="alice" bargeIn="true">Hello! This is a call from the AI Voice Agent.</Say>
             <Connect>
-                <Stream url="{self.base_url.replace('https://', 'wss://')}/ws/stream/outbound" bargeIn="true" />
+                <Stream url="{self.base_url.replace('https://', 'wss://')}/ws/stream/outbound" bargeIn="true">
+                    <Parameter name="bargeInEnabled" value="true"/>
+                    <Parameter name="mediaEncoding" value="audio/x-mulaw;rate=8000"/>
+                </Stream>
             </Connect>
         </Response>
         """
