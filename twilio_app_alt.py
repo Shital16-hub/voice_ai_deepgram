@@ -554,9 +554,6 @@ def run_event_loop_in_thread(call_sid, ws):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Initialize voice pipeline if needed
-        voice_pipeline = get_voice_pipeline()
-        
         # Create speech detector for barge-in support
         speech_detector = SpeechActivityDetector(
             energy_threshold=0.04,  # Adjust based on your audio levels
@@ -565,7 +562,8 @@ def run_event_loop_in_thread(call_sid, ws):
         )
         
         # Initialize WebSocketHandler with pipeline and speech detector
-        ws_handler = WebSocketHandler(call_sid=call_sid, voice_pipeline=voice_pipeline,speech_detector=speech_detector)
+        # Use the global voice_ai_pipeline variable
+        ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
         
         # Assign the speech detector to the handler
         ws_handler.speech_detector = speech_detector
@@ -680,111 +678,103 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Create WebSocket handler with enhanced barge-in detection
-        ws_handler = WebSocketHandler(call_sid, voice_pipeline=voice_pipeline,speech_detector=speech_detector)
+        # Create speech detector for barge-in support
+        speech_detector = SpeechActivityDetector(
+            energy_threshold=0.04,
+            consecutive_frames=2,
+            frame_duration=0.02
+        )
+        
+        # Initialize WebSocketHandler with pipeline
+        ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
+        
+        # Assign the speech detector to the handler
+        ws_handler.speech_detector = speech_detector
         
         # Add the audio fingerprinter for echo detection
         ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=20)
-        
-        # Override the speech detection functions with our improved versions
-        ws_handler._contains_human_speech_pattern = contains_human_speech_pattern
-        ws_handler._detect_barge_in_during_speech = detect_barge_in_during_speech
-        
-        # Replace the method with a proper function that doesn't rely on 'self'
-        def custom_split_audio_chunks(audio_data):
-            return split_audio_into_chunks_with_silence_detection(audio_data)
-        
-        ws_handler._split_audio_into_chunks_with_silence_detection = custom_split_audio_chunks
         
         # Force enable barge-in for better user experience
         ws_handler.barge_in_enabled = True
         ws_handler.barge_in_check_enabled = True
         
         # Lower threshold for faster response
-        ws_handler.barge_in_energy_threshold = 0.05  # Reduced from 0.015 for better sensitivity
+        ws_handler.barge_in_energy_threshold = 0.05
         
         # Set longer pause after system speech to avoid echo confusion  
-        ws_handler.pause_after_response = 0.5  # Increased from default
+        ws_handler.pause_after_response = 0.5
         
         # Increase buffer size for better detection
-        ws_handler.min_words_for_valid_query = 1  # Reduced from 2 for better responsiveness
+        ws_handler.min_words_for_valid_query = 1
         
-        # Create an event loop for this connection
+        # Create a new event loop for this WebSocket connection
         loop = asyncio.new_event_loop()
         
-        # Create a flag for termination
-        terminate_flag = threading.Event()
+        # Create a thread to run the event loop
+        def run_ws_handler_loop():
+            asyncio.set_event_loop(loop)
+            try:
+                # Create tasks for handling the initial connection and message processing
+                loop.create_task(ws_handler.handle_message(json.dumps({
+                    "event": "connected",
+                    "protocol": "Call",
+                    "version": "1.0.0"
+                }), ws))
+                
+                # Run the event loop
+                loop.run_forever()
+            except Exception as e:
+                logger.error(f"Error in WebSocket handler loop: {e}", exc_info=True)
+            finally:
+                loop.close()
         
-        # Store the event loop and related info
+        # Start the thread
+        thread = threading.Thread(target=run_ws_handler_loop, daemon=True)
+        thread.start()
+        
+        # Store the thread and loop for cleanup
         call_event_loops[call_sid] = {
             'loop': loop,
-            'terminate_flag': terminate_flag,
-            'handler': ws_handler
+            'thread': thread
         }
         
-        # Create and start a thread for the event loop
-        loop_thread = threading.Thread(
-            target=run_event_loop_in_thread,
-            args=(loop, ws_handler, ws, call_sid, terminate_flag),
-            daemon=True
-        )
-        loop_thread.start()
-        
-        # Add thread to tracking
-        call_event_loops[call_sid]['thread'] = loop_thread
-        
-        # Process connected event in the event loop
-        connected_message = json.dumps({
-            "event": "connected",
-            "protocol": "Call",
-            "version": "1.0.0"
-        })
-        
-        # Use asyncio.run_coroutine_threadsafe but without waiting for result
-        asyncio.run_coroutine_threadsafe(
-            ws_handler.handle_message(connected_message, ws),
-            loop
-        )
-        
-        # Process messages until connection closed
+        # Process messages in the main thread and send them to the event loop
         while True:
             try:
-                # Use shorter timeout
                 message = ws.receive(timeout=5)
                 if message is None:
-                    logger.warning(f"Received None message for call {call_sid}")
-                    break
+                    continue
                 
-                # Process the message in the dedicated event loop
-                # Don't wait for the result to avoid blocking
+                # Schedule the message to be processed in the event loop
                 asyncio.run_coroutine_threadsafe(
                     ws_handler.handle_message(message, ws),
                     loop
                 )
-                
             except ConnectionClosed:
                 logger.info(f"WebSocket connection closed for call {call_sid}")
                 break
             except Exception as e:
-                logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
-                # Don't break the loop on message processing errors
-                
+                logger.error(f"Error receiving WebSocket message: {e}", exc_info=True)
+        
     except Exception as e:
         logger.error(f"Error establishing WebSocket connection: {e}", exc_info=True)
     finally:
-        logger.info(f"WebSocket cleanup for call {call_sid}")
-        
-        # Signal termination
+        # Clean up
         if call_sid in call_event_loops:
-            call_event_loops[call_sid]['terminate_flag'].set()
+            info = call_event_loops[call_sid]
+            if 'loop' in info and info['loop'].is_running():
+                info['loop'].call_soon_threadsafe(info['loop'].stop)
+            
+            # Remove from tracking
+            del call_event_loops[call_sid]
         
-        try:
-            if ws:
+        if ws:
+            try:
                 ws.close()
-        except Exception as close_error:
-            logger.error(f"Error closing WebSocket: {close_error}")
+            except Exception as e:
+                logger.error(f"Error closing WebSocket: {e}")
         
-        # Return empty response
+        logger.info(f"WebSocket connection cleanup complete for call {call_sid}")
         return ""
 
 # Function to initialize the system synchronously
