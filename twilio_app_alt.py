@@ -293,35 +293,41 @@ def handle_incoming_call():
         # Add call to manager
         twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
         
-        # Create TwiML response with optimized barge-in configuration
+        # Create TwiML response
         response = VoiceResponse()
         
-        # Skip initial greeting and go straight to streaming for faster response
+        # Add a 1 second silence before starting - this helps avoid initial echo problems
+        response.pause(length=1)
+        
+        # Create WebSocket URL for streaming
         ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
         
-        # Create Connect with Stream to enable real-time processing
+        # Create Connect with Stream for bi-directional audio
         connect = Connect()
         
-        # CRITICAL: Use explicit barge-in parameters
+        # Create Stream with explicit parameters for reliability
         stream = Stream(
+            name="stream", 
             url=ws_url, 
-            bargeIn="true",  # String "true" for explicit attribute
             track="inbound_track"
         )
         
-        # Add audio format parameters
+        # Add complete set of parameters for better audio handling and barge-in
         stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
+        stream.parameter(name="bargeInEnabled", value="true") 
         
-        # Add explicit barge-in parameters - redundant but helps ensure it works
-        stream.parameter(name="bargeInEnabled", value="true")
+        # Set additional parameters to improve echo handling
+        stream.parameter(name="sensitivity", value="high")
         
+        # Add stream to connect
         connect.append(stream)
+        
+        # Add connect to response
         response.append(connect)
         
-        # Add a minimal pause
-        response.pause(length=0.5)
-        
-        return Response(str(response), mimetype='text/xml')
+        # Return TwiML
+        twiml = str(response)
+        return Response(twiml, mimetype='text/xml')
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
         # Fallback response
@@ -452,14 +458,22 @@ def handle_media_stream(call_sid):
         ws_handler.speech_detector = speech_detector
         
         # Add the audio fingerprinter for echo detection
-        ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=20)
+        ws_handler.audio_fingerprinter = AudioFingerprinter(max_fingerprints=30)
+        # Updated fingerprinter threshold - lower for more echo detection
+        ws_handler.audio_fingerprinter.similarity_threshold = 0.55  # Was 0.60
         
-        # Force enable barge-in for better user experience
+        # Force enable barge-in for better user experience but make it more conservative
         ws_handler.barge_in_enabled = True
         ws_handler.barge_in_check_enabled = True
         
-        # Lower threshold for faster response
-        ws_handler.barge_in_energy_threshold = 0.05
+        # Adjust thresholds for more conservative operation to prevent false positives
+        ws_handler.barge_in_energy_threshold = 0.05  # Increased from 0.04
+        ws_handler.echo_decay_time = 2.0  # 2 seconds of echo sensitivity decay
+        ws_handler.barge_in_debounce_time = 3.0  # Wait 3 seconds between barge-in detections
+        
+        # Add tracking for barge-in confirmation
+        ws_handler.potential_barge_in = False
+        ws_handler.barge_in_start_time = 0
         
         # Set shorter pause after system speech to avoid echo confusion  
         ws_handler.pause_after_response = 0.3
