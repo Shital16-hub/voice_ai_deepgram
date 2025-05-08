@@ -36,7 +36,7 @@ class ElevenLabsTTS:
         sample_rate: Optional[int] = None,
         container_format: Optional[str] = None,
         enable_caching: Optional[bool] = None,
-        optimize_streaming_latency: int = 4  # Added for better streaming
+        optimize_streaming_latency: int = 3  # Reduced from 4 for better quality
     ):
         """
         Initialize the ElevenLabs TTS client.
@@ -48,7 +48,7 @@ class ElevenLabsTTS:
             sample_rate: Audio sample rate (defaults to config)
             container_format: Audio format (defaults to config)
             enable_caching: Whether to cache results (defaults to config)
-            optimize_streaming_latency: Latency optimization level (1-4)
+            optimize_streaming_latency: Latency optimization level (1-3, reduced from 1-4)
         """
         self.api_key = api_key or config.elevenlabs_api_key
         if not self.api_key:
@@ -62,7 +62,7 @@ class ElevenLabsTTS:
         self.sample_rate = sample_rate or config.sample_rate
         self.container_format = container_format or config.container_format
         self.enable_caching = enable_caching if enable_caching is not None else config.enable_caching
-        self.optimize_streaming_latency = max(1, min(4, optimize_streaming_latency))  # Ensure 1-4 range
+        self.optimize_streaming_latency = max(1, min(3, optimize_streaming_latency))  # Ensure 1-3 range (reduced from 1-4)
         
         # Create cache directory if enabled
         if self.enable_caching:
@@ -250,13 +250,14 @@ class ElevenLabsTTS:
                 logger.debug(f"Found cached TTS result for: {text[:30]}...")
                 return cache_path.read_bytes()
         
-        # Prepare request data
+        # Prepare request data with improved voice settings for smoother speech
         request_data = {
             "text": text,
             "model_id": model_id,
             "voice_settings": {
-                "stability": 0.7,  # Increased for telephony clarity
-                "similarity_boost": 0.75
+                "stability": 0.5,  # Reduced from 0.7 for smoother transitions
+                "similarity_boost": 0.65,  # Reduced from 0.75
+                "style": 0.15  # Small amount of style for more natural transitions
             }
         }
         
@@ -266,7 +267,7 @@ class ElevenLabsTTS:
         if self.container_format:
             url += f"?output_format={output_format}"
             
-            # Add streaming optimization for lower latency
+            # Add streaming optimization for lower latency, but not maximum
             url += f"&optimize_streaming_latency={self.optimize_streaming_latency}"
         
         # Make API request
@@ -357,17 +358,18 @@ class ElevenLabsTTS:
         model_id = self.model_id
         output_format = self._get_output_format()
         
-        # Prepare request data
+        # Prepare request data with improved voice settings
         request_data = {
             "text": text,
             "model_id": model_id,
             "voice_settings": {
-                "stability": 0.7,  # Increased for telephony clarity
-                "similarity_boost": 0.75
+                "stability": 0.5,  # Reduced for smoother transitions
+                "similarity_boost": 0.65,  # Reduced for more natural speech
+                "style": 0.15  # Add a small amount of style for more natural transitions
             }
         }
         
-        # Add streaming optimization for lower latency
+        # Add streaming optimization but not maximum (3 instead of 4)
         url = f"{self.BASE_URL}/{voice_id}/stream?output_format={output_format}&optimize_streaming_latency={self.optimize_streaming_latency}"
         
         try:

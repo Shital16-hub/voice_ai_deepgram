@@ -1378,14 +1378,14 @@ class WebSocketHandler:
     
     def _split_audio_into_chunks_with_silence_detection(self, audio_data: bytes) -> list:
         """
-        Split audio into chunks with silence detection for improved barge-in.
-        Add longer pauses at sentence boundaries for better barge-in opportunities.
+        Split audio into chunks with improved handling to prevent popping sounds.
+        Removes artificial silence insertion and adds smooth transitions.
         
         Args:
             audio_data: Audio data to split
             
         Returns:
-            List of chunks with appropriate silences
+            List of chunks with appropriate transitions
         """
         # Convert to PCM for analysis
         pcm_data = self.audio_processor.mulaw_to_pcm(audio_data)
@@ -1410,8 +1410,8 @@ class WebSocketHandler:
             if frame_energies[i] < frame_energies[i-1] * 0.3:  # 70% drop in energy
                 boundaries.append(i * frame_size)
         
-        # Now split the audio with extended silence at these boundaries
-        chunk_size = 400  # Reduced from 800 for more frequent checks
+        # Now split the audio without adding artificial silences
+        chunk_size = 400  # Small chunks for more frequent barge-in checks
         chunks = []
         last_pos = 0
         
@@ -1421,9 +1421,7 @@ class WebSocketHandler:
                 end = min(i + chunk_size, boundary, len(audio_data))
                 chunks.append(audio_data[i:end])
             
-            # Add explicit silence at sentence boundaries (100ms)
-            silence_chunk = b'\x00' * 800  # 100ms of silence at 8kHz
-            chunks.append(silence_chunk)
+            # NO SILENCE INSERTION - rely on natural pauses in the audio
             
             last_pos = min(boundary, len(audio_data))
         
@@ -1644,7 +1642,7 @@ class WebSocketHandler:
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """
-        Send audio data to Twilio with improved barge-in handling.
+        Send audio data to Twilio with improved handling to prevent popping sounds.
         
         Args:
             audio_data: Audio data as bytes
@@ -1684,7 +1682,7 @@ class WebSocketHandler:
                 self.is_speaking = False
                 return
             
-            # Split audio into smaller chunks with silence detection for better responsiveness and barge-in
+            # Split audio into smaller chunks without adding artificial silence
             chunks = self._split_audio_into_chunks_with_silence_detection(audio_data)
             
             logger.debug(f"Splitting {len(audio_data)} bytes into {len(chunks)} chunks for playback")
@@ -1728,13 +1726,13 @@ class WebSocketHandler:
                         await asyncio.sleep(0.02)  # 20ms delay between chunks
                     
                     # Check for barge-in periodically (less frequent checks to avoid false positives)
-                    if i % 3 == 0 and len(self.input_buffer) > 3000:  # Increased from 2000 to reduce check frequency
+                    if i % 3 == 0 and len(self.input_buffer) > 3000:
                         # Sample a small portion of the input buffer
                         input_sample = bytes(self.input_buffer[-4000:])
                         sample_data = self.audio_processor.mulaw_to_pcm(input_sample)
                         
                         # First check if this is likely an echo - more aggressive echo detection
-                        if self._is_likely_echo(sample_data, 0.2):  # Increased time threshold
+                        if self._is_likely_echo(sample_data, 0.2):
                             logger.debug("Detected echo during playback, ignoring")
                             continue
                         
@@ -1775,17 +1773,16 @@ class WebSocketHandler:
                                 self.speech_detector.energy_threshold = original_threshold
                         
                         # Backup detection only if speech detector didn't trigger
-                        # Use a higher threshold during playback
                         if not self.speech_interrupted:
                             # Use a more conservative threshold during audio playback
-                            backup_threshold = self.barge_in_energy_threshold * 1.5  # Increased from normal
+                            backup_threshold = self.barge_in_energy_threshold * 1.5
                             if self._detect_barge_in_during_speech(sample_data, 0.2):
                                 logger.info(f"BACKUP BARGE-IN DETECTED during playback at chunk {i}/{len(chunks)}")
                                 self.speech_interrupted = True
                                 self.last_barge_in_time = time.time()
                                 break
                             
-                        # Quick emergency check for very high energy audio - with much higher threshold during playback
+                        # Quick emergency check for very high energy audio
                         if not self.speech_interrupted:
                             energy = np.mean(np.abs(sample_data))
                             peak = np.max(np.abs(sample_data))
