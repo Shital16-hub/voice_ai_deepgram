@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Twilio application without barge-in detection.
+Twilio application with optimized feedback prevention and latency reduction.
 """
 import os
 import sys
@@ -29,7 +29,7 @@ from text_to_speech import ElevenLabsTTS
 # Load environment variables
 load_dotenv()
 
-# Configure logging with reduced noise from small audio chunks
+# Configure logging with reduced noise
 def configure_logging():
     # Set up root logger
     root_logger = logging.getLogger()
@@ -84,39 +84,18 @@ base_url = None
 # Dictionary to store event loops and state for each call
 call_event_loops = {}
 
-# Helper function to split audio into chunks
-def split_audio_into_chunks(audio_data: bytes) -> list:
-    """
-    Split audio into smaller chunks for processing.
-    
-    Args:
-        audio_data: Audio data to split
-        
-    Returns:
-        List of chunks
-    """
-    # Simple chunking
-    chunk_size = 800  # 100ms at 8kHz
-    chunks = []
-    
-    # Split into equal-sized chunks
-    for i in range(0, len(audio_data), chunk_size):
-        chunks.append(audio_data[i:i+chunk_size])
-        
-    return chunks
-
 async def initialize_system():
-    """Initialize all system components with ElevenLabs TTS integration."""
+    """Initialize all system components with optimized configuration."""
     global twilio_handler, voice_ai_pipeline, base_url
     
-    logger.info("Initializing Voice AI Agent with ElevenLabs TTS integration...")
+    logger.info("Initializing Voice AI Agent with optimized settings...")
     
     # Verify ElevenLabs API key is set
     elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not elevenlabs_api_key:
         logger.warning("ELEVENLABS_API_KEY not set in environment, attempting to proceed without it")
     
-    # Define a generic telephony-optimized prompt
+    # Define a telephony-optimized prompt
     telephony_prompt = (
         "This is a telephone conversation with a customer. "
         "The customer may ask questions about products, services, pricing, or features. "
@@ -150,15 +129,16 @@ async def initialize_system():
     )
     await agent.init()
     
-    # Initialize TTS integration with ElevenLabs
+    # Initialize TTS integration with optimized settings
     from integration.tts_integration import TTSIntegration
     tts = TTSIntegration(
         voice_id=os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'),
-        enable_caching=True
+        enable_caching=True,
+        optimize_streaming_latency=3  # Reduced from 4 for better quality/latency balance
     )
     await tts.init()
     
-    # Create pipeline
+    # Create pipeline with optimized settings
     voice_ai_pipeline = VoiceAIAgentPipeline(
         speech_recognizer=agent.speech_recognizer,
         conversation_manager=agent.conversation_manager,
@@ -170,16 +150,16 @@ async def initialize_system():
     twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
     await twilio_handler.start()
     
-    logger.info("System initialized successfully with ElevenLabs TTS integration")
+    logger.info("System initialized successfully with optimized settings")
 
 @app.route('/', methods=['GET'])
 def index():
     """Simple test endpoint."""
-    return "Voice AI Agent is running with ElevenLabs TTS integration!"
+    return "Voice AI Agent is running with optimized settings!"
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
-    """Handle incoming voice calls without barge-in support."""
+    """Handle incoming voice calls with optimized TwiML."""
     logger.info("Received incoming call request")
     logger.info(f"Request headers: {request.headers}")
     logger.info(f"Request form data: {request.form}")
@@ -203,7 +183,7 @@ def handle_incoming_call():
         # Add call to manager
         twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
         
-        # Create TwiML response without barge-in handling
+        # Create TwiML response
         response = VoiceResponse()
         
         # Add a 1 second silence before starting - this helps avoid initial echo problems
@@ -215,14 +195,14 @@ def handle_incoming_call():
         # Create Connect with Stream for bi-directional audio
         connect = Connect()
         
-        # Create Stream with standard parameters
+        # Create Stream with track parameter for feedback prevention
         stream = Stream(
             name="stream", 
             url=ws_url, 
-            track="inbound_track"
+            track="inbound_track"  # Specify track as inbound for feedback prevention
         )
         
-        # Set basic parameters
+        # Set parameters
         stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
         
         # Add stream to connect
@@ -290,7 +270,7 @@ def handle_status_callback():
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream without barge-in detection."""
+    """Handle WebSocket media stream with feedback prevention."""
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
     if not twilio_handler or not voice_ai_pipeline:
@@ -302,11 +282,14 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Initialize WebSocketHandler without barge-in handling
+        # Initialize WebSocketHandler with optimized configuration
         ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
         
         # Create a new event loop for this WebSocket connection
         loop = asyncio.new_event_loop()
+        
+        # Create an event to signal termination
+        terminate_flag = threading.Event()
         
         # Create a thread to run the event loop
         def run_ws_handler_loop():
@@ -319,21 +302,24 @@ def handle_media_stream(call_sid):
                     "version": "1.0.0"
                 }), ws))
                 
-                # Run the event loop
-                loop.run_forever()
+                # Run the event loop until terminate flag is set
+                while not terminate_flag.is_set():
+                    loop.run_until_complete(asyncio.sleep(0.1))
             except Exception as e:
                 logger.error(f"Error in WebSocket handler loop: {e}", exc_info=True)
             finally:
+                # Close loop
                 loop.close()
         
         # Start the thread
         thread = threading.Thread(target=run_ws_handler_loop, daemon=True)
         thread.start()
         
-        # Store the thread and loop for cleanup
+        # Store the thread, loop and terminate flag for cleanup
         call_event_loops[call_sid] = {
             'loop': loop,
-            'thread': thread
+            'thread': thread,
+            'terminate_flag': terminate_flag
         }
         
         # Process messages in the main thread and send them to the event loop
@@ -358,8 +344,8 @@ def handle_media_stream(call_sid):
         # Clean up
         if call_sid in call_event_loops:
             info = call_event_loops[call_sid]
-            if 'loop' in info and info['loop'].is_running():
-                info['loop'].call_soon_threadsafe(info['loop'].stop)
+            if 'terminate_flag' in info:
+                info['terminate_flag'].set()
             
             # Remove from tracking
             del call_event_loops[call_sid]
@@ -385,7 +371,7 @@ def init_system():
 
 # Starting point of the application
 if __name__ == '__main__':
-    print("Starting Voice AI Agent with ElevenLabs TTS integration...")
+    print("Starting Voice AI Agent with optimized settings...")
     
     # Initialize the system before starting the Flask app
     init_system()
