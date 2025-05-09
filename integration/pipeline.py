@@ -85,19 +85,14 @@ class VoiceAIAgentPipeline:
             return False
             
         return True
-
+    
     async def interrupt_current_response(self) -> bool:
         """
-        Interrupt the current response for barge-in support.
+        This function is now a no-op as we've removed barge-in support.
         
         Returns:
-            True if an ongoing response was interrupted
+            Always returns False since barge-in is disabled
         """
-        # Stop TTS if it's ongoing
-        if hasattr(self, 'tts_integration') and self.tts_integration:
-            await self.tts_integration.cancel_ongoing_tts()
-            return True
-        
         return False
     
     async def process_audio_file(
@@ -532,10 +527,7 @@ class VoiceAIAgentPipeline:
         audio_output_callback: Callable[[bytes], Awaitable[None]]
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Process a real-time audio stream with immediate response and barge-in support.
-        
-        This method is designed for WebSocket-based streaming where audio chunks
-        are continuously arriving and responses should be sent back as soon as possible.
+        Process a real-time audio stream without barge-in support.
         
         Args:
             audio_chunk_generator: Async generator producing audio chunks
@@ -544,32 +536,21 @@ class VoiceAIAgentPipeline:
         Yields:
             Status updates and results
         """
-        logger.info("Starting real-time audio stream processing with barge-in support")
+        logger.info("Starting real-time audio stream processing")
         
         # Reset conversation state
         if self.conversation_manager:
             self.conversation_manager.reset()
         
-        # Import speech detector
-        from speech_to_text.utils.speech_detector import SpeechActivityDetector
-        
-        # Create speech activity detector for barge-in
-        speech_detector = SpeechActivityDetector(
-            energy_threshold=0.04,  # Adjust based on your environment
-            consecutive_frames=2,   # Detect quickly for better barge-in
-            frame_duration=0.02     # 20ms frames (typical for telephony)
-        )
-        
         # Track state
-        is_agent_speaking = False
+        is_speaking = False
         processing = False
         last_transcription = ""
-        barge_in_detected = False
         silence_frames = 0
         max_silence_frames = 5  # Number of silent chunks before processing
         
-        # Create audio buffer for processing during barge-in
-        barge_in_buffer = []
+        # Create audio buffer for processing
+        audio_buffer = []
         
         # Timing stats
         start_time = time.time()
@@ -593,100 +574,18 @@ class VoiceAIAgentPipeline:
                 if isinstance(audio_chunk, bytes):
                     audio_chunk = np.frombuffer(audio_chunk, dtype=np.float32)
                 
-                # Check for speech activity for barge-in detection
-                is_speech = speech_detector.detect(audio_chunk)
-                
-                # Handle barge-in detection
-                if is_speech and is_agent_speaking and not barge_in_detected:
-                    logger.info("Barge-in detected: User is speaking while agent is talking")
-                    barge_in_detected = True
-                    
-                    # Stop the agent from speaking
-                    await self.interrupt_current_response()
-                    is_agent_speaking = False
-                    
-                    # Store this chunk for later processing
-                    barge_in_buffer.append(audio_chunk)
-                    
-                    # Skip normal processing for this chunk
-                    continue
-                
-                # Add to barge-in buffer if we're in barge-in mode
-                if barge_in_detected:
-                    barge_in_buffer.append(audio_chunk)
-                    
-                    # Process the buffer if it's large enough
-                    if len(barge_in_buffer) >= 10:  # About 200ms of audio
-                        # Combine the buffer
-                        combined_audio = np.concatenate(barge_in_buffer)
-                        barge_in_buffer = []
-                        
-                        # Process the combined audio
-                        if hasattr(self.speech_recognizer, 'process_audio_chunk'):
-                            result = await self.speech_recognizer.process_audio_chunk(
-                                audio_chunk=combined_audio,
-                                callback=result_callback
-                            )
-                            
-                            # Check for final result
-                            if result and hasattr(result, 'is_final') and result.is_final:
-                                # Clean up transcription
-                                transcription = self.stt_helper.cleanup_transcription(result.text)
-                                
-                                # Validate transcription
-                                if transcription and await self._is_valid_transcription(transcription):
-                                    # Reset barge-in flag
-                                    barge_in_detected = False
-                                    
-                                    # Yield status update
-                                    yield {
-                                        "status": "transcribed",
-                                        "transcription": transcription,
-                                        "barge_in": True
-                                    }
-                                    
-                                    # Generate response
-                                    if not processing:
-                                        processing = True
-                                        try:
-                                            # Query knowledge base
-                                            query_result = await self.query_engine.query(transcription)
-                                            response = query_result.get("response", "")
-                                            
-                                            if response:
-                                                # Mark agent as speaking
-                                                is_agent_speaking = True
-                                                
-                                                # Convert to speech using ElevenLabs
-                                                speech_audio = await self.tts_integration.text_to_speech(response)
-                                                
-                                                # Send through callback
-                                                await audio_output_callback(speech_audio)
-                                                
-                                                # Agent is done speaking
-                                                is_agent_speaking = False
-                                                
-                                                # Yield response
-                                                yield {
-                                                    "status": "response",
-                                                    "transcription": transcription,
-                                                    "response": response,
-                                                    "audio_size": len(speech_audio)
-                                                }
-                                                
-                                                # Update last transcription
-                                                last_transcription = transcription
-                                        finally:
-                                            processing = False
-                    continue
-                
                 # Check for silence
+                is_speech = np.mean(np.abs(audio_chunk)) > 0.01  # Simple energy-based detector
+                
                 if not is_speech:
                     silence_frames += 1
                 else:
                     silence_frames = 0
+                    
+                # Add to buffer
+                audio_buffer.append(audio_chunk)
                 
-                # Process the audio chunk normally
+                # Process the audio chunk
                 if hasattr(self.speech_recognizer, 'process_audio_chunk'):
                     result = await self.speech_recognizer.process_audio_chunk(
                         audio_chunk=audio_chunk,
@@ -706,8 +605,8 @@ class VoiceAIAgentPipeline:
                                 "transcription": transcription
                             }
                             
-                            # Generate response
-                            if not processing:
+                            # Generate response - only if we're not already speaking
+                            if not is_speaking and not processing:
                                 processing = True
                                 try:
                                     # Query knowledge base
@@ -716,18 +615,16 @@ class VoiceAIAgentPipeline:
                                     
                                     if response:
                                         # Mark agent as speaking
-                                        is_agent_speaking = True
+                                        is_speaking = True
                                         
-                                        # Convert to speech using ElevenLabs
+                                        # Convert to speech
                                         speech_audio = await self.tts_integration.text_to_speech(response)
                                         
-                                        # Only send if speech generation wasn't interrupted
-                                        if speech_audio:
-                                            # Send through callback
-                                            await audio_output_callback(speech_audio)
+                                        # Send through callback
+                                        await audio_output_callback(speech_audio)
                                         
                                         # Agent is done speaking
-                                        is_agent_speaking = False
+                                        is_speaking = False
                                         
                                         # Yield response
                                         yield {
@@ -743,7 +640,7 @@ class VoiceAIAgentPipeline:
                                     processing = False
                 
                 # If we have enough silence frames and it's time to process
-                if silence_frames >= max_silence_frames and not processing and not is_agent_speaking:
+                if silence_frames >= max_silence_frames and not processing and not is_speaking:
                     # Get final transcription if available
                     if hasattr(self.speech_recognizer, 'stop_streaming'):
                         transcription, _ = await self.speech_recognizer.stop_streaming()
@@ -761,18 +658,16 @@ class VoiceAIAgentPipeline:
                                 
                                 if response:
                                     # Mark agent as speaking
-                                    is_agent_speaking = True
+                                    is_speaking = True
                                     
-                                    # Convert to speech using ElevenLabs
+                                    # Convert to speech
                                     speech_audio = await self.tts_integration.text_to_speech(response)
                                     
-                                    # Only send if speech generation wasn't interrupted
-                                    if speech_audio:
-                                        # Send through callback
-                                        await audio_output_callback(speech_audio)
+                                    # Send through callback
+                                    await audio_output_callback(speech_audio)
                                     
                                     # Agent is done speaking
-                                    is_agent_speaking = False
+                                    is_speaking = False
                                     
                                     # Yield response
                                     yield {
@@ -806,18 +701,16 @@ class VoiceAIAgentPipeline:
                     
                     if final_response:
                         # Mark agent as speaking
-                        is_agent_speaking = True
+                        is_speaking = True
                         
-                        # Convert to speech using ElevenLabs
+                        # Convert to speech
                         final_speech = await self.tts_integration.text_to_speech(final_response)
                         
-                        # Only send if speech generation wasn't interrupted
-                        if final_speech:
-                            # Send through callback
-                            await audio_output_callback(final_speech)
+                        # Send through callback
+                        await audio_output_callback(final_speech)
                         
                         # Agent is done speaking
-                        is_agent_speaking = False
+                        is_speaking = False
                         
                         # Yield final response
                         yield {

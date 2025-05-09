@@ -1,5 +1,5 @@
 """
-TTS integration with improved cancellation support for barge-in.
+TTS integration with simplified functionality.
 """
 import logging
 import asyncio
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class TTSIntegration:
     """
-    Text-to-Speech integration with improved barge-in support.
+    Text-to-Speech integration.
     """
     
     def __init__(
@@ -32,14 +32,9 @@ class TTSIntegration:
         self.tts_client = None
         self.initialized = False
         
-        # Parameters for better conversation flow and barge-in support
+        # Parameters for better conversation flow
         self.add_pause_after_speech = True
         self.pause_duration_ms = 500  # Reduced from 800ms to 500ms for better responsiveness
-        
-        # Track current TTS task for barge-in support
-        self.current_tts_task = None
-        self.barge_in_detected = False
-        self.speech_interrupted = False
     
     async def init(self) -> None:
         """Initialize the TTS components."""
@@ -68,46 +63,10 @@ class TTSIntegration:
         except Exception as e:
             logger.error(f"Error initializing TTS: {e}")
             raise
-
-    async def cancel_ongoing_tts(self) -> bool:
-        """
-        Cancel any ongoing TTS generation for barge-in support with immediate effect.
-        
-        Returns:
-            True if an ongoing response was interrupted
-        """
-        if hasattr(self, 'current_tts_task') and self.current_tts_task:
-            logger.info("Canceling ongoing TTS generation due to barge-in")
-            
-            # Set both flags immediately
-            self.barge_in_detected = True
-            self.speech_interrupted = True
-            
-            # Cancel the task
-            self.current_tts_task.cancel()
-            try:
-                # Set a shorter timeout for cancellation
-                await asyncio.wait_for(self.current_tts_task, timeout=0.05)  # Reduced from 0.1s for faster response
-            except asyncio.CancelledError:
-                pass
-            except asyncio.TimeoutError:
-                logger.warning("Timeout canceling TTS task, forcing cancellation")
-            except Exception as e:
-                logger.error(f"Error canceling TTS task: {e}")
-            
-            # Reset task reference immediately
-            self.current_tts_task = None
-            
-            # Add a very short silence pause after interruption
-            await asyncio.sleep(0.02)  # Reduced from 0.1s for faster response
-            
-            return True
-        
-        return False
     
     def _split_text_at_sentence_boundaries(self, text: str) -> List[str]:
         """
-        Split text at sentence boundaries for improved speech pacing and barge-in opportunities.
+        Split text at sentence boundaries for improved speech pacing.
         
         Args:
             text: Text to split
@@ -144,8 +103,7 @@ class TTSIntegration:
     
     async def text_to_speech(self, text: str) -> bytes:
         """
-        Convert text to speech with barge-in support and enhanced silence for better
-        conversation flow.
+        Convert text to speech.
         
         Args:
             text: Text to convert to speech
@@ -157,27 +115,9 @@ class TTSIntegration:
             await self.init()
         
         try:
-            # Reset barge-in and interruption flags
-            self.barge_in_detected = False
-            self.speech_interrupted = False
-            
-            # Store the TTS task reference for potential cancellation
-            self.current_tts_task = asyncio.create_task(self._generate_speech_with_enhanced_quality(text))
-            
-            try:
-                # Wait for TTS completion or interruption
-                audio_data = await self.current_tts_task
-                self.current_tts_task = None
-                
-                # If barge-in or interruption was detected, return empty audio
-                if self.barge_in_detected or self.speech_interrupted:
-                    logger.info("Returning empty audio due to barge-in/interruption")
-                    return b''
-                
-                return audio_data
-            except asyncio.CancelledError:
-                logger.info("TTS generation was cancelled for barge-in")
-                return b''  # Return empty audio if cancelled
+            # Generate speech with enhanced quality
+            audio_data = await self._generate_speech_with_enhanced_quality(text)
+            return audio_data
                 
         except Exception as e:
             logger.error(f"Error in text to speech conversion: {e}")
@@ -185,7 +125,7 @@ class TTSIntegration:
 
     async def _generate_speech_with_enhanced_quality(self, text: str) -> bytes:
         """
-        Generate speech with enhanced quality for telephony with improved barge-in support.
+        Generate speech with enhanced quality for telephony.
         
         Args:
             text: Text to convert to speech
@@ -193,7 +133,7 @@ class TTSIntegration:
         Returns:
             Audio data as bytes with optimized quality
         """
-        # Split text at sentence boundaries for better pacing and barge-in opportunities
+        # Split text at sentence boundaries for better pacing
         sentences = self._split_text_at_sentence_boundaries(text)
         
         # For short text, process normally
@@ -230,11 +170,6 @@ class TTSIntegration:
             # Skip empty sentences
             if not sentence.strip():
                 continue
-            
-            # Check for barge-in/interruption after each sentence
-            if self.barge_in_detected or self.speech_interrupted:
-                logger.info("Barge-in detected during speech generation, stopping")
-                break
                 
             # Generate speech for this sentence with enhanced quality
             params = {
@@ -257,15 +192,12 @@ class TTSIntegration:
                 sentence_pause_ms = 150
                 inter_sentence_silence = b'\x00' * int(8000 * (sentence_pause_ms / 1000))
                 all_audio.append(inter_sentence_silence)
-                
-                # Add a yield point for barge-in detection
-                await asyncio.sleep(0.01)
         
         # Combine all audio chunks
         combined_audio = b''.join(all_audio)
         
-        # Add the final pause after the complete speech if no interruption
-        if self.add_pause_after_speech and not self.barge_in_detected and not self.speech_interrupted:
+        # Add the final pause after the complete speech
+        if self.add_pause_after_speech:
             # Generate silence based on pause_duration_ms
             silence_size = int(8000 * (self.pause_duration_ms / 1000))  # 8kHz for Twilio
             silence_data = b'\x00' * silence_size

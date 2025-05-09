@@ -1,8 +1,7 @@
 """
-Enhanced audio processing utilities for telephony integration.
+Audio processing utilities for telephony integration.
 
-Handles audio format conversion between Twilio and Voice AI Agent with improved
-barge-in detection capabilities.
+Handles audio format conversion between Twilio and Voice AI Agent.
 """
 import audioop
 import numpy as np
@@ -16,16 +15,14 @@ logger = logging.getLogger(__name__)
 
 class AudioProcessor:
     """
-    Handles audio conversion between Twilio and Voice AI formats with improved noise handling
-    and enhanced barge-in detection capabilities.
+    Handles audio conversion between Twilio and Voice AI formats.
     
     Twilio uses 8kHz mulaw encoding, while our Voice AI uses 16kHz PCM.
     """
     
     def mulaw_to_pcm(self, mulaw_data: bytes) -> np.ndarray:
         """
-        Convert Twilio's mulaw audio to PCM for Voice AI with enhanced noise filtering.
-        Modified to handle small chunks more efficiently.
+        Convert Twilio's mulaw audio to PCM for Voice AI.
         
         Args:
             mulaw_data: Audio data in mulaw format
@@ -56,7 +53,7 @@ class AudioProcessor:
             audio_array = np.frombuffer(pcm_data_16k, dtype=np.int16)
             audio_array = audio_array.astype(np.float32) / 32768.0
             
-            # Apply enhanced audio filtering optimized for barge-in detection
+            # Apply basic audio filtering
             # Apply high-pass filter to remove low-frequency noise
             b, a = signal.butter(6, 100/(SAMPLE_RATE_AI/2), 'highpass')
             audio_array = signal.filtfilt(b, a, audio_array)
@@ -65,19 +62,16 @@ class AudioProcessor:
             b, a = signal.butter(4, [300/(SAMPLE_RATE_AI/2), 3400/(SAMPLE_RATE_AI/2)], 'band')
             audio_array = signal.filtfilt(b, a, audio_array)
             
-            # Apply a simple noise gate with lower threshold for better barge-in
-            noise_threshold = 0.01  # Lower threshold (was 0.015) to detect quieter speech for barge-in
+            # Apply a simple noise gate
+            noise_threshold = 0.015
             audio_array = np.where(np.abs(audio_array) < noise_threshold, 0, audio_array)
             
-            # Apply pre-emphasis filter to boost higher frequencies (improves speech detection)
-            audio_array = np.append(audio_array[0], audio_array[1:] - 0.97 * audio_array[:-1])
-            
-            # Normalize for consistent volume but preserve relative energy for better barge-in detection
+            # Normalize for consistent volume
             max_val = np.max(np.abs(audio_array))
             if max_val > 0:
                 audio_array = audio_array * (0.95 / max_val)
             
-            # Check audio levels at debug level instead of always logging
+            # Check audio levels at debug level
             audio_level = np.mean(np.abs(audio_array)) * 100
             if audio_level > 5.0:  # Only log significant audio
                 logger.debug(f"Converted {len(mulaw_data)} bytes to {len(audio_array)} samples. Audio level: {audio_level:.1f}%")
@@ -96,8 +90,7 @@ class AudioProcessor:
     
     def pcm_to_mulaw(self, pcm_data: bytes) -> bytes:
         """
-        Convert PCM audio from Voice AI to mulaw for Twilio with optimizations
-        for improved barge-in response times.
+        Convert PCM audio from Voice AI to mulaw for Twilio.
         
         Args:
             pcm_data: Audio data in PCM format
@@ -134,8 +127,7 @@ class AudioProcessor:
     
     def normalize_audio(self, audio_data: np.ndarray) -> np.ndarray:
         """
-        Normalize audio to [-1, 1] range while preserving dynamics
-        for better barge-in detection.
+        Normalize audio to [-1, 1] range while preserving dynamics.
         
         Args:
             audio_data: Audio data as numpy array
@@ -150,8 +142,7 @@ class AudioProcessor:
     
     def enhance_audio(self, audio_data: np.ndarray) -> np.ndarray:
         """
-        Enhance audio quality by reducing noise and improving speech clarity
-        with optimizations for better barge-in detection.
+        Enhance audio quality by reducing noise and improving speech clarity.
         
         Args:
             audio_data: Audio data as numpy array
@@ -165,148 +156,26 @@ class AudioProcessor:
             b, a = signal.butter(4, 80/(SAMPLE_RATE_AI/2), 'highpass')
             filtered_audio = signal.filtfilt(b, a, audio_data)
             
-            # 2. Apply a milder de-emphasis filter to reduce hissing but preserve speech onset
-            b, a = signal.butter(1, 3400/(SAMPLE_RATE_AI/2), 'low')  # Higher cutoff (was 3000Hz)
+            # 2. Apply a mild de-emphasis filter to reduce hissing
+            b, a = signal.butter(1, 3400/(SAMPLE_RATE_AI/2), 'low')
             de_emphasis = signal.filtfilt(b, a, filtered_audio)
             
-            # 3. Apply a simple noise gate with lower threshold for better barge-in detection
-            noise_threshold = 0.004  # Lower threshold (was 0.005) for better barge-in detection
+            # 3. Apply a simple noise gate
+            noise_threshold = 0.005
             noise_gate = np.where(np.abs(de_emphasis) < noise_threshold, 0, de_emphasis)
             
-            # 4. Apply pre-emphasis filter to boost higher frequencies (for better speech detection)
-            pre_emphasis = np.append(noise_gate[0], noise_gate[1:] - 0.97 * noise_gate[:-1])
-            
-            # 5. Normalize audio to have consistent volume
-            if np.max(np.abs(pre_emphasis)) > 0:
-                normalized = pre_emphasis / np.max(np.abs(pre_emphasis)) * 0.95
+            # 4. Normalize audio to have consistent volume
+            if np.max(np.abs(noise_gate)) > 0:
+                normalized = noise_gate / np.max(np.abs(noise_gate)) * 0.95
             else:
-                normalized = pre_emphasis
+                normalized = noise_gate
             
-            # 6. Apply a milder compression to preserve dynamics for better barge-in detection
-            # Reduced compression ratio from 0.5 to 0.7 (closer to 1:1) and lower threshold
-            threshold = 0.15  # Lower threshold (was 0.2)
-            ratio = 0.7  # Milder compression (was 0.5)
-            
-            def compressor(x, threshold, ratio):
-                # If below threshold, leave it alone
-                # If above threshold, compress it
-                mask = np.abs(x) > threshold
-                sign = np.sign(x)
-                mag = np.abs(x)
-                compressed = np.where(
-                    mask,
-                    threshold + (mag - threshold) * ratio,
-                    mag
-                )
-                return sign * compressed
-            
-            compressed = compressor(normalized, threshold, ratio)
-            
-            # Re-normalize after compression
-            if np.max(np.abs(compressed)) > 0:
-                result = compressed / np.max(np.abs(compressed)) * 0.95
-            else:
-                result = compressed
-                
-            return result
+            return normalized
             
         except Exception as e:
             logger.error(f"Error enhancing audio: {e}")
             # Return original audio if enhancement fails
             return audio_data
-            
-    def detect_speech_for_barge_in(self, audio_data: np.ndarray, threshold: float = 0.005) -> bool:
-        """
-        Enhanced speech detection specifically optimized for barge-in detection
-        with multi-factor analysis to reduce false positives.
-        
-        Args:
-            audio_data: Audio data as numpy array
-            threshold: Speech detection threshold (lower than normal)
-            
-        Returns:
-            True if speech is detected for barge-in
-        """
-        try:
-            # Apply a band-pass filter to focus on speech frequencies (300-3400 Hz)
-            # This helps eliminate background noise and some echo
-            b, a = signal.butter(4, [300/(16000/2), 3400/(16000/2)], 'band')
-            filtered_audio = signal.filtfilt(b, a, audio_data)
-            
-            # 1. Energy level check with adaptive threshold
-            energy = np.mean(np.abs(filtered_audio))
-            energy_detected = energy > threshold
-            
-            # 2. Check for speech patterns - meaningful energy variations
-            # Speech typically has variations in energy
-            frame_size = min(len(filtered_audio), 320)  # 20ms at 16kHz
-            if frame_size > 0:
-                frames = [filtered_audio[i:i+frame_size] for i in range(0, len(filtered_audio), frame_size)]
-                frame_energies = [np.mean(np.abs(frame)) for frame in frames if len(frame) == frame_size]
-                
-                if len(frame_energies) >= 3:
-                    # Calculate energy variance (speech has more variance than steady noise)
-                    energy_std = np.std(frame_energies)
-                    energy_mean = np.mean(frame_energies)
-                    variation_ratio = energy_std / energy_mean if energy_mean > 0 else 0
-                    variation_detected = variation_ratio > 0.2  # Speech typically has high variation
-                else:
-                    variation_detected = False
-            else:
-                variation_detected = False
-            
-            # 3. Peak detection - speech often has stronger peaks
-            if len(filtered_audio) > 0:
-                peaks = np.max(np.abs(filtered_audio))
-                peak_detected = peaks > (threshold * 3)  # Higher threshold for peaks
-            else:
-                peak_detected = False
-                
-            # Decision logic: Multiple factors must indicate speech to reduce false positives
-            # This helps avoid triggering on echoes or background noise
-            is_speech = energy_detected and (variation_detected or peak_detected)
-            
-            # Log detection results for debugging
-            logger.debug(f"Barge-in speech detection: energy={energy:.6f}, threshold={threshold:.6f}, "
-                         f"variation={variation_ratio if 'variation_ratio' in locals() else 0:.6f}, "
-                         f"peaks={peaks if 'peaks' in locals() else 0:.6f}, "
-                         f"detected={is_speech}")
-            
-            return is_speech
-            
-        except Exception as e:
-            logger.error(f"Error in barge-in speech detection: {e}")
-            # Return False if there's an error
-            return False
-    
-    def get_audio_info(self, audio_data: bytes) -> Dict[str, Any]:
-        """
-        Get information about audio data.
-        
-        Args:
-            audio_data: Audio data as bytes
-            
-        Returns:
-            Dictionary with audio information
-        """
-        info = {
-            "size_bytes": len(audio_data)
-        }
-        
-        # Try to determine if mulaw or pcm
-        if len(audio_data) > 0:
-            # Check first few bytes for common patterns
-            if audio_data[:4] == b'RIFF':
-                info["format"] = "wav"
-            else:
-                # Rough guess based on values
-                sample_values = np.frombuffer(audio_data[:100], dtype=np.uint8)
-                if np.any(sample_values > 127):
-                    info["format"] = "mulaw"
-                else:
-                    info["format"] = "pcm"
-        
-        return info
     
     def float32_to_pcm16(self, audio_data: np.ndarray) -> bytes:
         """

@@ -1,5 +1,5 @@
 """
-Main Twilio handler for voice calls with enhanced barge-in support.
+Main Twilio handler for voice calls.
 """
 import logging
 from typing import Optional, Dict, Any
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class TwilioHandler:
     """
-    Handles Twilio voice call operations with enhanced barge-in support.
+    Handles Twilio voice call operations.
     """
     
     def __init__(self, pipeline, base_url: str):
@@ -47,7 +47,7 @@ class TwilioHandler:
     
     def handle_incoming_call(self, from_number: str, to_number: str, call_sid: str) -> str:
         """
-        Handle incoming voice call with WebSocket streaming and enhanced barge-in detection.
+        Handle incoming voice call with WebSocket streaming.
         
         Args:
             from_number: Caller phone number
@@ -70,30 +70,27 @@ class TwilioHandler:
         logger.info(f"Setting up WebSocket stream at: {ws_url}")
         
         try:
-            # Use Connect and Stream for bidirectional audio streaming with enhanced barge-in
+            # Use Connect and Stream for bidirectional audio streaming
             connect = Connect()
             
-            # Add barge-in detector to the stream with explicit parameters
+            # Add stream with standard parameters
             stream = Stream(
                 url=ws_url, 
-                bargeIn="true",  # Explicit string attribute
                 track="inbound_track"
             )
             
-            # Add extra parameters to ensure best audio quality and barge-in support
+            # Add basic parameters for audio quality
             stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
-            stream.parameter(name="bargeInEnabled", value="true")  # Redundant but explicit
             
             connect.append(stream)
             response.append(connect)
             
-            # Add a minimal greeting to start the interaction - keep it short for barge-in
+            # Add a minimal greeting to start the interaction - keep it short
             response.say("Welcome. How can I help you today?", 
-                        voice='alice', 
-                        bargeIn="true")  # Enable barge-in for the greeting too
+                        voice='alice')
             
             # Log the TwiML for verification
-            logger.info(f"Generated TwiML with enhanced barge-in: {response}")
+            logger.info(f"Generated TwiML: {response}")
             
             return str(response)
         except Exception as e:
@@ -128,7 +125,7 @@ class TwilioHandler:
         status_callback: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Place an outbound call with enhanced barge-in support.
+        Place an outbound call.
         
         Args:
             to_number: Destination phone number
@@ -144,12 +141,11 @@ class TwilioHandler:
         if not status_callback:
             status_callback = f"{self.base_url}/voice/status"
         
-        # Set up TwiML for outbound call with barge-in support
+        # Set up TwiML for outbound call
         twiml = f"""
         <Response>
             <Connect>
-                <Stream url="{self.base_url.replace('https://', 'wss://')}/ws/stream/outbound" bargeIn="true">
-                    <Parameter name="bargeInEnabled" value="true"/>
+                <Stream url="{self.base_url.replace('https://', 'wss://')}/ws/stream/outbound">
                     <Parameter name="mediaEncoding" value="audio/x-mulaw;rate=8000"/>
                 </Stream>
             </Connect>
