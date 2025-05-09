@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Twilio application with optimized feedback prevention and latency reduction.
+Twilio application without barge-in detection.
 """
 import os
 import sys
@@ -29,7 +29,7 @@ from text_to_speech import ElevenLabsTTS
 # Load environment variables
 load_dotenv()
 
-# Configure logging with reduced noise
+# Configure logging with reduced noise from small audio chunks
 def configure_logging():
     # Set up root logger
     root_logger = logging.getLogger()
@@ -51,7 +51,7 @@ def configure_logging():
     root_logger.addHandler(console_handler)
     
     # Set specific loggers to higher levels to reduce noise
-    logging.getLogger('telephony.audio_processor').setLevel(logging.INFO)  # Changed from ERROR to INFO
+    logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)  # Only show errors
     
     # Create a filter to ignore specific messages
     class IgnoreSmallMulawFilter(logging.Filter):
@@ -84,22 +84,39 @@ base_url = None
 # Dictionary to store event loops and state for each call
 call_event_loops = {}
 
+# Helper function to split audio into chunks
+def split_audio_into_chunks(audio_data: bytes) -> list:
+    """
+    Split audio into smaller chunks for processing.
+    
+    Args:
+        audio_data: Audio data to split
+        
+    Returns:
+        List of chunks
+    """
+    # Simple chunking
+    chunk_size = 800  # 100ms at 8kHz
+    chunks = []
+    
+    # Split into equal-sized chunks
+    for i in range(0, len(audio_data), chunk_size):
+        chunks.append(audio_data[i:i+chunk_size])
+        
+    return chunks
+
 async def initialize_system():
-    """Initialize all system components with optimized configuration."""
+    """Initialize all system components with ElevenLabs TTS integration."""
     global twilio_handler, voice_ai_pipeline, base_url
     
-    logger.info("Initializing Voice AI Agent with optimized settings...")
+    logger.info("Initializing Voice AI Agent with ElevenLabs TTS integration...")
     
     # Verify ElevenLabs API key is set
     elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not elevenlabs_api_key:
         logger.warning("ELEVENLABS_API_KEY not set in environment, attempting to proceed without it")
-
-    # Check Google Cloud credentials
-    google_credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    logger.info(f"GOOGLE_APPLICATION_CREDENTIALS: {google_credentials}")
     
-    # Define a telephony-optimized prompt
+    # Define a generic telephony-optimized prompt
     telephony_prompt = (
         "This is a telephone conversation with a customer. "
         "The customer may ask questions about products, services, pricing, or features. "
@@ -133,16 +150,15 @@ async def initialize_system():
     )
     await agent.init()
     
-    # Initialize TTS integration with optimized settings
+    # Initialize TTS integration with ElevenLabs
     from integration.tts_integration import TTSIntegration
     tts = TTSIntegration(
         voice_id=os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'),
-        enable_caching=True,
-        optimize_streaming_latency=3  # Reduced from 4 for better quality/latency balance
+        enable_caching=True
     )
     await tts.init()
     
-    # Create pipeline with optimized settings
+    # Create pipeline
     voice_ai_pipeline = VoiceAIAgentPipeline(
         speech_recognizer=agent.speech_recognizer,
         conversation_manager=agent.conversation_manager,
@@ -154,16 +170,16 @@ async def initialize_system():
     twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
     await twilio_handler.start()
     
-    logger.info("System initialized successfully with optimized settings")
+    logger.info("System initialized successfully with ElevenLabs TTS integration")
 
 @app.route('/', methods=['GET'])
 def index():
     """Simple test endpoint."""
-    return "Voice AI Agent is running with optimized settings!"
+    return "Voice AI Agent is running with ElevenLabs TTS integration!"
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
-    """Handle incoming voice calls with optimized TwiML."""
+    """Handle incoming voice calls without barge-in support."""
     logger.info("Received incoming call request")
     logger.info(f"Request headers: {request.headers}")
     logger.info(f"Request form data: {request.form}")
@@ -187,7 +203,7 @@ def handle_incoming_call():
         # Add call to manager
         twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
         
-        # Create TwiML response
+        # Create TwiML response without barge-in handling
         response = VoiceResponse()
         
         # Add a 1 second silence before starting - this helps avoid initial echo problems
@@ -199,16 +215,15 @@ def handle_incoming_call():
         # Create Connect with Stream for bi-directional audio
         connect = Connect()
         
-        # Create Stream with simplified track parameter for debugging
+        # Create Stream with standard parameters
         stream = Stream(
             name="stream", 
             url=ws_url, 
-            track="inbound"  # Simplified from inbound_track to just inbound
+            track="inbound_track"
         )
         
-        # Set parameters more explicitly
-        stream.parameter(name="mediaEncoding", value="audio/x-mulaw")
-        stream.parameter(name="sampleRate", value="8000")
+        # Set basic parameters
+        stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
         
         # Add stream to connect
         connect.append(stream)
@@ -218,7 +233,6 @@ def handle_incoming_call():
         
         # Return TwiML
         twiml = str(response)
-        logger.info(f"Generated TwiML: {twiml}")
         return Response(twiml, mimetype='text/xml')
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
@@ -276,7 +290,7 @@ def handle_status_callback():
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream with enhanced debugging."""
+    """Handle WebSocket media stream without barge-in detection."""
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
     if not twilio_handler or not voice_ai_pipeline:
@@ -288,14 +302,11 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Initialize WebSocketHandler with optimized configuration
+        # Initialize WebSocketHandler without barge-in handling
         ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
         
         # Create a new event loop for this WebSocket connection
         loop = asyncio.new_event_loop()
-        
-        # Create an event to signal termination
-        terminate_flag = threading.Event()
         
         # Create a thread to run the event loop
         def run_ws_handler_loop():
@@ -308,24 +319,21 @@ def handle_media_stream(call_sid):
                     "version": "1.0.0"
                 }), ws))
                 
-                # Run the event loop until terminate flag is set
-                while not terminate_flag.is_set():
-                    loop.run_until_complete(asyncio.sleep(0.1))
+                # Run the event loop
+                loop.run_forever()
             except Exception as e:
                 logger.error(f"Error in WebSocket handler loop: {e}", exc_info=True)
             finally:
-                # Close loop
                 loop.close()
         
         # Start the thread
         thread = threading.Thread(target=run_ws_handler_loop, daemon=True)
         thread.start()
         
-        # Store the thread, loop and terminate flag for cleanup
+        # Store the thread and loop for cleanup
         call_event_loops[call_sid] = {
             'loop': loop,
-            'thread': thread,
-            'terminate_flag': terminate_flag
+            'thread': thread
         }
         
         # Process messages in the main thread and send them to the event loop
@@ -334,9 +342,6 @@ def handle_media_stream(call_sid):
                 message = ws.receive(timeout=5)
                 if message is None:
                     continue
-                
-                # Add detailed debug logging for all incoming WebSocket messages
-                logger.info(f"WebSocket message received: {message[:100]}...")
                 
                 # Schedule the message to be processed in the event loop
                 asyncio.run_coroutine_threadsafe(
@@ -353,8 +358,8 @@ def handle_media_stream(call_sid):
         # Clean up
         if call_sid in call_event_loops:
             info = call_event_loops[call_sid]
-            if 'terminate_flag' in info:
-                info['terminate_flag'].set()
+            if 'loop' in info and info['loop'].is_running():
+                info['loop'].call_soon_threadsafe(info['loop'].stop)
             
             # Remove from tracking
             del call_event_loops[call_sid]
@@ -368,92 +373,6 @@ def handle_media_stream(call_sid):
         logger.info(f"WebSocket connection cleanup complete for call {call_sid}")
         return ""
 
-@app.route('/debug/level/<level>', methods=['GET'])
-def set_debug_level(level):
-    """Dynamic change of logging level."""
-    valid_levels = {
-        'debug': logging.DEBUG,
-        'info': logging.INFO,
-        'warning': logging.WARNING,
-        'error': logging.ERROR
-    }
-    
-    if level.lower() not in valid_levels:
-        return jsonify({"error": f"Invalid level. Use one of: {list(valid_levels.keys())}"})
-    
-    # Set root logger level
-    logging.getLogger().setLevel(valid_levels[level.lower()])
-    
-    # Set specific loggers
-    logging.getLogger('telephony.websocket_handler').setLevel(valid_levels[level.lower()])
-    logging.getLogger('telephony.audio_processor').setLevel(valid_levels[level.lower()])
-    logging.getLogger('speech_to_text.google_cloud_stt').setLevel(valid_levels[level.lower()])
-    
-    return jsonify({"success": f"Log level set to {level}"})
-
-@app.route('/debug/stats', methods=['GET'])
-def get_debug_stats():
-    """Return debugging statistics."""
-    stats = {
-        "active_calls": 0,
-        "google_stt_status": "unknown",
-        "elevenlabs_status": "unknown"
-    }
-    
-    # Get active call count
-    if twilio_handler and twilio_handler.call_manager:
-        stats["active_calls"] = twilio_handler.call_manager.get_active_call_count()
-        stats["call_stats"] = twilio_handler.call_manager.get_call_stats()
-    
-    # Add call event loop info
-    stats["active_websockets"] = len(call_event_loops)
-    
-    # Add Google and ElevenLabs credential status
-    stats["google_credentials"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") is not None
-    stats["elevenlabs_api_key"] = os.environ.get("ELEVENLABS_API_KEY") is not None
-    
-    return jsonify(stats)
-
-@app.route('/test/audio-processing', methods=['POST'])
-def test_audio_processing():
-    """Test endpoint to verify audio processing is working."""
-    if request.files and 'audio' in request.files:
-        audio_file = request.files['audio']
-        audio_data = audio_file.read()
-        
-        # Create an audio processor instance
-        processor = AudioProcessor()
-        
-        # Convert audio to PCM
-        try:
-            # Assume mulaw for Twilio compatibility
-            pcm_audio = processor.mulaw_to_pcm(audio_data)
-            
-            # Get stats
-            stats = {
-                "original_size": len(audio_data),
-                "pcm_samples": len(pcm_audio),
-                "pcm_duration_ms": len(pcm_audio) / 16,  # at 16kHz
-                "energy_level": float(np.mean(np.abs(pcm_audio))),
-                "max_amplitude": float(np.max(np.abs(pcm_audio)))
-            }
-            
-            return jsonify({
-                "success": True,
-                "message": "Audio processed successfully",
-                "stats": stats
-            })
-        except Exception as e:
-            return jsonify({
-                "success": False,
-                "error": str(e)
-            })
-    else:
-        return jsonify({
-            "success": False,
-            "error": "No audio file provided. Send as multipart/form-data with field name 'audio'."
-        })
-
 # Function to initialize the system synchronously
 def init_system():
     """Run the async initialization in a synchronous context."""
@@ -466,7 +385,7 @@ def init_system():
 
 # Starting point of the application
 if __name__ == '__main__':
-    print("Starting Voice AI Agent with optimized settings...")
+    print("Starting Voice AI Agent with ElevenLabs TTS integration...")
     
     # Initialize the system before starting the Flask app
     init_system()

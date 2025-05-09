@@ -1,5 +1,5 @@
 """
-Enhanced Speech activity detection for better noise handling and echo filtering.
+Speech activity detection for barge-in functionality.
 """
 import numpy as np
 import time
@@ -10,16 +10,10 @@ logger = logging.getLogger(__name__)
 
 class SpeechActivityDetector:
     """
-    Detects user speech activity with improved noise handling and echo filtering.
+    Detects user speech activity during agent's response for barge-in handling.
     """
     
-    def __init__(
-        self, 
-        energy_threshold=0.05, 
-        consecutive_frames=3, 
-        frame_duration=0.02,
-        echo_detection_window=2000  # 2 seconds in milliseconds
-    ):
+    def __init__(self, energy_threshold=0.05, consecutive_frames=3, frame_duration=0.02):
         """
         Initialize speech activity detector.
         
@@ -27,12 +21,10 @@ class SpeechActivityDetector:
             energy_threshold: Energy threshold for speech detection
             consecutive_frames: Number of consecutive frames needed to confirm speech
             frame_duration: Duration of each frame in seconds
-            echo_detection_window: Time window for echo detection in milliseconds
         """
         self.energy_threshold = energy_threshold
         self.consecutive_frames = consecutive_frames
         self.frame_duration = frame_duration
-        self.echo_detection_window = echo_detection_window
         
         # State variables
         self.speech_frames = 0
@@ -44,14 +36,7 @@ class SpeechActivityDetector:
         self.adaptation_rate = 0.05
         self.min_energy_threshold = energy_threshold
         
-        # Echo detection variables
-        self.last_system_output_time = 0
-        
-        # Spectral analysis state
-        self.speech_likelihood_history = []
-        self.max_history = 10
-        
-        logger.info(f"Initialized enhanced SpeechActivityDetector with threshold={energy_threshold}")
+        logger.info(f"Initialized SpeechActivityDetector with threshold={energy_threshold}")
     
     def update_background_energy(self, energy):
         """
@@ -65,21 +50,16 @@ class SpeechActivityDetector:
                                      self.adaptation_rate * energy
             logger.debug(f"Updated background energy to {self.background_energy:.6f}")
     
-    def detect(self, audio_frame: np.ndarray, current_time_ms: Optional[int] = None) -> bool:
+    def detect(self, audio_frame: np.ndarray) -> bool:
         """
-        Detect speech activity in audio frame with echo prevention.
+        Detect speech activity in audio frame.
         
         Args:
             audio_frame: Audio data as numpy array
-            current_time_ms: Current time in milliseconds (optional)
             
         Returns:
             True if speech detected
         """
-        # Get current time if not provided
-        if current_time_ms is None:
-            current_time_ms = int(time.time() * 1000)
-        
         # Calculate energy
         energy = np.mean(np.abs(audio_frame))
         
@@ -89,35 +69,14 @@ class SpeechActivityDetector:
         # Adaptive threshold - at least 2x background but no less than base threshold
         adaptive_threshold = max(self.min_energy_threshold, self.background_energy * 2.5)
         
-        # Check if this might be echo from system speech
-        time_since_system_output = current_time_ms - self.last_system_output_time
-        if time_since_system_output < self.echo_detection_window:
-            # During potential echo window, increase detection threshold
-            adaptive_threshold *= 1.5
-            logger.debug(f"In echo window, increased threshold to {adaptive_threshold:.4f}")
-        
-        # Analyze spectral properties for better speech detection
-        spectral_features = self.analyze_spectral_properties(audio_frame)
-        
-        # Compute combined speech likelihood
-        speech_likelihood = spectral_features["speech_likelihood"]
-        self.speech_likelihood_history.append(speech_likelihood)
-        
-        # Keep history to reasonable size
-        if len(self.speech_likelihood_history) > self.max_history:
-            self.speech_likelihood_history.pop(0)
-        
-        # Calculate average speech likelihood over recent history
-        avg_speech_likelihood = sum(self.speech_likelihood_history) / max(1, len(self.speech_likelihood_history))
-        
-        # Check for speech activity - energy must exceed threshold AND spectral analysis must indicate speech
-        if energy > adaptive_threshold and avg_speech_likelihood > 0.3:
+        # Check for speech activity
+        if energy > adaptive_threshold:
             self.speech_frames += 1
             if self.speech_frames >= self.consecutive_frames:
                 if not self.is_speaking:
-                    logger.info(f"Speech detected! Energy: {energy:.4f}, Threshold: {adaptive_threshold:.4f}, Likelihood: {avg_speech_likelihood:.2f}")
+                    logger.info(f"Speech detected! Energy: {energy:.4f}, Threshold: {adaptive_threshold:.4f}")
                 self.is_speaking = True
-                self.last_detection_time = current_time_ms
+                self.last_detection_time = time.time()
                 return True
         else:
             # Reset counter if not enough consecutive frames
@@ -125,7 +84,7 @@ class SpeechActivityDetector:
                 self.speech_frames = 0
             
             # Check for end of speech
-            if self.is_speaking and current_time_ms - self.last_detection_time > 500:
+            if self.is_speaking and time.time() - self.last_detection_time > 0.5:
                 logger.info("Speech ended")
                 self.is_speaking = False
                 
@@ -170,14 +129,8 @@ class SpeechActivityDetector:
             # and a specific ratio between first and second formants
             speech_likelihood = 0.0
             
-            # Enhanced speech detection logic
-            if speech_high_ratio > 2.0:  # Strong concentration in speech bands
-                if 0.8 < f1_f2_ratio < 3.0:  # Typical range for speech
-                    speech_likelihood = 0.8
-                else:
-                    speech_likelihood = 0.5  # Some speech characteristics
-            elif speech_high_ratio > 1.5:
-                speech_likelihood = 0.3  # Possible speech
+            if 0.8 < f1_f2_ratio < 3.0 and speech_high_ratio > 2.0:
+                speech_likelihood = 0.8
             
             return {
                 "f1_power": f1_power,
@@ -191,22 +144,3 @@ class SpeechActivityDetector:
         except Exception as e:
             logger.error(f"Error analyzing spectral properties: {e}")
             return {"speech_likelihood": 0.0}
-    
-    def update_system_speech_time(self, time_ms: Optional[int] = None):
-        """
-        Record when system output occurred to avoid echo detection.
-        
-        Args:
-            time_ms: Current time in milliseconds (None for current time)
-        """
-        if time_ms is None:
-            time_ms = int(time.time() * 1000)
-        
-        self.last_system_output_time = time_ms
-        logger.debug(f"Updated system speech time to {self.last_system_output_time}")
-    
-    def reset(self):
-        """Reset detector state."""
-        self.speech_frames = 0
-        self.is_speaking = False
-        self.speech_likelihood_history = []

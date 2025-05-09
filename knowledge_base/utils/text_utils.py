@@ -167,4 +167,3 @@ def format_context_for_llm(contexts: List[Dict[str, Any]], max_tokens: int = 300
     truncated_context = truncate_text(full_context, max_tokens)
     
     return truncated_context
-

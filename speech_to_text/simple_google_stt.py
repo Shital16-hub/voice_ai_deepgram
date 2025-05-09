@@ -100,9 +100,6 @@ class SimpleGoogleSTT:
         else:
             audio_bytes = audio_chunk
         
-        # Add logging to verify audio data
-        logger.info(f"Processing audio chunk: {len(audio_bytes)} bytes")
-        
         # Instead of trying to use streaming recognition, just use synchronous recognition
         try:
             # Create recognition config
@@ -119,14 +116,8 @@ class SimpleGoogleSTT:
             # Create recognition audio
             audio = speech.RecognitionAudio(content=audio_bytes)
             
-            # Log that we're sending to Google
-            logger.info(f"Sending {len(audio_bytes)} bytes to Google Speech API")
-            
             # Perform recognition
             response = self.client.recognize(config=config, audio=audio)
-            
-            # Log response
-            logger.info(f"Received response from Google Speech API: {response}")
             
             # Process results
             for result in response.results:
@@ -144,8 +135,6 @@ class SimpleGoogleSTT:
                     chunk_id=self.utterance_id
                 )
                 
-                logger.info(f"Created transcription result: {transcription_result.text}")
-                
                 # Call callback if provided
                 if callback:
                     await callback(transcription_result)
@@ -153,7 +142,6 @@ class SimpleGoogleSTT:
                 return transcription_result
             
             # No results
-            logger.info("No transcription results from Google Speech API")
             return None
             
         except Exception as e:
