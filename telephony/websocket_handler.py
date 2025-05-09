@@ -398,15 +398,19 @@ class WebSocketHandler:
             logger.debug("Conversation not active, ignoring media")
             return
             
-        # Store track information for feedback prevention
-        self.current_track = data.get('track', 'unknown')
+        # Extract track information
+        track = data.get('track', 'unknown')
+        self.current_track = track
         
-        # Only process inbound audio
-        if self.current_track != 'inbound':
-            logger.debug(f"Received {self.current_track} track, not processing")
+        # Add explicit logging for ALL media packets to debug
+        logger.debug(f"Received media packet: track={track}, size={len(data.get('media', {}).get('payload', ''))}")
+        
+        # Only process inbound audio - MODIFIED to check both 'inbound' and 'inbound_track'
+        if track not in ['inbound', 'inbound_track']:
+            logger.debug(f"Received {track} track, not processing")
             return
             
-        # Skip processing if system is currently speaking
+        # Skip processing if system is currently speaking - ADDED check to ensure this isn't causing issues
         if self.is_speaking:
             logger.debug("System is speaking, not processing inbound audio")
             return
@@ -418,19 +422,30 @@ class WebSocketHandler:
             logger.warning("Received media event with no payload")
             return
         
+        # Add more detailed logging
+        logger.debug(f"Processing media payload of size: {len(payload)}")
+        
         try:
             # Decode audio data
             audio_data = base64.b64decode(payload)
+            
+            # Add direct logging of payload size
+            logger.debug(f"Decoded audio data size: {len(audio_data)} bytes")
             
             # Process with MulawBufferProcessor to solve "Very small mulaw data" warnings
             processed_data = self.mulaw_processor.process(audio_data)
             
             # Skip if still buffering
             if processed_data is None:
+                # Added more informative log
+                logger.debug(f"Buffering audio chunk of size {len(audio_data)}, not enough for processing yet")
                 return
             
             # Add to input buffer
             self.input_buffer.extend(processed_data)
+            
+            # Log buffer stats
+            logger.debug(f"Input buffer size now: {len(self.input_buffer)} bytes")
             
             # Limit buffer size to prevent memory issues
             if len(self.input_buffer) > AUDIO_BUFFER_SIZE * 2:
@@ -441,6 +456,9 @@ class WebSocketHandler:
             
             # Convert to PCM for speech detection
             pcm_audio = self.audio_processor.mulaw_to_pcm(processed_data)
+            
+            # Log PCM conversion
+            logger.debug(f"Converted to PCM: {len(pcm_audio)} samples")
             
             # Update ambient noise level (adaptive threshold)
             self._update_ambient_noise_level(pcm_audio)
@@ -453,12 +471,14 @@ class WebSocketHandler:
                 return
             
             # Process buffer when it's large enough and not already processing
-            if len(self.input_buffer) >= AUDIO_BUFFER_SIZE and not self.is_processing:
+            # REDUCED minimum buffer size from AUDIO_BUFFER_SIZE to half
+            min_buffer_size = AUDIO_BUFFER_SIZE // 2
+            if len(self.input_buffer) >= min_buffer_size and not self.is_processing:
+                logger.info(f"Processing audio buffer of size: {len(self.input_buffer)} bytes")
                 async with self.processing_lock:
                     if not self.is_processing:  # Double-check within lock
                         self.is_processing = True
                         try:
-                            logger.info(f"Processing audio buffer of size: {len(self.input_buffer)} bytes")
                             await self._process_audio(ws)
                         finally:
                             self.is_processing = False
@@ -585,6 +605,9 @@ class WebSocketHandler:
             try:
                 mulaw_bytes = bytes(self.input_buffer)
                 
+                # Added log for debugging
+                logger.info(f"Processing audio buffer of {len(mulaw_bytes)} bytes")
+                
                 # Convert using the enhanced audio processing
                 pcm_audio = self.audio_processor.mulaw_to_pcm(mulaw_bytes)
                 
@@ -597,11 +620,12 @@ class WebSocketHandler:
                 half_size = len(self.input_buffer) // 2
                 self.input_buffer = self.input_buffer[half_size:]
                 return
-                
+            
             # Add some checks for audio quality
-            if len(pcm_audio) < 1000:  # Very small audio chunk
-                logger.warning(f"Audio chunk too small: {len(pcm_audio)} samples")
+            if len(pcm_audio) < 640:  # Reduced from 1000 to 640 samples (40ms at 16kHz)
+                logger.warning(f"Audio chunk too small: {len(pcm_audio)} samples, accumulating more")
                 return
+
             
             # Create a list to collect transcription results
             transcription_results = []

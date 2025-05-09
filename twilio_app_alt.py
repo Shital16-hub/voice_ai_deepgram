@@ -204,6 +204,8 @@ def handle_incoming_call():
         
         # Set parameters
         stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
+        # Add explicit parameter for track
+        stream.parameter(name="track", value="inbound_track")
         
         # Add stream to connect
         connect.append(stream)
@@ -358,6 +360,69 @@ def handle_media_stream(call_sid):
         
         logger.info(f"WebSocket connection cleanup complete for call {call_sid}")
         return ""
+
+@app.route('/debug/level/<level>', methods=['GET'])
+def set_debug_level(level):
+    """Dynamic change of logging level."""
+    valid_levels = {
+        'debug': logging.DEBUG,
+        'info': logging.INFO,
+        'warning': logging.WARNING,
+        'error': logging.ERROR
+    }
+    
+    if level.lower() not in valid_levels:
+        return jsonify({"error": f"Invalid level. Use one of: {list(valid_levels.keys())}"})
+    
+    # Set root logger level
+    logging.getLogger().setLevel(valid_levels[level.lower()])
+    
+    # Set specific loggers
+    logging.getLogger('telephony.websocket_handler').setLevel(valid_levels[level.lower()])
+    logging.getLogger('telephony.audio_processor').setLevel(valid_levels[level.lower()])
+    logging.getLogger('speech_to_text.google_cloud_stt').setLevel(valid_levels[level.lower()])
+    
+    return jsonify({"success": f"Log level set to {level}"})
+
+@app.route('/test/audio-processing', methods=['POST'])
+def test_audio_processing():
+    """Test endpoint to verify audio processing is working."""
+    if request.files and 'audio' in request.files:
+        audio_file = request.files['audio']
+        audio_data = audio_file.read()
+        
+        # Create an audio processor instance
+        processor = AudioProcessor()
+        
+        # Convert audio to PCM
+        try:
+            # Assume mulaw for Twilio compatibility
+            pcm_audio = processor.mulaw_to_pcm(audio_data)
+            
+            # Get stats
+            stats = {
+                "original_size": len(audio_data),
+                "pcm_samples": len(pcm_audio),
+                "pcm_duration_ms": len(pcm_audio) / 16,  # at 16kHz
+                "energy_level": float(np.mean(np.abs(pcm_audio))),
+                "max_amplitude": float(np.max(np.abs(pcm_audio)))
+            }
+            
+            return jsonify({
+                "success": True,
+                "message": "Audio processed successfully",
+                "stats": stats
+            })
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            })
+    else:
+        return jsonify({
+            "success": False,
+            "error": "No audio file provided. Send as multipart/form-data with field name 'audio'."
+        })
 
 # Function to initialize the system synchronously
 def init_system():
