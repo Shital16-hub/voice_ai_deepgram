@@ -138,6 +138,71 @@ class WebSocketHandler:
         self.elevenlabs_tts = None
         
         logger.info(f"WebSocketHandler initialized for call {call_sid} with feedback loop prevention")
+
+    def _dump_audio_buffer(self, filename: str = "debug_audio.wav") -> None:
+        """
+        Save the current audio buffer to a file for debugging.
+        
+        Args:
+            filename: Filename to save the audio buffer
+        """
+        try:
+            if not self.input_buffer:
+                logger.warning("No audio in buffer to dump")
+                return
+                
+            # Convert mulaw to PCM
+            mulaw_bytes = bytes(self.input_buffer)
+            pcm_audio = self.audio_processor.mulaw_to_pcm(mulaw_bytes)
+            
+            # Convert to int16
+            audio_int16 = (pcm_audio * 32767).astype(np.int16)
+            
+            # Save as WAV file
+            import wave
+            with wave.open(filename, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # 2 bytes for int16
+                wf.setframerate(16000)
+                wf.writeframes(audio_int16.tobytes())
+            
+            logger.info(f"Saved audio buffer to {filename}")
+        except Exception as e:
+            logger.error(f"Error saving audio buffer: {e}")
+    
+    def _test_google_speech(self) -> None:
+        """Run a test on Google Cloud Speech to verify it's working."""
+        try:
+            # Create a simple tone for testing
+            import numpy as np
+            from scipy import signal
+            
+            # Generate a 1-second 1kHz tone
+            sample_rate = 16000
+            t = np.linspace(0, 1, sample_rate, endpoint=False)
+            tone = 0.5 * np.sin(2 * np.pi * 1000 * t)  # 1kHz tone at half amplitude
+            
+            # Convert to int16
+            tone_int16 = (tone * 32767).astype(np.int16)
+            tone_bytes = tone_int16.tobytes()
+            
+            logger.info(f"Generated test tone of {len(tone_bytes)} bytes")
+            
+            # Reset Google Speech session
+            if self.google_speech_active:
+                self.speech_client.stop_streaming()
+            
+            self.speech_client.start_streaming()
+            self.google_speech_active = True
+            
+            # Send the tone
+            logger.info("Sending test tone to Google Speech")
+            self.speech_client.process_audio_chunk(tone_bytes)
+            
+            # Log completion
+            logger.info("Test tone sent to Google Speech")
+        except Exception as e:
+            logger.error(f"Error in Google Speech test: {e}")
     
     def _update_ambient_noise_level(self, audio_data: np.ndarray) -> None:
         """
@@ -260,13 +325,15 @@ class WebSocketHandler:
             if lowered_text.startswith(starter):
                 logger.info(f"Allowing question pattern: {text}")
                 return True
-        
+            
+        # Be more lenient during troubleshooting - lower word count threshold
         # Check word count
         word_count = len(cleaned_text.split())
         if word_count < self.min_words_for_valid_query:
             logger.info(f"Transcription too short: {word_count} words")
             return False
             
+        # More permissive during troubleshooting
         return True
     
     async def handle_message(self, message: str, ws) -> None:
@@ -402,18 +469,21 @@ class WebSocketHandler:
         track = data.get('track', 'unknown')
         self.current_track = track
         
-        # Add explicit logging for ALL media packets to debug
-        logger.debug(f"Received media packet: track={track}, size={len(data.get('media', {}).get('payload', ''))}")
+        # Add explicit enhanced logging for ALL media packets
+        logger.info(f"Media event received: {data}")
+        logger.info(f"Received media packet: track={track}, size={len(data.get('media', {}).get('payload', ''))}")
         
-        # Only process inbound audio - MODIFIED to check both 'inbound' and 'inbound_track'
-        if track not in ['inbound', 'inbound_track']:
-            logger.debug(f"Received {track} track, not processing")
-            return
+        # Process all audio data during testing - remove track restriction
+        # Only process inbound audio - MODIFIED to be more permissive during debugging
+        # if track not in ['inbound', 'inbound_track']:
+        #     logger.info(f"Received {track} track (not processing during normal operation)")
+        #     return
             
+        # Temporarily disable speaking check during troubleshooting
         # Skip processing if system is currently speaking - ADDED check to ensure this isn't causing issues
-        if self.is_speaking:
-            logger.debug("System is speaking, not processing inbound audio")
-            return
+        # if self.is_speaking:
+        #     logger.info("System is speaking, not processing inbound audio")
+        #     return
             
         media = data.get('media', {})
         payload = media.get('payload')
@@ -423,14 +493,14 @@ class WebSocketHandler:
             return
         
         # Add more detailed logging
-        logger.debug(f"Processing media payload of size: {len(payload)}")
+        logger.info(f"Processing media payload of size: {len(payload)}")
         
         try:
             # Decode audio data
             audio_data = base64.b64decode(payload)
             
             # Add direct logging of payload size
-            logger.debug(f"Decoded audio data size: {len(audio_data)} bytes")
+            logger.info(f"Decoded audio data size: {len(audio_data)} bytes")
             
             # Process with MulawBufferProcessor to solve "Very small mulaw data" warnings
             processed_data = self.mulaw_processor.process(audio_data)
@@ -438,27 +508,29 @@ class WebSocketHandler:
             # Skip if still buffering
             if processed_data is None:
                 # Added more informative log
-                logger.debug(f"Buffering audio chunk of size {len(audio_data)}, not enough for processing yet")
+                logger.info(f"Buffering audio chunk of size {len(audio_data)}, not enough for processing yet")
                 return
             
             # Add to input buffer
             self.input_buffer.extend(processed_data)
             
             # Log buffer stats
-            logger.debug(f"Input buffer size now: {len(self.input_buffer)} bytes")
+            logger.info(f"Input buffer size now: {len(self.input_buffer)} bytes")
             
             # Limit buffer size to prevent memory issues
             if len(self.input_buffer) > AUDIO_BUFFER_SIZE * 2:
                 # Keep the most recent portion
                 excess = len(self.input_buffer) - AUDIO_BUFFER_SIZE
                 self.input_buffer = self.input_buffer[excess:]
-                logger.debug(f"Trimmed input buffer to {len(self.input_buffer)} bytes")
+                logger.info(f"Trimmed input buffer to {len(self.input_buffer)} bytes")
             
             # Convert to PCM for speech detection
             pcm_audio = self.audio_processor.mulaw_to_pcm(processed_data)
             
-            # Log PCM conversion
-            logger.debug(f"Converted to PCM: {len(pcm_audio)} samples")
+            # Log PCM conversion and audio levels
+            if len(pcm_audio) > 0:
+                audio_level = np.mean(np.abs(pcm_audio)) * 100
+                logger.info(f"Converted to PCM: {len(pcm_audio)} samples, Audio level: {audio_level:.2f}%")
             
             # Update ambient noise level (adaptive threshold)
             self._update_ambient_noise_level(pcm_audio)
@@ -467,12 +539,12 @@ class WebSocketHandler:
             time_since_last_response = time.time() - self.last_response_time
             if time_since_last_response < self.pause_after_response:
                 # Still in pause period after last response, wait before processing new input
-                logger.debug(f"In pause period after response ({time_since_last_response:.1f}s < {self.pause_after_response:.1f}s)")
+                logger.info(f"In pause period after response ({time_since_last_response:.1f}s < {self.pause_after_response:.1f}s)")
                 return
             
             # Process buffer when it's large enough and not already processing
-            # REDUCED minimum buffer size from AUDIO_BUFFER_SIZE to half
-            min_buffer_size = AUDIO_BUFFER_SIZE // 2
+            # REDUCED minimum buffer size from AUDIO_BUFFER_SIZE to quarter
+            min_buffer_size = AUDIO_BUFFER_SIZE // 4
             if len(self.input_buffer) >= min_buffer_size and not self.is_processing:
                 logger.info(f"Processing audio buffer of size: {len(self.input_buffer)} bytes")
                 async with self.processing_lock:
@@ -482,9 +554,15 @@ class WebSocketHandler:
                             await self._process_audio(ws)
                         finally:
                             self.is_processing = False
+            else:
+                logger.info(f"Not processing yet: buffer={len(self.input_buffer)}/{min_buffer_size}, is_processing={self.is_processing}")
             
         except Exception as e:
             logger.error(f"Error processing media payload: {e}", exc_info=True)
+    
+        # Save audio buffer periodically for debugging
+        if random.random() < 0.05:  # 5% chance to dump audio
+            self._dump_audio_buffer(f"debug_audio_{int(time.time())}.wav")
     
     async def _handle_stop(self, data: Dict[str, Any]) -> None:
         """
@@ -614,6 +692,10 @@ class WebSocketHandler:
                 # Additional processing to improve recognition
                 pcm_audio = self._preprocess_audio(pcm_audio)
                 
+                # Log audio levels for debugging
+                audio_level = np.mean(np.abs(pcm_audio)) * 100
+                logger.info(f"Preprocessed PCM audio level: {audio_level:.2f}%")
+                
             except Exception as e:
                 logger.error(f"Error converting audio: {e}")
                 # Clear part of buffer and try again next time
@@ -621,11 +703,11 @@ class WebSocketHandler:
                 self.input_buffer = self.input_buffer[half_size:]
                 return
             
-            # Add some checks for audio quality
-            if len(pcm_audio) < 640:  # Reduced from 1000 to 640 samples (40ms at 16kHz)
+            # Reduced minimum threshold for processing
+            if len(pcm_audio) < 320:  # Reduced from 640 to 320 samples (20ms at 16kHz)
                 logger.warning(f"Audio chunk too small: {len(pcm_audio)} samples, accumulating more")
                 return
-
+    
             
             # Create a list to collect transcription results
             transcription_results = []
@@ -634,7 +716,10 @@ class WebSocketHandler:
             async def transcription_callback(result):
                 if hasattr(result, 'is_final') and result.is_final:
                     transcription_results.append(result)
-                    logger.debug(f"Received final Google Speech result: {result.text}")
+                    logger.info(f"Received final Google Speech result: {result.text}")
+                else:
+                    # Log interim results too
+                    logger.info(f"Received interim result: {result.text if hasattr(result, 'text') else str(result)}")
             
             # Process audio through Google Cloud Speech
             try:
@@ -648,6 +733,7 @@ class WebSocketHandler:
                     self.google_speech_active = True
                 
                 # Process chunk with Google Cloud Speech
+                logger.info(f"Sending {len(audio_bytes)} bytes to Google Speech")
                 await self.speech_client.process_audio_chunk(
                     audio_chunk=audio_bytes,
                     callback=transcription_callback
@@ -661,10 +747,13 @@ class WebSocketHandler:
                     # Use the best result based on confidence
                     best_result = max(transcription_results, key=lambda r: getattr(r, 'confidence', 0))
                     transcription = best_result.text
+                    logger.info(f"Best transcription result: {transcription}")
                 else:
                     # If no results, try stopping and restarting the session to get final results
                     if self.google_speech_active:
+                        logger.info("No transcription results, stopping and restarting Google Speech")
                         final_transcription, _ = await self.speech_client.stop_streaming()
+                        logger.info(f"Final transcription from session stop: {final_transcription}")
                         await self.speech_client.start_streaming()
                         self.google_speech_active = True
                         transcription = final_transcription
@@ -700,6 +789,7 @@ class WebSocketHandler:
                     # Process through knowledge base
                     try:
                         if hasattr(self.pipeline, 'query_engine'):
+                            logger.info("Sending query to knowledge base")
                             query_result = await self.pipeline.query_engine.query(transcription)
                             response = query_result.get("response", "")
                             
@@ -719,6 +809,8 @@ class WebSocketHandler:
                                 # Update state
                                 self.last_transcription = transcription
                                 self.last_response_time = time.time()
+                        else:
+                            logger.error("Pipeline does not have query_engine attribute")
                     except Exception as e:
                         logger.error(f"Error processing through knowledge base: {e}", exc_info=True)
                         
@@ -730,7 +822,7 @@ class WebSocketHandler:
                     # If no valid transcription, reduce buffer size but keep some for context
                     half_size = len(self.input_buffer) // 2
                     self.input_buffer = self.input_buffer[half_size:]
-                    logger.debug(f"No valid transcription, reduced buffer to {len(self.input_buffer)} bytes")
+                    logger.info(f"No valid transcription, reduced buffer to {len(self.input_buffer)} bytes")
             
             except Exception as e:
                 logger.error(f"Error during Google Speech processing: {e}", exc_info=True)

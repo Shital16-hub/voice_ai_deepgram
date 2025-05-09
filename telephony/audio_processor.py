@@ -311,12 +311,12 @@ class MulawBufferProcessor:
     chunks and reduce "Very small mulaw data" warnings.
     """
     
-    def __init__(self, min_chunk_size=640):  # 80ms at 8kHz
+    def __init__(self, min_chunk_size=320):  # Reduced from 640 to 320 bytes (40ms at 8kHz)
         """
         Initialize buffer processor.
         
         Args:
-            min_chunk_size: Minimum chunk size to process (default 640 bytes = 80ms at 8kHz)
+            min_chunk_size: Minimum chunk size to process (default 320 bytes = 40ms at 8kHz)
         """
         self.buffer = bytearray()
         self.min_chunk_size = min_chunk_size
@@ -338,7 +338,7 @@ class MulawBufferProcessor:
             
         # Log small chunks at debug level instead of warning
         if 0 < len(data) < 320:  # Less than 40ms at 8kHz
-            logger.debug(f"Small mulaw data: {len(data)} bytes (accumulating)")
+            logger.info(f"Small mulaw data: {len(data)} bytes (accumulating)")
             
         # Add to buffer
         self.buffer.extend(data)
@@ -351,7 +351,7 @@ class MulawBufferProcessor:
             # Clear buffer
             self.buffer = bytearray()
             
-            logger.debug(f"Processed mulaw buffer: {len(result)} bytes")
+            logger.info(f"Processed mulaw buffer: {len(result)} bytes")
             return result
         
         # Not enough data yet

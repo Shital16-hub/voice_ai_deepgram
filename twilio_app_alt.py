@@ -51,7 +51,7 @@ def configure_logging():
     root_logger.addHandler(console_handler)
     
     # Set specific loggers to higher levels to reduce noise
-    logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)  # Only show errors
+    logging.getLogger('telephony.audio_processor').setLevel(logging.INFO)  # Changed from ERROR to INFO
     
     # Create a filter to ignore specific messages
     class IgnoreSmallMulawFilter(logging.Filter):
@@ -94,6 +94,10 @@ async def initialize_system():
     elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not elevenlabs_api_key:
         logger.warning("ELEVENLABS_API_KEY not set in environment, attempting to proceed without it")
+
+    # Check Google Cloud credentials
+    google_credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    logger.info(f"GOOGLE_APPLICATION_CREDENTIALS: {google_credentials}")
     
     # Define a telephony-optimized prompt
     telephony_prompt = (
@@ -195,17 +199,16 @@ def handle_incoming_call():
         # Create Connect with Stream for bi-directional audio
         connect = Connect()
         
-        # Create Stream with track parameter for feedback prevention
+        # Create Stream with simplified track parameter for debugging
         stream = Stream(
             name="stream", 
             url=ws_url, 
-            track="inbound_track"  # Specify track as inbound for feedback prevention
+            track="inbound"  # Simplified from inbound_track to just inbound
         )
         
-        # Set parameters
-        stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
-        # Add explicit parameter for track
-        stream.parameter(name="track", value="inbound_track")
+        # Set parameters more explicitly
+        stream.parameter(name="mediaEncoding", value="audio/x-mulaw")
+        stream.parameter(name="sampleRate", value="8000")
         
         # Add stream to connect
         connect.append(stream)
@@ -215,6 +218,7 @@ def handle_incoming_call():
         
         # Return TwiML
         twiml = str(response)
+        logger.info(f"Generated TwiML: {twiml}")
         return Response(twiml, mimetype='text/xml')
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
@@ -272,7 +276,7 @@ def handle_status_callback():
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream with feedback prevention."""
+    """Handle WebSocket media stream with enhanced debugging."""
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
     if not twilio_handler or not voice_ai_pipeline:
@@ -331,6 +335,9 @@ def handle_media_stream(call_sid):
                 if message is None:
                     continue
                 
+                # Add detailed debug logging for all incoming WebSocket messages
+                logger.info(f"WebSocket message received: {message[:100]}...")
+                
                 # Schedule the message to be processed in the event loop
                 asyncio.run_coroutine_threadsafe(
                     ws_handler.handle_message(message, ws),
@@ -383,6 +390,29 @@ def set_debug_level(level):
     logging.getLogger('speech_to_text.google_cloud_stt').setLevel(valid_levels[level.lower()])
     
     return jsonify({"success": f"Log level set to {level}"})
+
+@app.route('/debug/stats', methods=['GET'])
+def get_debug_stats():
+    """Return debugging statistics."""
+    stats = {
+        "active_calls": 0,
+        "google_stt_status": "unknown",
+        "elevenlabs_status": "unknown"
+    }
+    
+    # Get active call count
+    if twilio_handler and twilio_handler.call_manager:
+        stats["active_calls"] = twilio_handler.call_manager.get_active_call_count()
+        stats["call_stats"] = twilio_handler.call_manager.get_call_stats()
+    
+    # Add call event loop info
+    stats["active_websockets"] = len(call_event_loops)
+    
+    # Add Google and ElevenLabs credential status
+    stats["google_credentials"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") is not None
+    stats["elevenlabs_api_key"] = os.environ.get("ELEVENLABS_API_KEY") is not None
+    
+    return jsonify(stats)
 
 @app.route('/test/audio-processing', methods=['POST'])
 def test_audio_processing():
