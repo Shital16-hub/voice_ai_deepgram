@@ -1,5 +1,5 @@
 """
-OpenAI Assistant management for the knowledge base.
+OpenAI Assistant management for the knowledge base with integrated Pinecone search.
 """
 import logging
 import asyncio
@@ -14,33 +14,40 @@ from knowledge_base.utils.token_counter import TokenCounter
 logger = logging.getLogger(__name__)
 
 class OpenAIAssistantManager:
-    """Manage OpenAI Assistants for the voice AI agent."""
+    """Manage OpenAI Assistants for the voice AI agent with knowledge base integration."""
     
-    def __init__(self):
+    def __init__(self, pinecone_manager=None):
         """Initialize OpenAI Assistant Manager."""
         self.config = get_openai_config()
         self.client = AsyncOpenAI(api_key=self.config["api_key"])
         self.assistant_id = None
         self.token_counter = TokenCounter(self.config["model"])
         self.system_instructions = self._get_system_instructions()
+        self.pinecone_manager = pinecone_manager
     
     def _get_system_instructions(self) -> str:
         """Get system instructions for the assistant."""
         return """You are a helpful assistant for a voice AI agent that handles customer inquiries.
 
 IMPORTANT GUIDELINES:
-1. Keep responses conversational and concise for voice interactions
-2. When you need specific information, use the search_knowledge_base function
+1. Keep responses conversational and concise for voice interactions (max 2-3 sentences)
+2. When you need specific information, search the knowledge base using the search_knowledge_base function
 3. Always maintain context within the conversation
 4. For complex queries, break down information into digestible parts
-5. If you don't know something, admit it and offer to search for information
-6. Prioritize accuracy and cite sources when using retrieved information
+5. If you don't know something, search the knowledge base before admitting you don't know
+6. Prioritize accuracy and cite information when available
 
 VOICE INTERACTION CONSIDERATIONS:
 - Speak naturally, as if in a phone conversation
 - Use brief pauses (commas) for better speech synthesis
 - Avoid long lists or complex formatting
-- Summarize key points clearly"""
+- Summarize key points clearly
+- Always search the knowledge base when asked about specific products, services, pricing, or features
+
+SEARCH STRATEGY:
+- Use relevant keywords for searches
+- Try different search terms if initial search doesn't yield results
+- Search the knowledge base for any question about the company, products, services, pricing, or features"""
     
     async def create_assistant(self) -> str:
         """Create a new OpenAI assistant with function calling capabilities."""
@@ -54,13 +61,13 @@ VOICE INTERACTION CONSIDERATIONS:
                         "type": "function",
                         "function": {
                             "name": "search_knowledge_base",
-                            "description": "Search the knowledge base for relevant information",
+                            "description": "Search the knowledge base for relevant information about products, services, pricing, or features",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
                                     "query": {
                                         "type": "string",
-                                        "description": "The search query"
+                                        "description": "The search query using relevant keywords"
                                     },
                                     "filters": {
                                         "type": "object",
@@ -194,6 +201,11 @@ VOICE INTERACTION CONSIDERATIONS:
         except Exception as e:
             logger.error(f"Error submitting tool outputs: {e}")
             raise OpenAIError(f"Failed to submit tool outputs: {str(e)}")
+    
+    def set_pinecone_manager(self, pinecone_manager):
+        """Set the Pinecone manager for search functionality."""
+        self.pinecone_manager = pinecone_manager
+        logger.info("Pinecone manager set for search functionality")
     
     async def get_thread_messages(self, thread_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         """Get messages from a thread."""

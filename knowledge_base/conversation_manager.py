@@ -1,5 +1,5 @@
 """
-Conversation management using OpenAI Assistants API.
+Conversation management using OpenAI Assistants API with Pinecone integration.
 """
 import logging
 import asyncio
@@ -15,7 +15,7 @@ from knowledge_base.utils.rate_limiter import RateLimiter
 logger = logging.getLogger(__name__)
 
 class ConversationManager:
-    """Manage conversations using OpenAI Assistants API."""
+    """Manage conversations using OpenAI Assistants API with Pinecone integration."""
     
     def __init__(self):
         """Initialize conversation manager."""
@@ -24,12 +24,21 @@ class ConversationManager:
         self.cache = CacheManager()
         self.rate_limiter = RateLimiter()
         self.user_threads: Dict[str, str] = {}
+        self.initialized = False
     
     async def init(self):
         """Initialize all components."""
         try:
-            await self.openai_manager.get_or_create_assistant()
+            # Initialize Pinecone first
             await self.pinecone_manager.init()
+            
+            # Set Pinecone manager in OpenAI manager for search functionality
+            self.openai_manager.set_pinecone_manager(self.pinecone_manager)
+            
+            # Create or get assistant
+            await self.openai_manager.get_or_create_assistant()
+            
+            self.initialized = True
             logger.info("Conversation manager initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing conversation manager: {e}")
@@ -46,6 +55,10 @@ class ConversationManager:
     
     async def handle_user_input(self, user_id: str, message: str) -> Dict[str, Any]:
         """Handle user input and return response."""
+        if not self.initialized:
+            logger.warning("Conversation manager not initialized")
+            return {"response": "System is initializing. Please try again.", "error": "not_initialized"}
+        
         try:
             # Check rate limits
             if not await self.rate_limiter.check_rate_limit(user_id, 1000):
@@ -86,6 +99,15 @@ class ConversationManager:
     
     async def handle_user_input_streaming(self, user_id: str, message: str) -> AsyncIterator[Dict[str, Any]]:
         """Handle user input with streaming response."""
+        if not self.initialized:
+            logger.warning("Conversation manager not initialized")
+            yield {
+                "chunk": "System is initializing. Please try again.",
+                "done": True,
+                "error": "not_initialized"
+            }
+            return
+        
         try:
             # Check rate limits
             if not await self.rate_limiter.check_rate_limit(user_id, 1000):
@@ -232,6 +254,8 @@ class ConversationManager:
                         "output": formatted_results
                     })
                     
+                    logger.info(f"Knowledge base search for '{query}' returned {len(results)} results")
+                    
                 except Exception as e:
                     logger.error(f"Error in search_knowledge_base: {e}")
                     tool_outputs.append({
@@ -249,9 +273,15 @@ class ConversationManager:
         formatted = "Found the following relevant information:\n\n"
         
         for i, result in enumerate(results, 1):
-            formatted += f"**Result {i}** (Relevance: {result['score']:.3f})\n"
-            formatted += f"Source: {result.get('source', 'Unknown')}\n"
-            formatted += f"Content: {result.get('text', 'No content available')}\n\n"
+            # Extract metadata
+            metadata = result.get("metadata", {})
+            score = result.get("score", 0.0)
+            text = metadata.get("text", result.get("text", "No content available"))
+            source = metadata.get("source", "Unknown")
+            
+            formatted += f"**Source {i}** (Relevance: {score:.3f})\n"
+            formatted += f"Document: {source}\n"
+            formatted += f"Content: {text[:500]}...\n\n"  # Limit content length
         
         return formatted
     
