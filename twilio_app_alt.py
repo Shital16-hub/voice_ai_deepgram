@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Twilio application without barge-in detection.
+Twilio application with proper knowledge base integration.
 """
 import os
 import sys
@@ -17,53 +17,46 @@ from simple_websocket import Server
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 
-# Import your modules
+# Import your modules - Updated imports
 from telephony.audio import MulawBufferProcessor  
 from telephony.audio_processor import AudioProcessor  
 from telephony.twilio_handler import TwilioHandler
 from telephony.websocket_handler import WebSocketHandler
 from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
-from voice_ai_agent import VoiceAIAgent
+
+# Import new knowledge base components
+from knowledge_base.conversation_manager import ConversationManager
+from knowledge_base.query_engine import QueryEngine
+from knowledge_base.pinecone_manager import PineconeManager
+
+# Import STT integration
+from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
+from integration.stt_integration import STTIntegration
+from integration.tts_integration import TTSIntegration
 from integration.pipeline import VoiceAIAgentPipeline
-from text_to_speech import ElevenLabsTTS
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging with reduced noise from small audio chunks
+# Configure logging
 def configure_logging():
-    # Set up root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     
-    # Remove existing handlers to avoid duplication
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
-    # Create a handler for console output
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     
-    # Create a formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     
-    # Add handler to root logger
     root_logger.addHandler(console_handler)
     
-    # Set specific loggers to higher levels to reduce noise
-    logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)  # Only show errors
+    # Reduce noise from audio processing
+    logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)
     
-    # Create a filter to ignore specific messages
-    class IgnoreSmallMulawFilter(logging.Filter):
-        def filter(self, record):
-            return not (record.getMessage().startswith("Very small mulaw data"))
-    
-    # Add filter to the handlers
-    for handler in root_logger.handlers:
-        handler.addFilter(IgnoreSmallMulawFilter())
-    
-    # Optionally create a file handler for full logs
     file_handler = logging.FileHandler('full_debug.log')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
@@ -71,7 +64,6 @@ def configure_logging():
     
     return root_logger
 
-# Configure logging
 logger = configure_logging()
 
 # Flask app setup
@@ -80,51 +72,18 @@ app = Flask(__name__)
 # Global instances
 twilio_handler = None
 voice_ai_pipeline = None
+conversation_manager = None
+query_engine = None
 base_url = None
 
 # Dictionary to store event loops and state for each call
 call_event_loops = {}
 
-# Helper function to split audio into chunks
-def split_audio_into_chunks(audio_data: bytes) -> list:
-    """
-    Split audio into smaller chunks for processing.
-    
-    Args:
-        audio_data: Audio data to split
-        
-    Returns:
-        List of chunks
-    """
-    # Simple chunking
-    chunk_size = 800  # 100ms at 8kHz
-    chunks = []
-    
-    # Split into equal-sized chunks
-    for i in range(0, len(audio_data), chunk_size):
-        chunks.append(audio_data[i:i+chunk_size])
-        
-    return chunks
-
 async def initialize_system():
-    """Initialize all system components with ElevenLabs TTS integration."""
-    global twilio_handler, voice_ai_pipeline, base_url
+    """Initialize all system components with proper knowledge base integration."""
+    global twilio_handler, voice_ai_pipeline, conversation_manager, query_engine, base_url
     
-    logger.info("Initializing Voice AI Agent with ElevenLabs TTS integration...")
-    
-    # Verify ElevenLabs API key is set
-    elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
-    if not elevenlabs_api_key:
-        logger.warning("ELEVENLABS_API_KEY not set in environment, attempting to proceed without it")
-    
-    # Define a generic telephony-optimized prompt
-    telephony_prompt = (
-        "This is a telephone conversation with a customer. "
-        "The customer may ask questions about products, services, pricing, or features. "
-        "Transcribe exactly what is spoken, filtering out noise, static, and line interference. "
-        "Common terms in business conversations include: pricing, plan, cost, features, "
-        "monthly, subscription, support, upgrade, details, information."
-    )
+    logger.info("Initializing Voice AI Agent with OpenAI + Pinecone knowledge base...")
     
     # Get base URL from environment
     base_url = os.getenv('BASE_URL')
@@ -134,53 +93,78 @@ async def initialize_system():
     
     logger.info(f"Using BASE_URL: {base_url}")
     
-    # Initialize Voice AI Agent with optimized parameters
-    agent = VoiceAIAgent(
-        storage_dir='./storage',
-        model_name='mistral:7b-instruct-v0.2-q4_0',
-        llm_temperature=0.7,
-        # Pass optimized telephony parameters
-        whisper_initial_prompt=telephony_prompt,
-        whisper_temperature=0.0,  # Greedy decoding for more reliable transcription
-        whisper_no_context=True,  # Each utterance is independent
-        whisper_preset="default",
-        # Pass ElevenLabs parameters
-        elevenlabs_api_key=elevenlabs_api_key,
-        elevenlabs_voice_id=os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'),  # Default to Bella voice
-        elevenlabs_model_id=os.getenv('TTS_MODEL_ID', 'eleven_turbo_v2')  # Latest model
+    # 1. Initialize Speech Recognition
+    logger.info("Initializing Google Cloud Speech Recognition...")
+    speech_recognizer = GoogleCloudStreamingSTT(
+        language="en-US",
+        sample_rate=16000,
+        encoding="LINEAR16",
+        channels=1,
+        interim_results=True,
+        enhanced_model=True
     )
-    await agent.init()
     
-    # Initialize TTS integration with ElevenLabs
-    from integration.tts_integration import TTSIntegration
-    tts = TTSIntegration(
+    # 2. Initialize STT Integration
+    stt_integration = STTIntegration(
+        speech_recognizer=speech_recognizer,
+        language="en-US"
+    )
+    await stt_integration.init()
+    
+    # 3. Initialize Pinecone Manager
+    logger.info("Initializing Pinecone Manager...")
+    pinecone_manager = PineconeManager()
+    await pinecone_manager.init()
+    
+    # 4. Initialize OpenAI Assistant Manager with Pinecone
+    logger.info("Initializing OpenAI Assistant Manager...")
+    from knowledge_base.openai_assistant_manager import OpenAIAssistantManager
+    openai_manager = OpenAIAssistantManager()
+    openai_manager.set_pinecone_manager(pinecone_manager)
+    await openai_manager.get_or_create_assistant()
+    
+    # 5. Initialize Conversation Manager
+    logger.info("Initializing Conversation Manager...")
+    conversation_manager = ConversationManager()
+    await conversation_manager.init()
+    
+    # 6. Initialize Query Engine
+    logger.info("Initializing Query Engine...")
+    query_engine = QueryEngine()
+    await query_engine.init()
+    
+    # 7. Initialize TTS Integration
+    logger.info("Initializing TTS Integration...")
+    tts_integration = TTSIntegration(
         voice_id=os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'),
         enable_caching=True
     )
-    await tts.init()
+    await tts_integration.init()
     
-    # Create pipeline
+    # 8. Create Pipeline with all components
+    logger.info("Creating Voice AI Pipeline...")
     voice_ai_pipeline = VoiceAIAgentPipeline(
-        speech_recognizer=agent.speech_recognizer,
-        conversation_manager=agent.conversation_manager,
-        query_engine=agent.query_engine,
-        tts_integration=tts
+        speech_recognizer=stt_integration,  # Pass the STT integration instead of raw speech recognizer
+        conversation_manager=conversation_manager,
+        query_engine=query_engine,
+        tts_integration=tts_integration
     )
     
-    # Initialize Twilio handler
+    # 9. Initialize Twilio handler
     twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
     await twilio_handler.start()
     
-    logger.info("System initialized successfully with ElevenLabs TTS integration")
+    logger.info("System initialized successfully with knowledge base integration")
 
+# Rest of your Flask routes remain the same...
 @app.route('/', methods=['GET'])
 def index():
     """Simple test endpoint."""
-    return "Voice AI Agent is running with ElevenLabs TTS integration!"
+    return "Voice AI Agent is running with OpenAI + Pinecone knowledge base!"
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
-    """Handle incoming voice calls without barge-in support."""
+    """Handle incoming voice calls."""
     logger.info("Received incoming call request")
     logger.info(f"Request headers: {request.headers}")
     logger.info(f"Request form data: {request.form}")
@@ -204,10 +188,10 @@ def handle_incoming_call():
         # Add call to manager
         twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
         
-        # Create TwiML response without barge-in handling
+        # Create TwiML response
         response = VoiceResponse()
         
-        # Add a 1 second silence before starting - this helps avoid initial echo problems
+        # Add initial silence
         response.pause(length=1)
         
         # Create WebSocket URL for streaming
@@ -216,7 +200,6 @@ def handle_incoming_call():
         # Create Connect with Stream for bi-directional audio
         connect = Connect()
         
-        # Create Stream with standard parameters
         stream = Stream(
             name="stream", 
             url=ws_url, 
@@ -226,10 +209,7 @@ def handle_incoming_call():
         # Set basic parameters
         stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
         
-        # Add stream to connect
         connect.append(stream)
-        
-        # Add connect to response
         response.append(connect)
         
         # Return TwiML
@@ -237,7 +217,6 @@ def handle_incoming_call():
         return Response(twiml, mimetype='text/xml')
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
-        # Fallback response
         fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say>An error occurred. Please try again later.</Say>
@@ -254,30 +233,23 @@ def handle_status_callback():
         logger.error("System not initialized")
         return Response('', status=204)
     
-    # Get status parameters
     call_sid = request.form.get('CallSid')
     call_status = request.form.get('CallStatus')
     
     logger.info(f"Call {call_sid} status: {call_status}")
     
     try:
-        # Handle status update
         twilio_handler.handle_status_callback(call_sid, call_status)
         
-        # Clean up event loop if call is completed and exists in call_event_loops
         if call_status in ['completed', 'failed', 'busy', 'no-answer'] and call_sid in call_event_loops:
             loop_info = call_event_loops[call_sid]
-            # Signal termination
             if 'terminate_flag' in loop_info:
                 loop_info['terminate_flag'].set()
                 
-            # Remove from dictionary
             if loop_info.get('thread'):
-                # Wait for thread to join with timeout
                 thread = loop_info['thread']
                 thread.join(timeout=1.0)
                 
-            # Remove from tracking
             try:
                 del call_event_loops[call_sid]
                 logger.info(f"Cleaned up event loop resources for call {call_sid}")
@@ -291,7 +263,7 @@ def handle_status_callback():
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream without barge-in detection."""
+    """Handle WebSocket media stream."""
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
     if not twilio_handler or not voice_ai_pipeline:
@@ -303,13 +275,12 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Initialize WebSocketHandler without barge-in handling
+        # Initialize WebSocketHandler with the properly configured pipeline
         ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
         
         # Create a new event loop for this WebSocket connection
         loop = asyncio.new_event_loop()
         
-        # Create a thread to run the event loop
         def run_ws_handler_loop():
             asyncio.set_event_loop(loop)
             try:
@@ -362,7 +333,6 @@ def handle_media_stream(call_sid):
             if 'loop' in info and info['loop'].is_running():
                 info['loop'].call_soon_threadsafe(info['loop'].stop)
             
-            # Remove from tracking
             del call_event_loops[call_sid]
         
         if ws:
@@ -374,7 +344,6 @@ def handle_media_stream(call_sid):
         logger.info(f"WebSocket connection cleanup complete for call {call_sid}")
         return ""
 
-# Function to initialize the system synchronously
 def init_system():
     """Run the async initialization in a synchronous context."""
     loop = asyncio.new_event_loop()
@@ -384,9 +353,8 @@ def init_system():
     finally:
         loop.close()
 
-# Starting point of the application
 if __name__ == '__main__':
-    print("Starting Voice AI Agent with ElevenLabs TTS integration...")
+    print("Starting Voice AI Agent with OpenAI + Pinecone knowledge base...")
     
     # Initialize the system before starting the Flask app
     init_system()

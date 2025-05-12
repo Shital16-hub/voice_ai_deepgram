@@ -51,8 +51,6 @@ class VoiceAIAgentPipeline:
         self._common_responses = {
             "hello": "Hello! How can I help you today?",
             "hi": "Hi there! What can I do for you?",
-            "price": "I'd be happy to help you with pricing information.",
-            "cost": "Let me help you understand our costs and pricing.",
             "thank you": "You're welcome! Is there anything else I can help you with?",
             "thanks": "You're welcome! Is there anything else I can help you with?",
             "bye": "Thank you for calling. Have a great day!",
@@ -220,40 +218,58 @@ class VoiceAIAgentPipeline:
     async def _transcribe_audio_optimized(self, audio: np.ndarray) -> tuple[str, float]:
         """Optimized audio transcription."""
         try:
-            # Start streaming session
-            if not (hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming):
-                await self.speech_recognizer.start_streaming()
-            
-            # Convert to bytes format
-            audio_bytes = (audio * 32767).astype(np.int16).tobytes()
-            
-            # Track results
-            final_results = []
-            
-            async def collect_result(result):
-                if result.is_final:
-                    final_results.append(result)
-            
-            # Process audio
-            await self.speech_recognizer.process_audio_chunk(audio_bytes, collect_result)
-            
-            # Get final result
-            if final_results:
-                best_result = max(final_results, key=lambda r: r.confidence)
-                transcription = best_result.text
-                duration = best_result.end_time - best_result.start_time if best_result.end_time > 0 else len(audio) / 16000
+            # If we have an STT integration object, use it
+            if hasattr(self.speech_recognizer, 'transcribe_audio_data'):
+                # This is an STTIntegration object
+                result = await self.speech_recognizer.transcribe_audio_data(
+                    audio_data=audio,
+                    is_short_audio=False
+                )
+                
+                transcription = result.get('transcription', '')
+                duration = result.get('duration', len(audio) / 16000)
+                
+                # Clean transcription
+                if hasattr(self, '_clean_transcription'):
+                    transcription = self._clean_transcription(transcription)
+                
+                return transcription, duration
             else:
-                # Fallback: stop and restart streaming to get result
-                transcription, duration = await self.speech_recognizer.stop_streaming()
-                if transcription:
-                    await self.speech_recognizer.start_streaming()  # Restart for next use
-            
-            # Clean transcription
-            if hasattr(self, '_clean_transcription'):
-                transcription = self._clean_transcription(transcription)
-            
-            return transcription, duration
-            
+                # This is a raw GoogleCloudStreamingSTT object
+                # Start streaming session if not started
+                if not (hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming):
+                    await self.speech_recognizer.start_streaming()
+                
+                # Convert to bytes format
+                audio_bytes = (audio * 32767).astype(np.int16).tobytes()
+                
+                # Track results
+                final_results = []
+                
+                async def collect_result(result):
+                    if result.is_final:
+                        final_results.append(result)
+                
+                # Process audio
+                await self.speech_recognizer.process_audio_chunk(audio_bytes, collect_result)
+                
+                # Get final result
+                if final_results:
+                    best_result = max(final_results, key=lambda r: r.confidence)
+                    transcription = best_result.text
+                    duration = best_result.end_time - best_result.start_time if best_result.end_time > 0 else len(audio) / 16000
+                else:
+                    # Fallback: stop and restart streaming to get result
+                    transcription, duration = await self.speech_recognizer.stop_streaming()
+                    if transcription:
+                        await self.speech_recognizer.start_streaming()  # Restart for next use
+                
+                # Clean transcription
+                if hasattr(self, '_clean_transcription'):
+                    transcription = self._clean_transcription(transcription)
+                
+                return transcription, duration
+                
         except Exception as e:
             logger.error(f"Error in optimized transcription: {e}")
             return "", len(audio) / 16000
@@ -336,17 +352,36 @@ class VoiceAIAgentPipeline:
                 del self.response_cache[key]
     
     def _get_fallback_response(self, transcription: str) -> str:
-        """Get fallback response based on transcription."""
-        normalized = transcription.lower()
+        """Get fallback response based on transcription - works for any domain."""
+        transcription_lower = transcription.lower()
         
-        if any(word in normalized for word in ["price", "pricing", "cost", "plan"]):
-            return "I understand you're asking about pricing. We offer several plans to meet different needs. Would you like me to explain our pricing options?"
-        elif any(word in normalized for word in ["feature", "features", "capability"]):
-            return "I can tell you about our features. What specific functionality would you like to know about?"
-        elif any(word in normalized for word in ["help", "support", "question"]):
-            return "I'm here to help! What specific question do you have?"
+        # Question words - suggest clarification
+        if any(word in transcription_lower for word in ["what", "how", "when", "where", "why", "which"]):
+            return "I'd be happy to help answer that. Could you provide a bit more context or detail?"
+        
+        # Help requests - offer assistance
+        elif any(word in transcription_lower for word in ["help", "support", "assist", "need"]):
+            return "I'm here to help! What specific information are you looking for?"
+        
+        # Information requests - ask for specifics
+        elif any(word in transcription_lower for word in ["tell", "explain", "show", "describe", "information", "info"]):
+            return "I can provide information about that. Could you be more specific about what you'd like to know?"
+        
+        # Comparison requests - ask for clarification
+        elif any(word in transcription_lower for word in ["compare", "difference", "better", "versus", "vs"]):
+            return "I can help you compare different options. What specifically would you like me to compare?"
+        
+        # Yes/No clarifications
+        elif transcription_lower in ["yes", "yeah", "yep", "no", "nope"]:
+            return "Could you please provide more context about what you'd like to know?"
+        
+        # Very short responses
+        elif len(transcription_lower.split()) < 3:
+            return "I didn't quite catch that. Could you tell me more about what you're looking for?"
+        
+        # Default - generic response that works for any domain
         else:
-            return "I understand you have a question. Could you please rephrase it or be more specific?"
+            return "I understand you have a question. Could you please rephrase it or provide more details so I can better assist you?"
     
     def _clean_transcription(self, text: str) -> str:
         """Clean transcription for better processing."""

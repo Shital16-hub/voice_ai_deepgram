@@ -1,5 +1,5 @@
 """
-Fixed Knowledge base processing and TTS generation.
+Knowledge base processing and TTS generation with proper integration.
 """
 import logging
 import os
@@ -9,63 +9,37 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 class KnowledgeBaseProcessor:
-    """Handles knowledge base queries and TTS generation - Fixed version."""
+    """Handles knowledge base queries and TTS generation with proper integration."""
     
     def __init__(self, pipeline):
         self.pipeline = pipeline
         self.conversation_manager = None
         self.query_engine = None
-        self.tts_client = None
+        self.tts_integration = None
         
-        # Initialize components properly
+        # Get components from pipeline
         if hasattr(pipeline, 'conversation_manager'):
             self.conversation_manager = pipeline.conversation_manager
         if hasattr(pipeline, 'query_engine'):
             self.query_engine = pipeline.query_engine
-            
-        # Get TTS from pipeline or create it
         if hasattr(pipeline, 'tts_integration'):
             self.tts_integration = pipeline.tts_integration
-        else:
-            self.tts_integration = None
+            
+        logger.info("Knowledge base processor initialized with pipeline components")
     
     async def init_tts(self) -> None:
         """Initialize TTS components if not already initialized."""
-        if self.tts_integration and not self.tts_client:
-            self.tts_client = self.tts_integration.tts_client
+        if self.tts_integration and self.tts_integration.initialized:
+            logger.info("TTS already initialized")
+            return
             
-        if not self.tts_client:
-            try:
-                # Import and initialize ElevenLabs TTS directly
-                from text_to_speech import ElevenLabsTTS
-                
-                # Get API key and settings from environment
-                api_key = os.environ.get("ELEVENLABS_API_KEY")
-                voice_id = os.environ.get("TTS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
-                model_id = os.environ.get("TTS_MODEL_ID", "eleven_turbo_v2")
-                
-                if not api_key:
-                    raise ValueError("ELEVENLABS_API_KEY not found in environment")
-                
-                # Create ElevenLabs TTS client optimized for Twilio
-                self.tts_client = ElevenLabsTTS(
-                    api_key=api_key,
-                    voice_id=voice_id,
-                    model_id=model_id,
-                    container_format="mulaw",  # Use mulaw for Twilio compatibility
-                    sample_rate=8000,  # 8kHz for Twilio
-                    optimize_streaming_latency=2,  # Balanced optimization for quality
-                    enable_caching=True
-                )
-                
-                logger.info(f"Initialized ElevenLabs TTS with voice ID: {voice_id}, model: {model_id}")
-            except Exception as e:
-                logger.error(f"Error initializing TTS: {e}")
-                raise
+        if not self.tts_integration:
+            logger.error("TTS integration not found in pipeline")
+            raise ValueError("TTS integration not available")
     
     async def generate_response(self, transcription: str, user_id: str) -> Optional[str]:
         """
-        Generate response from knowledge base with improved error handling.
+        Generate response from knowledge base.
         
         Args:
             transcription: User's transcription
@@ -92,15 +66,13 @@ class KnowledgeBaseProcessor:
                 if response_result and "response" in response_result:
                     response = response_result["response"]
                     
-                    # Check if response is empty or generic error message
-                    if not response or response.strip() == "I'm sorry, I couldn't generate a response.":
-                        logger.warning("Conversation manager returned empty/error response")
-                        response = None
-                    else:
+                    if response and response.strip():
                         logger.info(f"Conversation manager generated response: {response[:100]}...")
                         return response
+                    else:
+                        logger.warning("Conversation manager returned empty response")
             
-            # Fallback to query engine if conversation manager failed
+            # Fallback to query engine
             if not response and self.query_engine:
                 logger.info(f"Fallback to query engine: '{transcription}'")
                 query_result = await self.query_engine.query(transcription, user_id=user_id)
@@ -111,16 +83,10 @@ class KnowledgeBaseProcessor:
                         logger.info(f"Query engine generated response: {response[:100]}...")
                         return response
             
-            # Final fallback - contextual error message
+            # Final fallback
             if not response:
                 logger.warning(f"No response generated for: '{transcription}'")
-                # Provide a helpful fallback based on common queries
-                if any(word in transcription.lower() for word in ["price", "pricing", "cost", "plan"]):
-                    return "I understand you're asking about pricing. We offer several plans to meet different needs. Would you like me to explain our pricing structure?"
-                elif any(word in transcription.lower() for word in ["feature", "features", "capability"]):
-                    return "I can tell you about our features. What specific functionality are you interested in learning about?"
-                else:
-                    return "I'm not sure I understood your question correctly. Could you please rephrase it or ask something specific?"
+                return self._get_fallback_response(transcription)
             
             return response
             
@@ -130,7 +96,7 @@ class KnowledgeBaseProcessor:
     
     async def generate_speech(self, response: str) -> Optional[bytes]:
         """
-        Generate speech audio from text response with retry logic.
+        Generate speech audio from text response.
         
         Args:
             response: Text response to convert
@@ -146,8 +112,8 @@ class KnowledgeBaseProcessor:
             # Ensure TTS is initialized
             await self.init_tts()
             
-            if not self.tts_client:
-                logger.error("TTS client not available")
+            if not self.tts_integration:
+                logger.error("TTS integration not available")
                 return None
             
             # Generate speech with retry logic
@@ -160,8 +126,8 @@ class KnowledgeBaseProcessor:
                     # Log attempt
                     logger.info(f"Generating speech (attempt {attempt + 1}): '{cleaned_text[:50]}...'")
                     
-                    # Generate speech
-                    speech_audio = await self.tts_client.synthesize(cleaned_text)
+                    # Generate speech through TTS integration
+                    speech_audio = await self.tts_integration.text_to_speech(cleaned_text)
                     
                     if speech_audio and len(speech_audio) > 0:
                         logger.info(f"Successfully generated speech: {len(speech_audio)} bytes")
@@ -183,17 +149,40 @@ class KnowledgeBaseProcessor:
             logger.error(f"Error generating speech: {e}", exc_info=True)
             return None
     
-    def _clean_text_for_speech(self, text: str) -> str:
-        """
-        Clean and prepare text for better speech synthesis.
+    def _get_fallback_response(self, transcription: str) -> str:
+        """Get contextual fallback response - works for any domain."""
+        transcription_lower = transcription.lower()
         
-        Args:
-            text: Raw text to clean
-            
-        Returns:
-            Cleaned text
-        """
-        # Remove markdown syntax
+        # Question words - suggest clarification
+        if any(word in transcription_lower for word in ["what", "how", "when", "where", "why", "which"]):
+            return "I'd be happy to help answer that. Could you provide a bit more context or detail?"
+        
+        # Help requests - offer assistance
+        elif any(word in transcription_lower for word in ["help", "support", "assist", "need"]):
+            return "I'm here to help! What specific information are you looking for?"
+        
+        # Information requests - ask for specifics
+        elif any(word in transcription_lower for word in ["tell", "explain", "show", "describe", "information", "info"]):
+            return "I can provide information about that. Could you be more specific about what you'd like to know?"
+        
+        # Comparison requests - ask for clarification
+        elif any(word in transcription_lower for word in ["compare", "difference", "better", "versus", "vs"]):
+            return "I can help you compare different options. What specifically would you like me to compare?"
+        
+        # Yes/No clarifications
+        elif transcription_lower in ["yes", "yeah", "yep", "no", "nope"]:
+            return "Could you please provide more context about what you'd like to know?"
+        
+        # Very short responses
+        elif len(transcription_lower.split()) < 3:
+            return "I didn't quite catch that. Could you tell me more about what you're looking for?"
+        
+        # Default - generic response that works for any domain
+        else:
+            return "I understand you have a question. Could you please rephrase it or provide more details so I can better assist you?"
+    
+    def _clean_text_for_speech(self, text: str) -> str:
+        """Clean and prepare text for better speech synthesis."""
         import re
         cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Remove bold
         cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)    # Remove italic

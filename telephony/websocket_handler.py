@@ -119,14 +119,18 @@ class WebSocketHandler:
         # Reset all state for new stream
         await self._reset_stream_state()
         
-        # Initialize speech recognition
-        await self.speech_manager.start_session()
+        # Initialize speech recognition properly
+        try:
+            await self.speech_manager.start_session()
+            logger.info("Speech recognition session started successfully")
+        except Exception as e:
+            logger.error(f"Error starting speech recognition: {e}")
         
         # Initialize TTS
         await self.kb_processor.init_tts()
         
         # Send welcome message quickly
-        await self.send_text_response("Welcome! How can I help you today?", ws)
+        await self.send_text_response("Hello! How can I help you today?", ws)
     
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
         """Handle media event with audio data - optimized for latency."""
@@ -300,17 +304,36 @@ class WebSocketHandler:
             self.is_speaking = False
     
     def _get_fallback_response(self, transcription: str) -> str:
-        """Get appropriate fallback response based on transcription."""
+        """Get appropriate fallback response based on transcription - works for any domain."""
         transcription_lower = transcription.lower()
         
-        if any(word in transcription_lower for word in ["price", "pricing", "cost", "plan"]):
-            return "I understand you're asking about pricing. Let me help you with that information."
-        elif any(word in transcription_lower for word in ["feature", "features", "capability"]):
-            return "I can tell you about our features. What specific functionality would you like to know about?"
-        elif any(word in transcription_lower for word in ["help", "support"]):
-            return "I'm here to help! What specific question do you have?"
+        # Question words - suggest clarification
+        if any(word in transcription_lower for word in ["what", "how", "when", "where", "why", "which"]):
+            return "I'd be happy to help answer that. Could you provide a bit more context or detail?"
+        
+        # Help requests - offer assistance
+        elif any(word in transcription_lower for word in ["help", "support", "assist", "need"]):
+            return "I'm here to help! What specific information are you looking for?"
+        
+        # Information requests - ask for specifics
+        elif any(word in transcription_lower for word in ["tell", "explain", "show", "describe", "information", "info"]):
+            return "I can provide information about that. Could you be more specific about what you'd like to know?"
+        
+        # Comparison requests - ask for clarification
+        elif any(word in transcription_lower for word in ["compare", "difference", "better", "versus", "vs"]):
+            return "I can help you compare different options. What specifically would you like me to compare?"
+        
+        # Yes/No clarifications
+        elif transcription_lower in ["yes", "yeah", "yep", "no", "nope"]:
+            return "Could you please provide more context about what you'd like to know?"
+        
+        # Very short responses
+        elif len(transcription_lower.split()) < 3:
+            return "I didn't quite catch that. Could you tell me more about what you're looking for?"
+        
+        # Default - generic response that works for any domain
         else:
-            return "I understand you have a question. Could you please rephrase it?"
+            return "I understand you have a question. Could you please rephrase it or provide more details so I can better assist you?"
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
         """Send audio data to Twilio with optimizations."""
