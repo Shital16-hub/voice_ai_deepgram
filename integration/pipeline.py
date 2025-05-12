@@ -1,43 +1,33 @@
 """
-End-to-end pipeline orchestration - Updated for OpenAI + Pinecone.
+Optimized pipeline for reduced latency - Updated for OpenAI + Pinecone.
 """
 import os
 import asyncio
 import logging
 import time
+import concurrent.futures
 from typing import Optional, Dict, Any, AsyncIterator, Union, List, Callable, Awaitable
-
 import numpy as np
-
-# Updated imports for new knowledge base
-from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
-from speech_to_text.stt_integration import STTIntegration
-from knowledge_base.conversation_manager import ConversationManager
-from knowledge_base.query_engine import QueryEngine
-from integration.tts_integration import TTSIntegration
-
-# Minimum word count for a valid user query
-MIN_VALID_WORDS = 2
 
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgentPipeline:
     """
-    End-to-end pipeline orchestration - Updated for OpenAI + Pinecone.
+    Optimized pipeline for low-latency voice conversations.
     """
     
     def __init__(
         self,
-        speech_recognizer: Union[GoogleCloudStreamingSTT, Any],
-        conversation_manager: ConversationManager,
-        query_engine: QueryEngine,
-        tts_integration: TTSIntegration
+        speech_recognizer: Any,
+        conversation_manager: Any,
+        query_engine: Any,
+        tts_integration: Any
     ):
         """
-        Initialize the pipeline with updated components.
+        Initialize the optimized pipeline.
         
         Args:
-            speech_recognizer: Initialized STT component  
+            speech_recognizer: STT component  
             conversation_manager: OpenAI conversation manager
             query_engine: OpenAI + Pinecone query engine
             tts_integration: TTS integration with ElevenLabs
@@ -47,238 +37,30 @@ class VoiceAIAgentPipeline:
         self.query_engine = query_engine
         self.tts_integration = tts_integration
         
-        # Create a helper for filtering out non-speech transcriptions
-        self.stt_helper = STTIntegration(speech_recognizer)
+        # Performance optimizations
+        self.parallel_processing = True
+        self.use_cache = True
+        self.response_cache = {}
+        self.max_cache_size = 100
         
-        # Determine if we're using Google Cloud STT
-        self.using_google_cloud = isinstance(speech_recognizer, GoogleCloudStreamingSTT)
-        logger.info(f"Pipeline initialized with {'Google Cloud' if self.using_google_cloud else 'Other'} STT and OpenAI + Pinecone")
-    
-    async def _is_valid_transcription(self, transcription: str) -> bool:
-        """Check if a transcription is valid and should be processed."""
-        cleaned_text = self.stt_helper.cleanup_transcription(transcription)
+        # Timing optimizations
+        self.min_audio_duration = 0.5  # Minimum audio duration to process
+        self.max_response_time = 3.0   # Maximum time for response generation
         
-        if not cleaned_text:
-            return False
-            
-        words = cleaned_text.split()
-        if len(words) < MIN_VALID_WORDS:
-            return False
-            
-        return True
-    
-    async def process_audio_file(
-        self,
-        audio_file_path: str,
-        user_id: Optional[str] = None,
-        output_speech_file: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Process an audio file through the complete pipeline.
-        
-        Args:
-            audio_file_path: Path to the input audio file
-            user_id: User identifier for conversation tracking
-            output_speech_file: Path to save the output speech file (optional)
-            
-        Returns:
-            Dictionary with results from each stage
-        """
-        logger.info(f"Starting pipeline with audio: {audio_file_path}")
-        
-        # Track timing for each stage
-        timings = {}
-        start_time = time.time()
-        
-        # STAGE 1: Speech-to-Text
-        logger.info("STAGE 1: Speech-to-Text")
-        stt_start = time.time()
-        
-        # Log audio file info
-        logger.info(f"Audio file size: {os.path.getsize(audio_file_path)} bytes")
-        
-        from speech_to_text.utils.audio_utils import load_audio_file
-        
-        # Load audio file
-        try:
-            audio, sample_rate = load_audio_file(audio_file_path, target_sr=16000)
-            logger.info(f"Loaded audio: {len(audio)} samples, {sample_rate}Hz")
-        except Exception as e:
-            logger.error(f"Error loading audio file: {e}", exc_info=True)
-            return {"error": f"Error loading audio file: {e}"}
-        
-        # Process for transcription
-        logger.info("Transcribing audio...")
-        transcription, duration = await self._transcribe_audio(audio)
-        
-        # Validate transcription
-        is_valid = await self._is_valid_transcription(transcription)
-        if not is_valid:
-            logger.warning(f"Transcription not valid: '{transcription}'")
-            return {"error": "No valid transcription detected", "transcription": transcription}
-            
-        timings["stt"] = time.time() - stt_start
-        logger.info(f"Transcription completed in {timings['stt']:.2f}s: {transcription}")
-        
-        # STAGE 2: Knowledge Base Query with OpenAI
-        logger.info("STAGE 2: Knowledge Base Query with OpenAI + Pinecone")
-        kb_start = time.time()
-        
-        try:
-            # Use conversation manager for response generation
-            response_result = await self.conversation_manager.handle_user_input(
-                user_id=user_id or "default_user",
-                message=transcription
-            )
-            response = response_result.get("response", "")
-            
-            if not response:
-                return {"error": "No response generated from knowledge base"}
-                
-            timings["kb"] = time.time() - kb_start
-            logger.info(f"Response generated: {response[:50]}...")
-            
-        except Exception as e:
-            logger.error(f"Error in KB stage: {e}")
-            return {"error": f"Knowledge base error: {str(e)}"}
-        
-        # STAGE 3: Text-to-Speech with ElevenLabs
-        logger.info("STAGE 3: Text-to-Speech with ElevenLabs")
-        tts_start = time.time()
-        
-        try:
-            # Convert response to speech
-            speech_audio = await self.tts_integration.text_to_speech(response)
-            
-            # Save speech audio if output file specified
-            if output_speech_file:
-                os.makedirs(os.path.dirname(os.path.abspath(output_speech_file)), exist_ok=True)
-                with open(output_speech_file, "wb") as f:
-                    f.write(speech_audio)
-                logger.info(f"Saved speech audio to {output_speech_file}")
-            
-            timings["tts"] = time.time() - tts_start
-            logger.info(f"TTS completed in {timings['tts']:.2f}s, generated {len(speech_audio)} bytes")
-            
-        except Exception as e:
-            logger.error(f"Error in TTS stage: {e}")
-            return {
-                "error": f"TTS error: {str(e)}",
-                "transcription": transcription,
-                "response": response
-            }
-        
-        # Calculate total time
-        total_time = time.time() - start_time
-        logger.info(f"Pipeline completed in {total_time:.2f}s")
-        
-        # Compile results
-        return {
-            "transcription": transcription,
-            "response": response,
-            "speech_audio_size": len(speech_audio),
-            "speech_audio": None if output_speech_file else speech_audio,
-            "timings": timings,
-            "total_time": total_time
+        # Pre-compute responses for common queries
+        self._common_responses = {
+            "hello": "Hello! How can I help you today?",
+            "hi": "Hi there! What can I do for you?",
+            "price": "I'd be happy to help you with pricing information.",
+            "cost": "Let me help you understand our costs and pricing.",
+            "thank you": "You're welcome! Is there anything else I can help you with?",
+            "thanks": "You're welcome! Is there anything else I can help you with?",
+            "bye": "Thank you for calling. Have a great day!",
+            "goodbye": "Goodbye! Feel free to call us again if you need help."
         }
-    
-    async def process_audio_streaming(
-        self,
-        audio_data: Union[bytes, np.ndarray],
-        user_id: Optional[str] = None,
-        audio_callback: Callable[[bytes], Awaitable[None]] = None
-    ) -> Dict[str, Any]:
-        """
-        Process audio data with streaming response.
         
-        Args:
-            audio_data: Audio data as bytes or numpy array
-            user_id: User identifier
-            audio_callback: Callback to handle audio data
-            
-        Returns:
-            Dictionary with stats about the process
-        """
-        logger.info(f"Starting streaming pipeline with audio: {type(audio_data)}")
-        
-        # Record start time
-        start_time = time.time()
-        
-        try:
-            # Ensure audio is in the right format
-            if isinstance(audio_data, bytes):
-                audio = np.frombuffer(audio_data, dtype=np.float32)
-            else:
-                audio = audio_data
-            
-            # Transcribe audio
-            transcription, duration = await self._transcribe_audio(audio)
-            
-            # Validate transcription
-            is_valid = await self._is_valid_transcription(transcription)
-            if not is_valid:
-                logger.warning(f"Transcription not valid: '{transcription}'")
-                return {"error": "No valid transcription detected", "transcription": transcription}
-                
-            logger.info(f"Transcription: {transcription}")
-            transcription_time = time.time() - start_time
-        except Exception as e:
-            logger.error(f"Error in transcription: {e}")
-            return {"error": f"Transcription error: {str(e)}"}
-        
-        # Stream the response
-        try:
-            total_chunks = 0
-            total_audio_bytes = 0
-            response_start_time = time.time()
-            full_response = ""
-            
-            # Use conversation manager's streaming method
-            async for chunk in self.conversation_manager.handle_user_input_streaming(
-                user_id=user_id or "default_user",
-                message=transcription
-            ):
-                chunk_text = chunk.get("chunk", "")
-                
-                if chunk_text:
-                    # Add to full response
-                    full_response += chunk_text
-                    
-                    # Convert to speech and send to callback
-                    audio_data = await self.tts_integration.text_to_speech(chunk_text)
-                    if audio_callback:
-                        await audio_callback(audio_data)
-                    
-                    # Update stats
-                    total_chunks += 1
-                    total_audio_bytes += len(audio_data)
-                
-                if chunk.get("done", False):
-                    if chunk.get("full_response"):
-                        full_response = chunk["full_response"]
-                    break
-            
-            # Calculate stats
-            response_time = time.time() - response_start_time
-            total_time = time.time() - start_time
-            
-            return {
-                "transcription": transcription,
-                "transcription_time": transcription_time,
-                "response_time": response_time,
-                "total_time": total_time,
-                "total_chunks": total_chunks,
-                "total_audio_bytes": total_audio_bytes,
-                "full_response": full_response
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in streaming response: {e}")
-            return {
-                "error": f"Streaming error: {str(e)}",
-                "transcription": transcription,
-                "transcription_time": transcription_time
-            }
+        # Executor for parallel processing
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
     
     async def process_audio_data(
         self,
@@ -287,7 +69,7 @@ class VoiceAIAgentPipeline:
         speech_output_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Process audio data through the complete pipeline.
+        Process audio with optimized latency.
         
         Args:
             audio_data: Audio data as bytes or numpy array
@@ -297,343 +79,288 @@ class VoiceAIAgentPipeline:
         Returns:
             Results dictionary
         """
-        logger.info(f"Starting pipeline with audio data: {type(audio_data)}")
-        
-        # Track timing
         start_time = time.time()
         
-        # Convert audio data if needed
-        if isinstance(audio_data, bytes):
-            audio = np.frombuffer(audio_data, dtype=np.float32)
-        else:
-            audio = audio_data
-        
-        # STAGE 1: Speech-to-Text
-        logger.info("STAGE 1: Speech-to-Text")
-        stt_start = time.time()
-        
-        # Process for transcription
-        transcription, duration = await self._transcribe_audio(audio)
-        
-        # Validate transcription
-        is_valid = await self._is_valid_transcription(transcription)
-        if not is_valid:
-            logger.warning(f"Transcription not valid: '{transcription}'")
-            return {"error": "No valid transcription detected", "transcription": transcription}
-            
-        timings = {"stt": time.time() - stt_start}
-        logger.info(f"Transcription completed in {timings['stt']:.2f}s: {transcription}")
-        
-        # STAGE 2: Knowledge Base Query
-        logger.info("STAGE 2: Knowledge Base Query with OpenAI + Pinecone")
-        kb_start = time.time()
-        
         try:
-            # Use conversation manager for response generation
-            response_result = await self.conversation_manager.handle_user_input(
-                user_id=user_id or "default_user",
-                message=transcription
-            )
+            # Convert and validate audio
+            if isinstance(audio_data, bytes):
+                audio = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                audio = audio_data
+            
+            # Check audio duration
+            duration = len(audio) / 16000
+            if duration < self.min_audio_duration:
+                logger.debug(f"Audio too short: {duration:.2f}s")
+                return {"error": "Audio too short", "duration": duration}
+            
+            # Step 1: Speech-to-Text (async with timeout)
+            transcription_start = time.time()
+            
+            try:
+                transcription_task = asyncio.create_task(self._transcribe_audio_optimized(audio))
+                transcription, stt_duration = await asyncio.wait_for(
+                    transcription_task, 
+                    timeout=2.0  # Maximum 2 seconds for STT
+                )
+            except asyncio.TimeoutError:
+                logger.warning("STT timeout exceeded")
+                return {"error": "Speech recognition timeout"}
+            
+            transcription_time = time.time() - transcription_start
+            
+            if not transcription or len(transcription.split()) < 1:
+                logger.info("No valid transcription")
+                return {"error": "No speech detected", "transcription_time": transcription_time}
+            
+            logger.info(f"Transcription ({transcription_time:.2f}s): {transcription}")
+            
+            # Check for cached responses first
+            if self.use_cache:
+                cached_response = self._get_cached_response(transcription)
+                if cached_response:
+                    logger.info("Using cached response")
+                    speech_audio = await self._generate_speech_parallel(cached_response)
+                    return {
+                        "transcription": transcription,
+                        "response": cached_response,
+                        "speech_audio": speech_audio,
+                        "total_time": time.time() - start_time,
+                        "cached": True
+                    }
+            
+            # Step 2: Knowledge Base Query (parallel with speech preparation)
+            kb_start = time.time()
+            
+            # Start TTS preparation in parallel
+            if self.parallel_processing:
+                tts_init_task = asyncio.create_task(self._prepare_tts())
+            
+            try:
+                # Use conversation manager with timeout
+                response_task = asyncio.create_task(
+                    self.conversation_manager.handle_user_input(
+                        user_id=user_id or "default_user",
+                        message=transcription
+                    )
+                )
+                response_result = await asyncio.wait_for(
+                    response_task,
+                    timeout=self.max_response_time
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Knowledge base timeout, using fallback")
+                response_result = {"response": self._get_fallback_response(transcription)}
+            
             response = response_result.get("response", "")
+            kb_time = time.time() - kb_start
             
             if not response:
-                return {"error": "No response generated from knowledge base"}
-                
-            timings["kb"] = time.time() - kb_start
-            logger.info(f"Response generated: {response[:50]}...")
+                response = self._get_fallback_response(transcription)
+                logger.warning("Empty response, using fallback")
             
-        except Exception as e:
-            logger.error(f"Error in KB stage: {e}")
-            return {"error": f"Knowledge base error: {str(e)}"}
-        
-        # STAGE 3: Text-to-Speech
-        logger.info("STAGE 3: Text-to-Speech with ElevenLabs")
-        tts_start = time.time()
-        
-        try:
-            # Convert response to speech
-            speech_audio = await self.tts_integration.text_to_speech(response)
+            logger.info(f"Response generated ({kb_time:.2f}s): {response[:50]}...")
             
-            # Save speech audio if output file specified
-            if speech_output_path:
+            # Cache the response
+            if self.use_cache:
+                self._cache_response(transcription, response)
+            
+            # Step 3: Text-to-Speech (optimized)
+            tts_start = time.time()
+            
+            # Wait for TTS preparation if running in parallel
+            if self.parallel_processing and 'tts_init_task' in locals():
+                await tts_init_task
+            
+            try:
+                speech_audio = await asyncio.wait_for(
+                    self._generate_speech_optimized(response),
+                    timeout=2.0  # Maximum 2 seconds for TTS
+                )
+            except asyncio.TimeoutError:
+                logger.warning("TTS timeout")
+                return {
+                    "transcription": transcription,
+                    "response": response,
+                    "error": "TTS timeout",
+                    "total_time": time.time() - start_time
+                }
+            
+            tts_time = time.time() - tts_start
+            logger.info(f"TTS completed ({tts_time:.2f}s): {len(speech_audio) if speech_audio else 0} bytes")
+            
+            # Save audio if requested
+            if speech_output_path and speech_audio:
                 os.makedirs(os.path.dirname(os.path.abspath(speech_output_path)), exist_ok=True)
                 with open(speech_output_path, "wb") as f:
                     f.write(speech_audio)
-                logger.info(f"Saved speech audio to {speech_output_path}")
             
-            timings["tts"] = time.time() - tts_start
-            logger.info(f"TTS completed in {timings['tts']:.2f}s")
-            
-            # Calculate total time
             total_time = time.time() - start_time
+            logger.info(f"Pipeline completed in {total_time:.2f}s")
             
-            # Compile results
             return {
                 "transcription": transcription,
                 "response": response,
-                "speech_audio_size": len(speech_audio),
                 "speech_audio": speech_audio,
-                "timings": timings,
-                "total_time": total_time
+                "total_time": total_time,
+                "timings": {
+                    "stt": transcription_time,
+                    "kb": kb_time,
+                    "tts": tts_time
+                }
             }
             
         except Exception as e:
-            logger.error(f"Error in TTS stage: {e}")
+            logger.error(f"Error in pipeline: {e}", exc_info=True)
             return {
-                "error": f"TTS error: {str(e)}",
-                "transcription": transcription,
-                "response": response
+                "error": str(e),
+                "total_time": time.time() - start_time
             }
     
-    async def _transcribe_audio(self, audio: np.ndarray) -> tuple[str, float]:
-        """Transcribe audio data using Google Cloud STT."""
-        logger.info(f"Transcribing audio: {len(audio)} samples")
-        
-        if self.using_google_cloud:
-            return await self._transcribe_audio_google_cloud(audio)
-        else:
-            return await self._transcribe_audio_generic(audio)
-    
-    async def _transcribe_audio_google_cloud(self, audio: np.ndarray) -> tuple[str, float]:
-        """Transcribe audio using Google Cloud STT."""
+    async def _transcribe_audio_optimized(self, audio: np.ndarray) -> tuple[str, float]:
+        """Optimized audio transcription."""
         try:
-            # Convert to 16-bit PCM bytes
+            # Start streaming session
+            if not (hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming):
+                await self.speech_recognizer.start_streaming()
+            
+            # Convert to bytes format
             audio_bytes = (audio * 32767).astype(np.int16).tobytes()
             
-            # Start a streaming session
-            await self.speech_recognizer.start_streaming()
-            
-            # Track final results
+            # Track results
             final_results = []
             
-            # Process callback to collect results
             async def collect_result(result):
                 if result.is_final:
                     final_results.append(result)
             
-            # Process audio in chunks
-            chunk_size = 4096  # ~128ms at 16kHz
-            for i in range(0, len(audio_bytes), chunk_size):
-                chunk = audio_bytes[i:i+chunk_size]
-                result = await self.speech_recognizer.process_audio_chunk(chunk, collect_result)
-                
-                # Add final results directly
-                if result and result.is_final:
-                    final_results.append(result)
+            # Process audio
+            await self.speech_recognizer.process_audio_chunk(audio_bytes, collect_result)
             
-            # Stop streaming
-            transcription, duration = await self.speech_recognizer.stop_streaming()
-            
-            # If we didn't get a transcription from stop_streaming but have final results
-            if not transcription and final_results:
-                # Get best final result based on confidence
+            # Get final result
+            if final_results:
                 best_result = max(final_results, key=lambda r: r.confidence)
                 transcription = best_result.text
                 duration = best_result.end_time - best_result.start_time if best_result.end_time > 0 else len(audio) / 16000
-            
-            # Clean up the transcription
-            transcription = self.stt_helper.cleanup_transcription(transcription)
-            
-            return transcription, duration
-            
-        except Exception as e:
-            logger.error(f"Error in Google Cloud transcription: {e}", exc_info=True)
-            return "", len(audio) / 16000
-    
-    async def _transcribe_audio_generic(self, audio: np.ndarray) -> tuple[str, float]:
-        """Generic transcription method for any STT system."""
-        try:
-            # Start streaming
-            if hasattr(self.speech_recognizer, 'start_streaming'):
-                await self.speech_recognizer.start_streaming()
-            
-            # Process audio chunk
-            if hasattr(self.speech_recognizer, 'process_audio_chunk'):
-                await self.speech_recognizer.process_audio_chunk(audio)
-            
-            # Get final transcription
-            if hasattr(self.speech_recognizer, 'stop_streaming'):
-                transcription, duration = await self.speech_recognizer.stop_streaming()
             else:
-                transcription = ""
-                duration = len(audio) / 16000
+                # Fallback: stop and restart streaming to get result
+                transcription, duration = await self.speech_recognizer.stop_streaming()
+                if transcription:
+                    await self.speech_recognizer.start_streaming()  # Restart for next use
             
-            # Clean up transcription
-            if hasattr(self.stt_helper, 'cleanup_transcription'):
-                transcription = self.stt_helper.cleanup_transcription(transcription)
+            # Clean transcription
+            if hasattr(self, '_clean_transcription'):
+                transcription = self._clean_transcription(transcription)
             
             return transcription, duration
             
         except Exception as e:
-            logger.error(f"Error in generic transcription: {e}", exc_info=True)
+            logger.error(f"Error in optimized transcription: {e}")
             return "", len(audio) / 16000
     
-    async def process_realtime_stream(
-        self,
-        audio_chunk_generator: AsyncIterator[np.ndarray],
-        user_id: Optional[str] = None,
-        audio_output_callback: Callable[[bytes], Awaitable[None]] = None
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Process a real-time audio stream.
-        
-        Args:
-            audio_chunk_generator: Async generator producing audio chunks
-            user_id: User identifier
-            audio_output_callback: Callback to handle output audio data
-            
-        Yields:
-            Status updates and results
-        """
-        logger.info("Starting real-time audio stream processing")
-        
-        # Track state
-        is_speaking = False
-        processing = False
-        last_transcription = ""
-        silence_frames = 0
-        max_silence_frames = 5
-        
-        # Create audio buffer for processing
-        audio_buffer = []
-        
-        # Timing stats
-        start_time = time.time()
-        
+    async def _prepare_tts(self):
+        """Prepare TTS client in parallel."""
         try:
-            # Initialize the speech recognizer
-            if hasattr(self.speech_recognizer, 'start_streaming'):
-                await self.speech_recognizer.start_streaming()
-            
-            # Track results
-            results = []
-            
-            # Define result callback
-            async def result_callback(result):
-                results.append(result)
-                logger.debug(f"Received transcription result: {result.text if hasattr(result, 'text') else str(result)}")
-            
-            # Process incoming audio chunks
-            async for audio_chunk in audio_chunk_generator:
-                # Convert if needed
-                if isinstance(audio_chunk, bytes):
-                    audio_chunk = np.frombuffer(audio_chunk, dtype=np.float32)
-                
-                # Check for silence
-                is_speech = np.mean(np.abs(audio_chunk)) > 0.01  # Simple energy-based detector
-                
-                if not is_speech:
-                    silence_frames += 1
-                else:
-                    silence_frames = 0
-                    
-                # Add to buffer
-                audio_buffer.append(audio_chunk)
-                
-                # Process the audio chunk
-                if hasattr(self.speech_recognizer, 'process_audio_chunk'):
-                    result = await self.speech_recognizer.process_audio_chunk(
-                        audio_chunk=audio_chunk,
-                        callback=result_callback
-                    )
-                    
-                    # Check for final result
-                    if result and hasattr(result, 'is_final') and result.is_final:
-                        # Clean up transcription
-                        transcription = self.stt_helper.cleanup_transcription(result.text)
-                        
-                        # Validate transcription
-                        if transcription and await self._is_valid_transcription(transcription) and transcription != last_transcription:
-                            # Yield status update
-                            yield {
-                                "status": "transcribed",
-                                "transcription": transcription
-                            }
-                            
-                            # Generate response
-                            if not is_speaking and not processing:
-                                processing = True
-                                try:
-                                    # Use conversation manager
-                                    response_result = await self.conversation_manager.handle_user_input(
-                                        user_id=user_id or "default_user",
-                                        message=transcription
-                                    )
-                                    response = response_result.get("response", "")
-                                    
-                                    if response:
-                                        # Mark agent as speaking
-                                        is_speaking = True
-                                        
-                                        # Convert to speech
-                                        speech_audio = await self.tts_integration.text_to_speech(response)
-                                        
-                                        # Send through callback
-                                        if audio_output_callback:
-                                            await audio_output_callback(speech_audio)
-                                        
-                                        # Agent is done speaking
-                                        is_speaking = False
-                                        
-                                        # Yield response
-                                        yield {
-                                            "status": "response",
-                                            "transcription": transcription,
-                                            "response": response,
-                                            "audio_size": len(speech_audio) if speech_audio else 0
-                                        }
-                                        
-                                        # Update last transcription
-                                        last_transcription = transcription
-                                finally:
-                                    processing = False
-            
-            # Process any final audio
-            if hasattr(self.speech_recognizer, 'stop_streaming'):
-                final_transcription, _ = await self.speech_recognizer.stop_streaming()
-                final_transcription = self.stt_helper.cleanup_transcription(final_transcription)
-                
-                if final_transcription and await self._is_valid_transcription(final_transcription) and final_transcription != last_transcription:
-                    # Generate final response
-                    response_result = await self.conversation_manager.handle_user_input(
-                        user_id=user_id or "default_user",
-                        message=final_transcription
-                    )
-                    final_response = response_result.get("response", "")
-                    
-                    if final_response:
-                        # Mark agent as speaking
-                        is_speaking = True
-                        
-                        # Convert to speech
-                        final_speech = await self.tts_integration.text_to_speech(final_response)
-                        
-                        # Send through callback
-                        if audio_output_callback:
-                            await audio_output_callback(final_speech)
-                        
-                        # Agent is done speaking
-                        is_speaking = False
-                        
-                        # Yield final response
-                        yield {
-                            "status": "final",
-                            "transcription": final_transcription,
-                            "response": final_response,
-                            "audio_size": len(final_speech) if final_speech else 0,
-                            "total_time": time.time() - start_time
-                        }
-            
-            # Yield completion
-            yield {
-                "status": "complete",
-                "total_time": time.time() - start_time
-            }
-            
+            if hasattr(self.tts_integration, 'init'):
+                await self.tts_integration.init()
         except Exception as e:
-            logger.error(f"Error in real-time stream processing: {e}", exc_info=True)
-            yield {
-                "status": "error",
-                "error": str(e),
-                "total_time": time.time() - start_time
-            }
+            logger.error(f"Error preparing TTS: {e}")
+    
+    async def _generate_speech_optimized(self, text: str) -> Optional[bytes]:
+        """Generate speech with optimizations."""
+        try:
+            if not text:
+                return None
+            
+            # Use TTS integration
+            if hasattr(self.tts_integration, 'text_to_speech'):
+                return await self.tts_integration.text_to_speech(text)
+            else:
+                logger.error("TTS integration missing text_to_speech method")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in optimized speech generation: {e}")
+            return None
+    
+    async def _generate_speech_parallel(self, text: str) -> Optional[bytes]:
+        """Generate speech using parallel processing."""
+        try:
+            # Run TTS in executor for better performance
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.executor,
+                lambda: asyncio.run(self._generate_speech_optimized(text))
+            )
+        except Exception as e:
+            logger.error(f"Error in parallel speech generation: {e}")
+            return None
+    
+    def _get_cached_response(self, transcription: str) -> Optional[str]:
+        """Get cached response for transcription."""
+        if not self.use_cache:
+            return None
+        
+        # Normalize transcription for cache lookup
+        normalized = transcription.lower().strip()
+        
+        # Check exact match first
+        if normalized in self.response_cache:
+            return self.response_cache[normalized]
+        
+        # Check common responses
+        for key, response in self._common_responses.items():
+            if key in normalized:
+                return response
+        
+        # Check partial matches
+        for cached_key in self.response_cache:
+            if len(cached_key) > 3 and cached_key in normalized:
+                return self.response_cache[cached_key]
+        
+        return None
+    
+    def _cache_response(self, transcription: str, response: str):
+        """Cache response for future use."""
+        if not self.use_cache:
+            return
+        
+        normalized = transcription.lower().strip()
+        self.response_cache[normalized] = response
+        
+        # Limit cache size
+        if len(self.response_cache) > self.max_cache_size:
+            # Remove oldest entries
+            keys_to_remove = list(self.response_cache.keys())[:10]
+            for key in keys_to_remove:
+                del self.response_cache[key]
+    
+    def _get_fallback_response(self, transcription: str) -> str:
+        """Get fallback response based on transcription."""
+        normalized = transcription.lower()
+        
+        if any(word in normalized for word in ["price", "pricing", "cost", "plan"]):
+            return "I understand you're asking about pricing. We offer several plans to meet different needs. Would you like me to explain our pricing options?"
+        elif any(word in normalized for word in ["feature", "features", "capability"]):
+            return "I can tell you about our features. What specific functionality would you like to know about?"
+        elif any(word in normalized for word in ["help", "support", "question"]):
+            return "I'm here to help! What specific question do you have?"
+        else:
+            return "I understand you have a question. Could you please rephrase it or be more specific?"
+    
+    def _clean_transcription(self, text: str) -> str:
+        """Clean transcription for better processing."""
+        if not text:
+            return ""
+        
+        # Remove noise indicators
+        import re
+        cleaned = re.sub(r'\[.*?\]', '', text)
+        cleaned = re.sub(r'\(.*?\)', '', text)
+        cleaned = re.sub(r'<.*?>', '', text)
+        
+        # Clean up spaces
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = cleaned.strip()
+        
+        return cleaned
