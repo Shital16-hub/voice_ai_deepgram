@@ -157,6 +157,7 @@ VOICE INTERACTION CONSIDERATIONS:
                     yield {
                         "type": "function_calls",
                         "tool_calls": tool_calls,
+                        "run_id": event.data.id,
                         "done": False
                     }
                 

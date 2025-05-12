@@ -29,28 +29,38 @@ class CacheManager:
     
     async def get(self, query: str, context: Optional[Dict] = None) -> Optional[str]:
         """Get cached response."""
-        cache_key = self._generate_cache_key(query, context)
-        cached_value = await self.redis.get(cache_key)
-        
-        if cached_value:
-            logger.debug(f"Cache hit for query: {query[:50]}...")
-            return json.loads(cached_value)
-        
-        return None
+        try:
+            cache_key = self._generate_cache_key(query, context)
+            cached_value = await self.redis.get(cache_key)
+            
+            if cached_value:
+                logger.debug(f"Cache hit for query: {query[:50]}...")
+                return json.loads(cached_value)
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error getting from cache: {e}")
+            return None
     
     async def set(self, query: str, response: str, context: Optional[Dict] = None):
         """Cache response."""
-        cache_key = self._generate_cache_key(query, context)
-        await self.redis.setex(
-            cache_key, 
-            self.ttl, 
-            json.dumps(response)
-        )
-        logger.debug(f"Cached response for query: {query[:50]}...")
+        try:
+            cache_key = self._generate_cache_key(query, context)
+            await self.redis.setex(
+                cache_key, 
+                self.ttl, 
+                json.dumps(response)
+            )
+            logger.debug(f"Cached response for query: {query[:50]}...")
+        except Exception as e:
+            logger.error(f"Error setting cache: {e}")
     
     async def invalidate_pattern(self, pattern: str):
         """Invalidate all cache entries matching pattern."""
-        keys = await self.redis.keys(f"cache:query:{pattern}*")
-        if keys:
-            await self.redis.delete(*keys)
-            logger.info(f"Invalidated {len(keys)} cache entries")
+        try:
+            keys = await self.redis.keys(f"cache:query:{pattern}*")
+            if keys:
+                await self.redis.delete(*keys)
+                logger.info(f"Invalidated {len(keys)} cache entries")
+        except Exception as e:
+            logger.error(f"Error invalidating cache: {e}")

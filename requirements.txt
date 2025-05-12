@@ -71,6 +71,6 @@ google-cloud-core>=2.3.2
 elevenlabs==0.2.27
 
 openai
-pinecone-client
+pinecone
 tiktoken
 redis

@@ -5,7 +5,7 @@ import logging
 import asyncio
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
-from pinecone import Pinecone, PodSpec, ServerlessSpec
+from pinecone import Pinecone, ServerlessSpec
 import uuid
 
 from knowledge_base.config import get_pinecone_config, get_openai_config
