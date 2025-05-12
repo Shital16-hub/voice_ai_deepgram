@@ -18,18 +18,6 @@ numpy
 scipy
 pywhispercpp
 
-# AI/ML components
-llama-index
-llama-index-core
-llama-index-embeddings-huggingface
-llama-index-vector-stores-chroma
-llama-index-llms-ollama
-llama-index-readers-file
-chromadb
-ollama
-sentence-transformers
-transformers
-torch
 
 # Language processing
 langchain-core
