@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union,
 import numpy as np
 
 # Import the Google Cloud STT
-from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
+from speech_to_text.simple_google_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 from speech_to_text.utils.audio_utils import load_audio_file
 
 logger = logging.getLogger(__name__)

@@ -30,7 +30,7 @@ from knowledge_base.query_engine import QueryEngine
 from knowledge_base.pinecone_manager import PineconeManager
 
 # Import STT integration
-from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
+from speech_to_text.simple_google_stt import GoogleCloudStreamingSTT
 from integration.stt_integration import STTIntegration
 from integration.tts_integration import TTSIntegration
 from integration.pipeline import VoiceAIAgentPipeline
