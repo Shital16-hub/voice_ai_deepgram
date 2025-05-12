@@ -25,6 +25,7 @@ class PineconeManager:
         self.openai_client = AsyncOpenAI(api_key=self.openai_config["api_key"])
         self.index = None
         self.index_name = self.config["index_name"]
+        print(f"DEBUG: Pinecone config: {self.config}")
         
     async def init(self):
         """Initialize Pinecone index."""
@@ -42,7 +43,7 @@ class PineconeManager:
                     metric="cosine",
                     spec=ServerlessSpec(
                         cloud='aws',
-                        region=self.config.get("environment", "us-east-1")
+                        region="us-east-1"
                     )
                 )
                 

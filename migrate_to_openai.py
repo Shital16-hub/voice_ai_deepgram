@@ -6,9 +6,6 @@ import logging
 import os
 from datetime import datetime
 
-# Import current system components
-import chromadb
-from llama_index.core.schema import Document as LlamaDocument
 
 # Import new components
 from knowledge_base.pinecone_manager import PineconeManager
@@ -26,44 +23,7 @@ class KnowledgeBaseMigration:
         self.doc_processor = DocumentProcessor()
         self.openai_manager = OpenAIAssistantManager()
     
-    async def migrate_from_chromadb(self, chroma_collection_name: str = "company_knowledge"):
-        """Migrate documents from ChromaDB to Pinecone."""
-        logger.info("Starting migration from ChromaDB to Pinecone...")
-        
-        # Connect to ChromaDB
-        chroma_client = chromadb.Client()
-        collection = chroma_client.get_collection(chroma_collection_name)
-        
-        # Get all documents
-        results = collection.get(
-            include=["metadatas", "documents", "embeddings"]
-        )
-        
-        logger.info(f"Found {len(results['ids'])} documents in ChromaDB")
-        
-        # Convert to new format
-        documents = []
-        for i, (doc_id, metadata, document) in enumerate(zip(
-            results['ids'], results['metadatas'], results['documents']
-        )):
-            # Extract text content
-            text = document if isinstance(document, str) else metadata.get('text', '')
-            
-            # Create document object
-            doc = {
-                "id": doc_id,
-                "text": text,
-                "source": metadata.get("source", "unknown"),
-                "document_id": metadata.get("document_id", doc_id),
-                "metadata": metadata
-            }
-            documents.append(doc)
-        
-        # Initialize Pinecone and upload
-        await self.pinecone_manager.init()
-        upserted_count = await self.pinecone_manager.upsert_documents(documents)
-        
-        logger.info(f"Migrated {upserted_count} documents to Pinecone")
+    
     
     async def migrate_documents_directory(self, directory_path: str):
         """Migrate documents from a directory to the new system."""
@@ -104,18 +64,11 @@ class KnowledgeBaseMigration:
         return assistant_id
     
     async def run_migration(self, 
-                          migrate_chromadb: bool = True,
-                          chroma_collection: str = "company_knowledge",
-                          documents_directory: Optional[str] = None):
+                      documents_directory: Optional[str] = None):
         """Run the complete migration process."""
         logger.info("Starting complete migration process...")
         
-        # Step 1: Migrate from ChromaDB if requested
-        if migrate_chromadb:
-            try:
-                await self.migrate_from_chromadb(chroma_collection)
-            except Exception as e:
-                logger.error(f"Error migrating from ChromaDB: {e}")
+       
         
         # Step 2: Migrate documents from directory if provided
         if documents_directory and os.path.exists(documents_directory):
@@ -162,9 +115,7 @@ async def main():
     
     # Run migration
     await migration.run_migration(
-        migrate_chromadb=True,
-        chroma_collection="company_knowledge",
-        documents_directory="./knowledge_base/knowledge_docs"  # Adjust path as needed
+        documents_directory="./knowledge_base/knowledge_docs"
     )
     
     print("\nMigration complete!")
