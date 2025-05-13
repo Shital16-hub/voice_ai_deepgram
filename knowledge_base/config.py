@@ -1,69 +1,72 @@
 """
-Configuration settings for OpenAI + Pinecone knowledge base.
+Configuration settings for the knowledge base component.
 """
 import os
 from typing import Dict, Any, List, Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+# Vector database settings
+VECTOR_DB_HOST = os.getenv("VECTOR_DB_HOST", "localhost")
+VECTOR_DB_PORT = int(os.getenv("VECTOR_DB_PORT", "6333"))
+VECTOR_DB_GRPC_PORT = int(os.getenv("VECTOR_DB_GRPC_PORT", "6334"))
+VECTOR_DB_COLLECTION = os.getenv("VECTOR_DB_COLLECTION", "company_knowledge")
+VECTOR_DIMENSION = 384  # For sentence-transformers/all-MiniLM-L6-v2
 
-# OpenAI Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
+# Embedding model settings
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2")  # Smaller model
+EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")  # Set to "cuda" for GPU
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 
-# Pinecone Configuration
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "voice-ai-knowledge")
-PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
-PINECONE_DIMENSION = 1536  # For text-embedding-3-small
-
-# Document Processing
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+# Document processing settings
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 MAX_DOCUMENT_SIZE_MB = int(os.getenv("MAX_DOCUMENT_SIZE_MB", "10"))
 
-# Retrieval Settings
-DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", "5"))
-MINIMUM_SIMILARITY_SCORE = float(os.getenv("MINIMUM_SIMILARITY_SCORE", "0.75"))
+# Retrieval settings
+DEFAULT_RETRIEVE_COUNT = int(os.getenv("DEFAULT_RETRIEVE_COUNT", "3"))
+MINIMUM_RELEVANCE_SCORE = float(os.getenv("MINIMUM_RELEVANCE_SCORE", "0.6"))
+RERANKING_ENABLED = os.getenv("RERANKING_ENABLED", "False").lower() == "true"
 
-# Cache Settings
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour
+# Conversation context settings
+MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "5"))
+CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "4096"))
 
-# Rate Limiting
-MAX_TOKENS_PER_DAY = int(os.getenv("MAX_TOKENS_PER_DAY", "1000000"))
-MAX_REQUESTS_PER_MINUTE = int(os.getenv("MAX_REQUESTS_PER_MINUTE", "60"))
+# LlamaIndex settings
+PERSIST_DIR = os.getenv("PERSIST_DIR", "./storage")
+USE_GPU = os.getenv("USE_GPU", "False").lower() == "true"
 
 # Supported file types
 SUPPORTED_DOCUMENT_TYPES = [
-    ".txt", ".md", ".pdf", ".docx", ".doc", 
-    ".csv", ".json", ".html", ".htm"
+    # Text files
+    ".txt", ".md", ".csv", ".json",
+    
+    # Office documents
+    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
+    
+    # Web content
+    ".html", ".htm", ".xml",
 ]
 
-def get_openai_config() -> Dict[str, Any]:
-    """Get OpenAI configuration."""
+def get_llama_index_config() -> Dict[str, Any]:
+    """
+    Get LlamaIndex configuration.
+    
+    Returns:
+        Dictionary with LlamaIndex configuration
+    """
     return {
-        "api_key": OPENAI_API_KEY,
-        "model": OPENAI_MODEL,
-        "embedding_model": OPENAI_EMBEDDING_MODEL,
-        "max_tokens": OPENAI_MAX_TOKENS,
-        "temperature": OPENAI_TEMPERATURE
+        "persist_dir": PERSIST_DIR,
+        "use_gpu": USE_GPU,
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_device": EMBEDDING_DEVICE
     }
 
-def get_pinecone_config() -> Dict[str, Any]:
-    """Get Pinecone configuration."""
-    return {
-        "api_key": PINECONE_API_KEY,
-        "index_name": PINECONE_INDEX_NAME,
-        "environment": PINECONE_ENVIRONMENT,
-        "dimension": PINECONE_DIMENSION
-    }
-
-def get_processing_config() -> Dict[str, Any]:
-    """Get document processing configuration."""
+def get_document_processor_config() -> Dict[str, Any]:
+    """
+    Get document processor configuration.
+    
+    Returns:
+        Dictionary with document processor configuration
+    """
     return {
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
@@ -71,9 +74,44 @@ def get_processing_config() -> Dict[str, Any]:
         "supported_types": SUPPORTED_DOCUMENT_TYPES
     }
 
-def get_retrieval_config() -> Dict[str, Any]:
-    """Get retrieval configuration."""
+def get_embedding_config() -> Dict[str, Any]:
+    """
+    Get embedding generator configuration.
+    
+    Returns:
+        Dictionary with embedding configuration
+    """
     return {
-        "top_k": DEFAULT_TOP_K,
-        "min_similarity": MINIMUM_SIMILARITY_SCORE
+        "model_name": EMBEDDING_MODEL,
+        "device": EMBEDDING_DEVICE,
+        "batch_size": EMBEDDING_BATCH_SIZE,
+        "dimension": VECTOR_DIMENSION
+    }
+
+def get_vector_db_config() -> Dict[str, Any]:
+    """
+    Get vector database configuration.
+    
+    Returns:
+        Dictionary with vector database configuration
+    """
+    return {
+        "host": VECTOR_DB_HOST,
+        "port": VECTOR_DB_PORT,
+        "grpc_port": VECTOR_DB_GRPC_PORT,
+        "collection_name": VECTOR_DB_COLLECTION,
+        "vector_size": VECTOR_DIMENSION
+    }
+
+def get_retriever_config() -> Dict[str, Any]:
+    """
+    Get retriever configuration.
+    
+    Returns:
+        Dictionary with retriever configuration
+    """
+    return {
+        "top_k": DEFAULT_RETRIEVE_COUNT,
+        "min_score": MINIMUM_RELEVANCE_SCORE,
+        "reranking_enabled": RERANKING_ENABLED
     }

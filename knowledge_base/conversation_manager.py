@@ -1,469 +1,799 @@
 """
-Fixed conversation management with optimized error handling and fallbacks.
+Conversation manager using state management with future LangGraph compatibility.
 """
 import logging
 import asyncio
-from typing import Dict, Any, List, Optional, AsyncIterator
-import json
+from typing import List, Dict, Any, Optional, Tuple, AsyncIterator, Union
+from enum import Enum
 import time
+import json
 
-from knowledge_base.openai_assistant_manager import OpenAIAssistantManager
-from knowledge_base.pinecone_manager import PineconeManager
-from knowledge_base.exceptions import ConversationError
-from knowledge_base.utils.cache_utils import CacheManager
-from knowledge_base.utils.rate_limiter import RateLimiter
+from llama_index.core.llms import ChatMessage, MessageRole
+from llama_index.core import Settings
+from llama_index.core.schema import NodeWithScore
+
+from knowledge_base.llama_index.query_engine import QueryEngine
+from knowledge_base.llama_index.llm_setup import get_ollama_llm, format_system_prompt, create_chat_messages
 
 logger = logging.getLogger(__name__)
 
-class ConversationManager:
-    """Manage conversations using OpenAI Assistants API with optimized error handling."""
+class ConversationState(str, Enum):
+    """Enum for conversation states."""
+    GREETING = "greeting"
+    WAITING_FOR_QUERY = "waiting_for_query"
+    RETRIEVING = "retrieving"
+    GENERATING_RESPONSE = "generating_response"
+    CLARIFYING = "clarifying"
+    HUMAN_HANDOFF = "human_handoff"
+    ENDED = "ended"
+
+class ConversationTurn:
+    """Represents a single turn in the conversation."""
     
-    def __init__(self):
-        """Initialize conversation manager."""
-        self.openai_manager = OpenAIAssistantManager()
-        self.pinecone_manager = PineconeManager()
-        self.cache = CacheManager()
-        self.rate_limiter = RateLimiter()
-        self.user_threads: Dict[str, str] = {}
-        self.active_runs: Dict[str, str] = {}
-        self.run_timeouts: Dict[str, float] = {}  # Track run start times
-        self.initialized = False
+    def __init__(
+        self,
+        query: Optional[str] = None,
+        response: Optional[str] = None,
+        retrieved_context: Optional[List[Dict[str, Any]]] = None,
+        state: ConversationState = ConversationState.WAITING_FOR_QUERY,
+        metadata: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Initialize ConversationTurn.
         
-        # Performance settings
-        self.max_run_timeout = 5.0  # Reduced from 7.0
-        self.fallback_enabled = True
+        Args:
+            query: User query
+            response: System response
+            retrieved_context: Retrieved documents
+            state: Conversation state
+            metadata: Additional metadata
+        """
+        self.query = query
+        self.response = response
+        self.retrieved_context = retrieved_context or []
+        self.state = state
+        self.metadata = metadata or {}
+        self.timestamp = time.time()
     
-    async def init(self):
-        """Initialize all components."""
-        try:
-            # Initialize Pinecone first
-            await self.pinecone_manager.init()
-            
-            # Set Pinecone manager in OpenAI manager
-            self.openai_manager.set_pinecone_manager(self.pinecone_manager)
-            
-            # Create or get assistant
-            await self.openai_manager.get_or_create_assistant()
-            
-            self.initialized = True
-            logger.info("Conversation manager initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing conversation manager: {e}")
-            if self.fallback_enabled:
-                logger.info("Enabling fallback mode")
-                self.initialized = True  # Enable fallback mode
-            else:
-                raise ConversationError(f"Failed to initialize: {str(e)}")
-    
-    async def get_or_create_thread(self, user_id: str) -> str:
-        """Get existing thread or create new one for user."""
-        if user_id not in self.user_threads:
-            try:
-                thread_id = await self.openai_manager.create_thread()
-                self.user_threads[user_id] = thread_id
-                logger.debug(f"Created new thread for user {user_id}: {thread_id}")
-            except Exception as e:
-                logger.error(f"Error creating thread for user {user_id}: {e}")
-                # Use a fallback thread ID
-                thread_id = f"fallback_{user_id}_{int(time.time())}"
-                self.user_threads[user_id] = thread_id
-        
-        return self.user_threads[user_id]
-    
-    async def _cleanup_stale_runs(self, thread_id: str):
-        """Clean up stale runs that might be blocking the thread."""
-        if thread_id not in self.active_runs:
-            return
-        
-        run_id = self.active_runs[thread_id]
-        start_time = self.run_timeouts.get(run_id, time.time())
-        
-        if time.time() - start_time > self.max_run_timeout:
-            logger.warning(f"Cleaning up stale run {run_id} (timeout)")
-            try:
-                await self.openai_manager.client.beta.threads.runs.cancel(
-                    thread_id=thread_id,
-                    run_id=run_id
-                )
-            except Exception as e:
-                logger.error(f"Error cancelling stale run: {e}")
-            finally:
-                del self.active_runs[thread_id]
-                if run_id in self.run_timeouts:
-                    del self.run_timeouts[run_id]
-    
-    async def handle_user_input(self, user_id: str, message: str) -> Dict[str, Any]:
-        """Handle user input with optimized error handling and fallbacks."""
-        if not self.initialized:
-            logger.warning("Conversation manager not initialized")
-            return {"response": "System is initializing. Please try again.", "error": "not_initialized"}
-        
-        try:
-            # Check rate limits
-            if not await self.rate_limiter.check_rate_limit(user_id, 1000):
-                return {
-                    "response": "You've reached your rate limit. Please try again later.",
-                    "error": "rate_limit_exceeded"
-                }
-            
-            # Check cache first
-            cached_response = await self.cache.get(message, {"user_id": user_id})
-            if cached_response:
-                return {
-                    "response": cached_response,
-                    "cached": True
-                }
-            
-            # Get or create thread for user
-            thread_id = await self.get_or_create_thread(user_id)
-            
-            # Clean up any stale runs
-            await self._cleanup_stale_runs(thread_id)
-            
-            # Process message with timeout and fallback
-            response = await self._process_message_with_fallback(thread_id, user_id, message)
-            
-            # Cache successful responses
-            if response and response.get("response") and not response.get("error"):
-                await self.cache.set(message, response["response"], {"user_id": user_id})
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Error handling user input: {e}", exc_info=True)
-            # Return fallback response
-            return await self._get_fallback_response(message)
-    
-    async def _process_message_with_fallback(self, thread_id: str, user_id: str, message: str) -> Dict[str, Any]:
-        """Process message with multiple fallback strategies."""
-        # Strategy 1: Try OpenAI Assistant
-        try:
-            response = await self._try_openai_assistant(thread_id, user_id, message)
-            if response and response.get("response"):
-                return response
-        except Exception as e:
-            logger.warning(f"OpenAI Assistant failed: {e}")
-        
-        # Strategy 2: Direct Pinecone search with OpenAI
-        if self.fallback_enabled:
-            try:
-                response = await self._try_direct_search(message)
-                if response and response.get("response"):
-                    return response
-            except Exception as e:
-                logger.warning(f"Direct search failed: {e}")
-        
-        # Strategy 3: Final fallback
-        return await self._get_fallback_response(message)
-    
-    async def _try_openai_assistant(self, thread_id: str, user_id: str, message: str) -> Dict[str, Any]:
-        """Try to get response from OpenAI Assistant."""
-        try:
-            # Check if thread starts with fallback (indicating error state)
-            if thread_id.startswith("fallback_"):
-                raise Exception("Thread is in fallback mode")
-            
-            # Add message to thread
-            await self.openai_manager.add_message_to_thread(thread_id, message)
-            
-            # Process with timeout
-            start_time = time.time()
-            response_task = asyncio.create_task(self._process_with_assistant(thread_id, user_id))
-            
-            response = await asyncio.wait_for(response_task, timeout=self.max_run_timeout)
-            
-            # Check response quality
-            if response and response.get("response") and len(response["response"].strip()) > 0:
-                return response
-            else:
-                logger.warning("Empty or invalid response from assistant")
-                return None
-                
-        except asyncio.TimeoutError:
-            logger.warning(f"OpenAI Assistant timeout after {self.max_run_timeout}s")
-            # Cancel any active run
-            if thread_id in self.active_runs:
-                await self._cleanup_stale_runs(thread_id)
-            return None
-        except Exception as e:
-            logger.error(f"Error with OpenAI Assistant: {e}")
-            return None
-    
-    async def _process_with_assistant(self, thread_id: str, user_id: str) -> Dict[str, Any]:
-        """Process message with OpenAI Assistant."""
-        response_text = ""
-        run_completed = False
-        function_calls_processed = 0
-        run_id = None
-        
-        try:
-            async for event in self.openai_manager.run_assistant(thread_id):
-                if event["type"] == "text_delta":
-                    response_text += event["content"]
-                
-                elif event["type"] == "function_calls":
-                    function_calls_processed += 1
-                    run_id = event.get("run_id")
-                    
-                    # Track the active run
-                    if run_id:
-                        self.active_runs[thread_id] = run_id
-                        self.run_timeouts[run_id] = time.time()
-                    
-                    # Process function calls with timeout
-                    try:
-                        tool_outputs = await asyncio.wait_for(
-                            self._process_function_calls(event["tool_calls"]),
-                            timeout=2.0
-                        )
-                        
-                        await self.openai_manager.submit_tool_outputs(thread_id, run_id, tool_outputs)
-                    except asyncio.TimeoutError:
-                        logger.warning("Function call processing timeout")
-                        raise
-                
-                elif event["type"] == "completed":
-                    run_completed = True
-                    if thread_id in self.active_runs:
-                        del self.active_runs[thread_id]
-                    if run_id and run_id in self.run_timeouts:
-                        del self.run_timeouts[run_id]
-                    break
-                
-                elif event["type"] == "error":
-                    logger.error(f"Assistant error: {event['error']}")
-                    # Clean up
-                    if thread_id in self.active_runs:
-                        del self.active_runs[thread_id]
-                    if run_id and run_id in self.run_timeouts:
-                        del self.run_timeouts[run_id]
-                    return None
-            
-            # If we got function calls but no response, try to get the latest message
-            if function_calls_processed > 0 and not response_text:
-                logger.info("Function calls processed, checking for response in thread")
-                await asyncio.sleep(0.5)  # Brief wait for processing
-                messages = await self.openai_manager.get_thread_messages(thread_id, limit=1)
-                if messages and messages[0].get("role") == "assistant":
-                    response_text = messages[0].get("content", "")
-            
-            if response_text:
-                return {
-                    "response": response_text,
-                    "user_id": user_id,
-                    "source": "openai_assistant"
-                }
-            else:
-                logger.warning("No response from assistant")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error processing with assistant: {e}")
-            # Clean up any active runs
-            if thread_id in self.active_runs:
-                del self.active_runs[thread_id]
-            if run_id and run_id in self.run_timeouts:
-                del self.run_timeouts[run_id]
-            raise
-    
-    async def _try_direct_search(self, message: str) -> Dict[str, Any]:
-        """Try direct Pinecone search as fallback."""
-        try:
-            # Search Pinecone directly
-            results = await self.pinecone_manager.query(
-                query_text=message,
-                top_k=3,
-                include_metadata=True
-            )
-            
-            if results:
-                # Format results into a response
-                context = ""
-                sources = []
-                
-                for result in results:
-                    if result.get("metadata") and result["metadata"].get("text"):
-                        text = result["metadata"]["text"]
-                        source = result["metadata"].get("source", "Unknown")
-                        context += f"{text}\n\n"
-                        sources.append(source)
-                
-                if context:
-                    # Create a context-aware response
-                    response = self._format_direct_search_response(message, context)
-                    return {
-                        "response": response,
-                        "sources": sources,
-                        "source": "direct_search"
-                    }
-            
-            return None
-        except Exception as e:
-            logger.error(f"Error in direct search: {e}")
-            return None
-    
-    def _format_direct_search_response(self, query: str, context: str) -> str:
-        """Format a response from direct search results."""
-        query_lower = query.lower()
-        
-        # Determine response type based on query
-        if any(word in query_lower for word in ["price", "pricing", "cost", "plan"]):
-            return f"Based on our pricing information: {context[:300]}..."
-        elif any(word in query_lower for word in ["feature", "features", "capability"]):
-            return f"Here are our key features: {context[:300]}..."
-        elif any(word in query_lower for word in ["how", "what", "tell", "explain"]):
-            return f"Let me explain: {context[:300]}..."
-        else:
-            return f"Here's what I found: {context[:300]}..."
-    
-    async def _get_fallback_response(self, message: str) -> Dict[str, Any]:
-        """Get generic fallback response."""
-        message_lower = message.lower()
-        
-        # Context-aware fallback responses
-        if any(word in message_lower for word in ["price", "pricing", "cost", "plan"]):
-            response = "I can help you with pricing information. Our basic plan starts at $499/month. Would you like more details about our pricing options?"
-        elif any(word in message_lower for word in ["feature", "features", "capability"]):
-            response = "We offer voice recognition, natural language processing, and automated customer service solutions. Would you like to know more about any specific feature?"
-        elif any(word in message_lower for word in ["help", "support"]):
-            response = "I'm here to help! You can ask me about our pricing, features, or how our voice AI system works."
-        else:
-            response = "I understand you have a question. Could you please rephrase it, or ask about our pricing, features, or services?"
-        
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
         return {
-            "response": response,
-            "source": "fallback"
+            "query": self.query,
+            "response": self.response,
+            "retrieved_context": self.retrieved_context,
+            "state": self.state,
+            "metadata": self.metadata,
+            "timestamp": self.timestamp
         }
     
-    async def _process_function_calls(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process function calls with timeout protection."""
-        tool_outputs = []
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ConversationTurn':
+        """Create from dictionary."""
+        return cls(
+            query=data.get("query"),
+            response=data.get("response"),
+            retrieved_context=data.get("retrieved_context", []),
+            state=ConversationState(data.get("state", ConversationState.WAITING_FOR_QUERY)),
+            metadata=data.get("metadata", {})
+        )
+
+class ConversationManager:
+    """
+    Manage conversation state and flow with future LangGraph compatibility.
+    """
+    
+    def __init__(
+        self,
+        query_engine: Optional[QueryEngine] = None,
+        session_id: Optional[str] = None,
+        llm_model_name: Optional[str] = None,
+        llm_temperature: float = 0.7,
+        use_langgraph: bool = False,  # Flag for future LangGraph implementation
+        skip_greeting: bool = False   # New parameter to skip greeting state
+    ):
+        """
+        Initialize ConversationManager.
         
-        for tool_call in tool_calls:
-            logger.info(f"Processing tool call: {tool_call.function.name}")
+        Args:
+            query_engine: QueryEngine instance
+            session_id: Unique session identifier
+            llm_model_name: Optional LLM model name
+            llm_temperature: Temperature for sampling
+            use_langgraph: Whether to use LangGraph (for future implementation)
+            skip_greeting: Whether to skip the greeting state and start in WAITING_FOR_QUERY
+        """
+        self.query_engine = query_engine
+        self.session_id = session_id or f"session_{int(time.time())}"
+        self.llm_model_name = llm_model_name
+        self.llm_temperature = llm_temperature
+        self.use_langgraph = use_langgraph
+        self.skip_greeting = skip_greeting
+        
+        # LLM setup
+        self.llm = None
+        
+        # Initialize conversation state - use skip_greeting to determine initial state
+        self.current_state = ConversationState.WAITING_FOR_QUERY if skip_greeting else ConversationState.GREETING
+        self.history: List[ConversationTurn] = []
+        self.context_cache: Dict[str, List[Dict[str, Any]]] = {}
+        
+        # State for LangGraph (will be expanded later)
+        self.graph_state = {
+            "session_id": self.session_id,
+            "current_state": self.current_state,
+            "history": [],
+            "context": None,
+            "metadata": {}
+        }
+        
+        logger.info(f"Initialized ConversationManager with session_id: {self.session_id}, initial_state: {self.current_state}")
+    
+    async def init(self):
+        """Initialize dependencies."""
+        # Initialize query engine if provided
+        if self.query_engine:
+            await self.query_engine.init()
+        
+        # Initialize LLM if not already set globally
+        if not Settings.llm:
+            self.llm = get_ollama_llm(
+                model_name=self.llm_model_name,
+                temperature=self.llm_temperature
+            )
+        else:
+            self.llm = Settings.llm
+        
+        # Initialize LangGraph components if enabled (placeholder for future)
+        if self.use_langgraph:
+            logger.info("LangGraph integration will be implemented in a future update")
+            # This will be expanded in the future LangGraph implementation
+    
+    async def handle_user_input(self, user_input: str) -> Dict[str, Any]:
+        """
+        Process user input and move conversation forward.
+        
+        Args:
+            user_input: User input text
             
-            if tool_call.function.name == "search_knowledge_base":
+        Returns:
+            Response with next state and response text
+        """
+        # For future LangGraph implementation
+        if self.use_langgraph:
+            return await self._handle_user_input_langgraph(user_input)
+        
+        # Create new turn
+        turn = ConversationTurn(
+            query=user_input,
+            state=self.current_state
+        )
+        
+        # Check if this looks like a query even if we're in greeting state
+        if self.current_state == ConversationState.GREETING and user_input and len(user_input.split()) > 2:
+            logger.info("First message appears to be a query, handling as query instead of greeting")
+            turn.state = ConversationState.WAITING_FOR_QUERY
+            self.current_state = ConversationState.WAITING_FOR_QUERY
+        
+        # Process based on current state
+        if self.current_state == ConversationState.GREETING:
+            # Handle greeting
+            response = await self._handle_greeting(turn)
+        elif self.current_state == ConversationState.WAITING_FOR_QUERY:
+            # Handle query
+            response = await self._handle_query(turn)
+        elif self.current_state == ConversationState.CLARIFYING:
+            # Handle clarification
+            response = await self._handle_clarification(turn)
+        elif self.current_state == ConversationState.HUMAN_HANDOFF:
+            # Handle already in human handoff
+            response = {
+                "response": "I'll let the human agent know about your message.",
+                "state": ConversationState.HUMAN_HANDOFF,
+                "requires_human": True,
+                "context": None
+            }
+        else:
+            # Default handling
+            response = await self._handle_query(turn)
+        
+        # Update turn with response and add to history
+        turn.response = response["response"]
+        turn.state = response["state"]
+        self.history.append(turn)
+        
+        # Update current state
+        self.current_state = response["state"]
+        
+        # Update graph state (for future LangGraph compatibility)
+        self._update_graph_state(turn)
+        
+        return response
+    
+    async def _handle_user_input_langgraph(self, user_input: str) -> Dict[str, Any]:
+        """
+        LangGraph implementation of user input handling (placeholder for future).
+        
+        Args:
+            user_input: User input text
+            
+        Returns:
+            Response dictionary
+        """
+        # This will be implemented in the future LangGraph integration
+        logger.info("LangGraph integration will be implemented in a future update")
+        
+        # For now, fall back to standard implementation
+        return await self.handle_user_input(user_input)
+    
+    def _update_graph_state(self, turn: ConversationTurn):
+        """
+        Update the graph state with the latest turn information.
+        Prepares for future LangGraph implementation.
+        
+        Args:
+            turn: Latest conversation turn
+        """
+        # Update current state
+        self.graph_state["current_state"] = turn.state
+        
+        # Add to history
+        history_entry = {
+            "role": "user",
+            "content": turn.query
+        }
+        self.graph_state["history"].append(history_entry)
+        
+        if turn.response:
+            response_entry = {
+                "role": "assistant",
+                "content": turn.response
+            }
+            self.graph_state["history"].append(response_entry)
+        
+        # Update context if available
+        if turn.retrieved_context:
+            self.graph_state["context"] = turn.retrieved_context
+    
+    async def _handle_greeting(self, turn: ConversationTurn) -> Dict[str, Any]:
+        """
+        Handle greeting state.
+        
+        Args:
+            turn: Current conversation turn
+            
+        Returns:
+            Response dictionary
+        """
+        # Check if this is actually a query and not a greeting
+        if turn.query and len(turn.query.split()) > 2:
+            logger.info("Detected query in greeting state, handling as query")
+            return await self._handle_query(turn)
+            
+        # Generate greeting response
+        if self.llm:
+            greeting_prompt = "Generate a friendly greeting for a customer service conversation."
+            
+            try:
+                # Create system message
+                system_message = ChatMessage(
+                    role=MessageRole.SYSTEM,
+                    content="You are a helpful AI assistant. Keep your response brief and friendly."
+                )
+                
+                # Create user message
+                user_message = ChatMessage(
+                    role=MessageRole.USER,
+                    content=greeting_prompt
+                )
+                
+                # Generate response
                 try:
-                    # Parse arguments
-                    arguments = json.loads(tool_call.function.arguments)
-                    query = arguments.get("query", "")
-                    filters = arguments.get("filters")
-                    top_k = arguments.get("top_k", 3)  # Reduced default
-                    
-                    logger.info(f"Searching knowledge base for: '{query}'")
-                    
-                    # Search with timeout
-                    search_task = asyncio.create_task(
-                        self.pinecone_manager.query(
-                            query_text=query,
-                            top_k=top_k,
-                            filter_dict=filters
-                        )
-                    )
-                    results = await asyncio.wait_for(search_task, timeout=1.5)
-                    
-                    # Format results
-                    formatted_results = self._format_search_results(results)
-                    
-                    tool_outputs.append({
-                        "tool_call_id": tool_call.id,
-                        "output": formatted_results
-                    })
-                    
-                    logger.info(f"Knowledge base search returned {len(results)} results")
-                    
-                except asyncio.TimeoutError:
-                    logger.warning(f"Search timeout for query: '{query}'")
-                    tool_outputs.append({
-                        "tool_call_id": tool_call.id,
-                        "output": "Search timeout. Please try a more specific query."
-                    })
-                except Exception as e:
-                    logger.error(f"Error in search_knowledge_base: {e}")
-                    tool_outputs.append({
-                        "tool_call_id": tool_call.id,
-                        "output": f"Search error. Please try rephrasing your question."
-                    })
+                    response = await self.llm.achat([system_message, user_message])
+                    response_text = response.message.content
+                except AttributeError:
+                    # Fallback to synchronous chat if async is not available
+                    logger.info("Falling back to synchronous chat for greeting")
+                    response = self.llm.chat([system_message, user_message])
+                    response_text = response.message.content
+            except Exception as e:
+                logger.error(f"Error generating greeting: {e}")
+                response_text = "Hello! How can I assist you today?"
+        else:
+            response_text = "Hello! How can I assist you today?"
         
-        return tool_outputs
+        # Move to waiting for query
+        return {
+            "response": response_text,
+            "state": ConversationState.WAITING_FOR_QUERY,
+            "requires_human": False,
+            "context": None
+        }
     
-    def _format_search_results(self, results: List[Dict[str, Any]]) -> str:
-        """Format search results for the assistant."""
-        if not results:
-            return "No relevant information found in the knowledge base."
+    async def _handle_query(self, turn: ConversationTurn) -> Dict[str, Any]:
+        """
+        Handle user query.
         
-        # Limit to top 2 results to avoid token limits
-        results = results[:2]
-        
-        formatted = "Found the following information:\n\n"
-        
-        for i, result in enumerate(results, 1):
-            # Extract metadata
-            metadata = result.get("metadata", {})
-            score = result.get("score", 0.0)
-            text = metadata.get("text", result.get("text", "No content available"))
-            source = metadata.get("source", "Unknown")
+        Args:
+            turn: Current conversation turn
             
-            # Limit text length
-            if len(text) > 200:
-                text = text[:197] + "..."
+        Returns:
+            Response dictionary
+        """
+        query = turn.query
+        
+        # Check for human handoff request
+        if self._check_for_human_handoff(query):
+            return {
+                "response": "I'll connect you with a human agent shortly. Please wait a moment.",
+                "state": ConversationState.HUMAN_HANDOFF,
+                "requires_human": True,
+                "context": None
+            }
+        
+        # Retrieve relevant documents
+        context = None
+        if self.query_engine:
+            # Set state to retrieving
+            turn.state = ConversationState.RETRIEVING
             
-            formatted += f"**Source {i}** (Relevance: {score:.3f})\n"
-            formatted += f"Document: {source}\n"
-            formatted += f"Content: {text}\n\n"
+            try:
+                # Get relevant documents
+                retrieval_results = await self.query_engine.retrieve_with_sources(query)
+                turn.retrieved_context = retrieval_results["results"]
+                
+                # Format context for LLM
+                context = self.query_engine.format_retrieved_context(turn.retrieved_context)
+                
+                # Check if we have enough context
+                if not turn.retrieved_context:
+                    # No relevant information found
+                    if self._should_clarify(query):
+                        # Need clarification
+                        return {
+                            "response": self._generate_clarification_question(query),
+                            "state": ConversationState.CLARIFYING,
+                            "requires_human": False,
+                            "context": None
+                        }
+            except Exception as e:
+                logger.error(f"Error retrieving documents: {e}")
+                context = None
         
-        return formatted
-    
-    async def get_conversation_history(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get conversation history for a user."""
-        if user_id not in self.user_threads:
-            return []
-        
-        thread_id = self.user_threads[user_id]
-        
-        # Skip if it's a fallback thread
-        if thread_id.startswith("fallback_"):
-            return []
+        # Generate response
+        turn.state = ConversationState.GENERATING_RESPONSE
         
         try:
-            return await self.openai_manager.get_thread_messages(thread_id, limit)
-        except Exception as e:
-            logger.error(f"Error getting conversation history: {e}")
-            return []
-    
-    async def reset_conversation(self, user_id: str):
-        """Reset conversation for a user."""
-        if user_id in self.user_threads:
-            thread_id = self.user_threads[user_id]
+            # Get conversation history for context
+            conversation_history = self._format_conversation_history()
             
-            # Cancel any active run
-            if thread_id in self.active_runs:
-                run_id = self.active_runs[thread_id]
-                try:
-                    await self.openai_manager.client.beta.threads.runs.cancel(
-                        thread_id=thread_id,
-                        run_id=run_id
-                    )
-                    del self.active_runs[thread_id]
-                    if run_id in self.run_timeouts:
-                        del self.run_timeouts[run_id]
-                except Exception as e:
-                    logger.error(f"Error cancelling run during reset: {e}")
+            # Create system prompt with context
+            system_prompt = format_system_prompt(
+                base_prompt="You are a helpful AI assistant. Answer the user's question based on the provided information.",
+                retrieved_context=context
+            )
             
-            # Don't delete fallback threads
-            if not thread_id.startswith("fallback_"):
-                try:
-                    await self.openai_manager.delete_thread(thread_id)
-                except Exception as e:
-                    logger.warning(f"Could not delete thread: {e}")
+            # Create messages
+            messages = create_chat_messages(
+                system_prompt=system_prompt,
+                user_message=query,
+                chat_history=conversation_history
+            )
             
-            # Create new thread
+            # Generate response with fallback options
             try:
-                new_thread_id = await self.openai_manager.create_thread()
-                self.user_threads[user_id] = new_thread_id
-            except Exception as e:
-                logger.error(f"Error creating new thread: {e}")
-                # Create fallback thread
-                self.user_threads[user_id] = f"fallback_{user_id}_{int(time.time())}"
+                # First try using the async chat method
+                response = await self.llm.achat(messages)
+                response_text = response.message.content
+            except AttributeError:
+                # If achat fails, try using the synchronous chat method
+                logger.info("Falling back to synchronous chat method")
+                response = self.llm.chat(messages)
+                response_text = response.message.content
             
-            logger.info(f"Reset conversation for user {user_id}")
+            # Log for debugging
+            logger.info(f"LLM DIRECT RESPONSE: {response_text[:50]}...")
+        except Exception as e:
+            logger.error(f"Error generating response: {e}", exc_info=True)
+            response_text = "I'm sorry, I'm having trouble processing your request right now."
+        
+        # Return response
+        return {
+            "response": response_text,
+            "state": ConversationState.WAITING_FOR_QUERY,
+            "requires_human": False,
+            "context": context
+        }
+    
+    async def _handle_clarification(self, turn: ConversationTurn) -> Dict[str, Any]:
+        """
+        Handle clarification response from user.
+        
+        Args:
+            turn: Current conversation turn
+            
+        Returns:
+            Response dictionary
+        """
+        # Get original query from previous turn
+        original_query = self.history[-1].query if self.history else ""
+        
+        # Combine original query with clarification
+        combined_query = f"{original_query} {turn.query}"
+        
+        # Create new turn with combined query
+        new_turn = ConversationTurn(
+            query=combined_query,
+            state=ConversationState.WAITING_FOR_QUERY
+        )
+        
+        # Handle as normal query
+        return await self._handle_query(new_turn)
+    
+    async def generate_streaming_response(self, user_input: str) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Generate a streaming response to user input.
+        
+        Args:
+            user_input: User input text
+            
+        Returns:
+            Async iterator of response chunks
+        """
+        # Check if this looks like a query even if we're in greeting state
+        if self.current_state == ConversationState.GREETING and user_input and len(user_input.split()) > 2:
+            logger.info("First message in streaming appears to be a query, handling as query instead of greeting")
+            self.current_state = ConversationState.WAITING_FOR_QUERY
+        
+        # Create new turn
+        turn = ConversationTurn(
+            query=user_input,
+            state=self.current_state
+        )
+        
+        # Check for human handoff
+        if self._check_for_human_handoff(user_input):
+            result = {
+                "chunk": "I'll connect you with a human agent shortly. Please wait a moment.",
+                "done": True,
+                "requires_human": True,
+                "state": ConversationState.HUMAN_HANDOFF
+            }
+            
+            # Update turn and history
+            turn.response = result["chunk"]
+            turn.state = ConversationState.HUMAN_HANDOFF
+            self.history.append(turn)
+            self.current_state = ConversationState.HUMAN_HANDOFF
+            
+            # Update graph state
+            self._update_graph_state(turn)
+            
+            yield result
+            return
+        
+        # Retrieve relevant documents if appropriate
+        context = None
+        if self.query_engine:
+            try:
+                # Set state to retrieving
+                turn.state = ConversationState.RETRIEVING
+                
+                # Get relevant documents
+                retrieval_results = await self.query_engine.retrieve_with_sources(user_input)
+                turn.retrieved_context = retrieval_results["results"]
+                
+                # Format context for LLM
+                context = self.query_engine.format_retrieved_context(turn.retrieved_context)
+            except Exception as e:
+                logger.error(f"Error retrieving documents: {e}")
+                context = None
+        
+        # Stream response
+        turn.state = ConversationState.GENERATING_RESPONSE
+        full_response = ""
+        
+        try:
+            # Get conversation history
+            conversation_history = self._format_conversation_history()
+            
+            # Create system prompt with context
+            system_prompt = format_system_prompt(
+                base_prompt="You are a helpful AI assistant. Answer the user's question based on the provided information.",
+                retrieved_context=context
+            )
+            
+            # Create messages
+            messages = create_chat_messages(
+                system_prompt=system_prompt,
+                user_message=user_input,
+                chat_history=conversation_history
+            )
+            
+            try:
+                # Try async streaming first
+                stream_response = await self.llm.astream_chat(messages)
+                
+                # Now we can iterate through the streaming response
+                async for chunk in stream_response:
+                    # The attribute name might be delta or content depending on your LlamaIndex version
+                    chunk_text = chunk.delta if hasattr(chunk, 'delta') else chunk.content
+                    full_response += chunk_text
+                    
+                    yield {
+                        "chunk": chunk_text,
+                        "done": False,
+                        "requires_human": False,
+                        "state": ConversationState.GENERATING_RESPONSE
+                    }
+            except AttributeError:
+                # If astream_chat is not available, fall back to non-streaming
+                logger.info("Async streaming not available, falling back to regular chat")
+                response = self.llm.chat(messages)
+                response_text = response.message.content
+                full_response = response_text
+                
+                # Send the full response as a single chunk
+                yield {
+                    "chunk": response_text,
+                    "done": False,
+                    "requires_human": False,
+                    "state": ConversationState.GENERATING_RESPONSE
+                }
+            
+            # Final result
+            yield {
+                "chunk": "",
+                "full_response": full_response,
+                "done": True,
+                "requires_human": False,
+                "state": ConversationState.WAITING_FOR_QUERY
+            }
+            
+            # Update turn and history
+            turn.response = full_response
+            turn.state = ConversationState.WAITING_FOR_QUERY
+            self.history.append(turn)
+            self.current_state = ConversationState.WAITING_FOR_QUERY
+            
+            # Update graph state
+            self._update_graph_state(turn)
+            
+        except Exception as e:
+            logger.error(f"Error generating streaming response: {e}", exc_info=True)
+            
+            error_message = "I'm sorry, I'm having trouble processing your request right now."
+            yield {
+                "chunk": error_message,
+                "done": True,
+                "requires_human": False,
+                "state": ConversationState.WAITING_FOR_QUERY
+            }
+            
+            # Update turn and history
+            turn.response = error_message
+            turn.state = ConversationState.WAITING_FOR_QUERY
+            self.history.append(turn)
+            self.current_state = ConversationState.WAITING_FOR_QUERY
+            
+            # Update graph state
+            self._update_graph_state(turn)
+    
+    def _check_for_human_handoff(self, query: str) -> bool:
+        """
+        Check if user is requesting human handoff.
+        
+        Args:
+            query: User query
+            
+        Returns:
+            True if human handoff requested
+        """
+        # Simple keyword matching
+        handoff_keywords = [
+            "speak to a human",
+            "talk to a person",
+            "talk to someone",
+            "speak to an agent",
+            "connect me with",
+            "real person",
+            "human agent",
+            "customer service",
+            "representative"
+        ]
+        
+        query_lower = query.lower()
+        for keyword in handoff_keywords:
+            if keyword in query_lower:
+                return True
+        
+        return False
+    
+    def _should_clarify(self, query: str) -> bool:
+        """
+        Determine if we need clarification for the query.
+        
+        Args:
+            query: User query
+            
+        Returns:
+            True if clarification needed
+        """
+        # Check query length
+        if len(query.split()) < 3:
+            return True
+        
+        # Check for vagueness
+        vague_terms = ["this", "that", "it", "thing", "stuff", "something"]
+        query_lower = query.lower()
+        for term in vague_terms:
+            if term in query_lower.split():
+                return True
+        
+        return False
+    
+    def _generate_clarification_question(self, query: str) -> str:
+        """
+        Generate a clarification question.
+        
+        Args:
+            query: Original query
+            
+        Returns:
+            Clarification question
+        """
+        # Simple template-based generation
+        templates = [
+            "Could you please provide more details about what you're looking for?",
+            "I'd like to help, but I need a bit more information. Can you elaborate on your question?",
+            "To better assist you, could you be more specific about what you need?",
+            "I'm not sure I understand completely. Could you explain what you're looking for in more detail?",
+            "Could you clarify what specifically you'd like to know about this topic?"
+        ]
+        
+        import random
+        return random.choice(templates)
+    
+    def _format_conversation_history(self) -> List[Dict[str, str]]:
+        """
+        Format conversation history for language model.
+        
+        Returns:
+            Formatted conversation history
+        """
+        formatted_history = []
+        
+        # Add recent turns (up to last 5 turns)
+        for turn in self.history[-5:]:
+            if turn.query:
+                formatted_history.append({
+                    "role": "user",
+                    "content": turn.query
+                })
+            
+            if turn.response:
+                formatted_history.append({
+                    "role": "assistant",
+                    "content": turn.response
+                })
+        
+        return formatted_history
+    
+    def get_history(self) -> List[Dict[str, Any]]:
+        """
+        Get conversation history.
+        
+        Returns:
+            List of conversation turns
+        """
+        return [turn.to_dict() for turn in self.history]
+    
+    def get_latest_context(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get most recently retrieved context.
+        
+        Returns:
+            Retrieved context documents or None
+        """
+        # Find most recent turn with context
+        for turn in reversed(self.history):
+            if turn.retrieved_context:
+                return turn.retrieved_context
+        
+        return None
+    
+    def reset(self):
+        """Reset conversation state."""
+        # Reset to initial state based on skip_greeting flag
+        self.current_state = ConversationState.WAITING_FOR_QUERY if self.skip_greeting else ConversationState.GREETING
+        self.history = []
+        self.context_cache = {}
+        
+        # Reset graph state
+        self.graph_state = {
+            "session_id": self.session_id,
+            "current_state": self.current_state,
+            "history": [],
+            "context": None,
+            "metadata": {}
+        }
+        
+        logger.info(f"Reset conversation for session: {self.session_id}")
+    
+    def get_state_for_transfer(self) -> Dict[str, Any]:
+        """
+        Get conversation state for human handoff.
+        
+        Returns:
+            Dictionary with conversation state for transfer
+        """
+        # Create transfer state with relevant information
+        transfer_state = {
+            "session_id": self.session_id,
+            "current_state": self.current_state,
+            "history_summary": self._generate_history_summary(),
+            "last_query": self.history[-1].query if self.history else None,
+            "last_response": self.history[-1].response if self.history else None,
+            "recent_context": self.get_latest_context()
+        }
+        
+        return transfer_state
+    
+    def _generate_history_summary(self) -> str:
+        """
+        Generate a summary of conversation history.
+        
+        Returns:
+            Summary text
+        """
+        if not self.history:
+            return "No conversation history."
+        
+        # Count turns
+        num_turns = len(self.history) // 2
+        
+        # Get key exchanges
+        summary_parts = [f"Conversation with {num_turns} exchanges:"]
+        
+        for i, turn in enumerate(self.history):
+            if turn.query:
+                summary_parts.append(f"User: {turn.query}")
+            if turn.response:
+                # Truncate long responses
+                response = turn.response
+                if len(response) > 100:
+                    response = response[:97] + "..."
+                summary_parts.append(f"AI: {response}")
+        
+        return "\n".join(summary_parts)
+    
+    # LangGraph preparation - placeholder methods for future implementation
+    def get_graph_state(self) -> Dict[str, Any]:
+        """
+        Get the current graph state.
+        
+        Returns:
+            Current graph state
+        """
+        return self.graph_state
+    
+    def serialize_state(self) -> str:
+        """
+        Serialize the current state for LangGraph.
+        
+        Returns:
+            Serialized state
+        """
+        return json.dumps(self.graph_state)
+    
+    @classmethod
+    def deserialize_state(cls, serialized_state: str) -> Dict[str, Any]:
+        """
+        Deserialize a state for LangGraph.
+        
+        Args:
+            serialized_state: Serialized state
+            
+        Returns:
+            Deserialized state
+        """
+        return json.loads(serialized_state)

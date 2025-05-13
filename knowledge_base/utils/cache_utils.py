@@ -1,124 +1,155 @@
 """
-Caching utilities for knowledge base queries with fallback when Redis is unavailable.
+Caching utilities for knowledge base queries.
 """
+import os
 import json
+import time
 import hashlib
-import asyncio
 from typing import Dict, Any, Optional
-import logging
 
-logger = logging.getLogger(__name__)
-
-class CacheManager:
-    """Manage caching for knowledge base queries with Redis fallback."""
+class StreamingResponseCache:
+    """
+    Cache for storing and retrieving responses to common queries.
+    Optimized for low-latency responses in time-sensitive applications.
+    """
     
-    def __init__(self, redis_client: Optional[Any] = None, ttl: int = 3600):
-        """Initialize cache manager."""
-        self.ttl = ttl
-        self.redis_available = False
-        self.memory_cache = {}  # Fallback in-memory cache
-        self.max_memory_items = 100  # Limit memory cache size
+    def __init__(self, cache_dir: str = "./cache", ttl_seconds: int = 86400):
+        """
+        Initialize the response cache.
         
-        # Try to initialize Redis
-        try:
-            import redis.asyncio as redis
-            self.redis = redis_client or redis.from_url("redis://localhost:6379/0", socket_timeout=1)
-            # Test Redis connection
-            asyncio.create_task(self._test_redis_connection())
-        except ImportError:
-            logger.warning("Redis not available - using memory cache only")
-            self.redis = None
-        except Exception as e:
-            logger.warning(f"Redis connection failed - using memory cache only: {e}")
-            self.redis = None
-    
-    async def _test_redis_connection(self):
-        """Test Redis connection and set availability flag."""
-        try:
-            if self.redis:
-                await asyncio.wait_for(self.redis.ping(), timeout=1.0)
-                self.redis_available = True
-                logger.info("Redis cache available")
-        except Exception as e:
-            logger.warning(f"Redis test failed - using memory cache: {e}")
-            self.redis_available = False
-    
-    def _generate_cache_key(self, query: str, context: Optional[Dict] = None) -> str:
-        """Generate cache key for query."""
-        # Create hash from query and context
-        content = query
-        if context:
-            content += json.dumps(context, sort_keys=True)
+        Args:
+            cache_dir: Directory to store cache files
+            ttl_seconds: Time-to-live for cache entries in seconds (default: 24 hours)
+        """
+        self.cache_dir = cache_dir
+        self.ttl_seconds = ttl_seconds
+        self.memory_cache: Dict[str, Dict[str, Any]] = {}
         
-        return f"cache:query:{hashlib.md5(content.encode()).hexdigest()}"
+        # Create cache directory if it doesn't exist
+        os.makedirs(cache_dir, exist_ok=True)
     
-    async def get(self, query: str, context: Optional[Dict] = None) -> Optional[str]:
-        """Get cached response."""
-        cache_key = self._generate_cache_key(query, context)
+    def _get_key(self, query: str) -> str:
+        """
+        Generate a cache key for a query.
         
-        # Try Redis first if available
-        if self.redis_available and self.redis:
+        Args:
+            query: Query string
+            
+        Returns:
+            Cache key
+        """
+        # Normalize query by lowercasing and removing extra whitespace
+        normalized_query = " ".join(query.lower().split())
+        
+        # Create hash for the key
+        return hashlib.md5(normalized_query.encode()).hexdigest()
+    
+    def get(self, query: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a response from the cache if available and not expired.
+        
+        Args:
+            query: Query string
+            
+        Returns:
+            Cached response or None if not found or expired
+        """
+        key = self._get_key(query)
+        
+        # Check memory cache first (fastest)
+        if key in self.memory_cache:
+            entry = self.memory_cache[key]
+            
+            # Check if entry is expired
+            if time.time() - entry["timestamp"] < self.ttl_seconds:
+                return entry["data"]
+            
+            # Remove expired entry
+            del self.memory_cache[key]
+        
+        # Check disk cache
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        if os.path.exists(cache_file):
             try:
-                cached_value = await self.redis.get(cache_key)
-                if cached_value:
-                    logger.debug(f"Redis cache hit for query: {query[:50]}...")
-                    return json.loads(cached_value)
-            except Exception as e:
-                logger.warning(f"Redis get error: {e}")
-                self.redis_available = False
-        
-        # Fallback to memory cache
-        if cache_key in self.memory_cache:
-            logger.debug(f"Memory cache hit for query: {query[:50]}...")
-            return self.memory_cache[cache_key]
+                with open(cache_file, 'r') as f:
+                    entry = json.load(f)
+                
+                # Check if entry is expired
+                if time.time() - entry["timestamp"] < self.ttl_seconds:
+                    # Add to memory cache for faster access next time
+                    self.memory_cache[key] = entry
+                    return entry["data"]
+                
+                # Remove expired cache file
+                os.remove(cache_file)
+            except Exception:
+                # Ignore errors reading cache
+                pass
         
         return None
     
-    async def set(self, query: str, response: str, context: Optional[Dict] = None):
-        """Cache response."""
-        cache_key = self._generate_cache_key(query, context)
+    def set(self, query: str, response: Dict[str, Any]):
+        """
+        Store a response in the cache.
         
-        # Try Redis first if available
-        if self.redis_available and self.redis:
-            try:
-                await self.redis.setex(
-                    cache_key, 
-                    self.ttl, 
-                    json.dumps(response)
-                )
-                logger.debug(f"Cached response in Redis for query: {query[:50]}...")
-                return
-            except Exception as e:
-                logger.warning(f"Redis set error: {e}")
-                self.redis_available = False
+        Args:
+            query: Query string
+            response: Response data to cache
+        """
+        key = self._get_key(query)
         
-        # Fallback to memory cache
-        self.memory_cache[cache_key] = response
+        # Create cache entry
+        entry = {
+            "timestamp": time.time(),
+            "data": response
+        }
         
-        # Limit memory cache size
-        if len(self.memory_cache) > self.max_memory_items:
-            # Remove oldest item
-            oldest_key = next(iter(self.memory_cache))
-            del self.memory_cache[oldest_key]
+        # Store in memory cache
+        self.memory_cache[key] = entry
         
-        logger.debug(f"Cached response in memory for query: {query[:50]}...")
+        # Store on disk
+        try:
+            cache_file = os.path.join(self.cache_dir, f"{key}.json")
+            with open(cache_file, 'w') as f:
+                json.dump(entry, f)
+        except Exception:
+            # Ignore errors writing to disk
+            pass
     
-    async def invalidate_pattern(self, pattern: str):
-        """Invalidate all cache entries matching pattern."""
-        # Try Redis first if available
-        if self.redis_available and self.redis:
-            try:
-                keys = await self.redis.keys(f"cache:query:{pattern}*")
-                if keys:
-                    await self.redis.delete(*keys)
-                    logger.info(f"Invalidated {len(keys)} Redis cache entries")
-                return
-            except Exception as e:
-                logger.warning(f"Redis invalidate error: {e}")
-                self.redis_available = False
+    def clear(self):
+        """Clear the cache."""
+        # Clear memory cache
+        self.memory_cache.clear()
         
-        # Fallback to memory cache
-        keys_to_remove = [k for k in self.memory_cache.keys() if pattern in k]
-        for key in keys_to_remove:
-            del self.memory_cache[key]
-        logger.info(f"Invalidated {len(keys_to_remove)} memory cache entries")
+        # Clear disk cache
+        try:
+            for filename in os.listdir(self.cache_dir):
+                if filename.endswith('.json'):
+                    file_path = os.path.join(self.cache_dir, filename)
+                    os.remove(file_path)
+        except Exception:
+            # Ignore errors clearing cache
+            pass
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get cache statistics.
+        
+        Returns:
+            Dictionary with cache statistics
+        """
+        # Count disk cache entries
+        disk_count = 0
+        try:
+            for filename in os.listdir(self.cache_dir):
+                if filename.endswith('.json'):
+                    disk_count += 1
+        except Exception:
+            pass
+        
+        return {
+            "memory_entries": len(self.memory_cache),
+            "disk_entries": disk_count,
+            "ttl_seconds": self.ttl_seconds,
+            "cache_dir": self.cache_dir
+        }

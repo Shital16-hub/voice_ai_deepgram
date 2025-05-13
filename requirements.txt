@@ -1,10 +1,10 @@
 # Core dependencies
-aiohttp>=3.8.0
+aiohttp
 aiohttp-retry
 asyncio
-fastapi>=0.100.0
+fastapi
 uvicorn
-flask>=2.3.0
+flask
 flask-sockets
 gevent
 gevent-websocket
@@ -14,20 +14,22 @@ simple-websocket
 audioread
 librosa
 soundfile
-numpy>=1.21.0
-scipy>=1.7.0
+numpy
+scipy
 pywhispercpp
 
-# Google Cloud Speech
-google-cloud-speech>=2.25.0
-google-auth>=2.23.0
-google-api-core>=2.11.0
-google-cloud-core>=2.3.2
-
-# OpenAI and Pinecone
-openai>=1.0.0
-pinecone-client>=2.2.0
-tiktoken
+# AI/ML components
+llama-index
+llama-index-core
+llama-index-embeddings-huggingface
+llama-index-vector-stores-chroma
+llama-index-llms-ollama
+llama-index-readers-file
+chromadb
+ollama
+sentence-transformers
+transformers
+torch
 
 # Language processing
 langchain-core
@@ -38,7 +40,7 @@ nltk
 langdetect
 
 # Twilio integration
-twilio>=8.0.0
+twilio
 
 # Document processing
 beautifulsoup4
@@ -50,9 +52,9 @@ openpyxl
 lxml
 
 # Utilities
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
+pydantic
+pydantic-settings
+python-dotenv
 requests
 websockets
 websocket-client
@@ -61,9 +63,9 @@ pytest
 pytest-asyncio
 typing-extensions
 
-# TTS
-elevenlabs==0.2.27
+google-cloud-speech>=2.25.0
+google-auth>=2.23.0
+google-api-core>=2.11.0
+google-cloud-core>=2.3.2
 
-# Cache and rate limiting
-redis
-hiredis
+elevenlabs==0.2.27
