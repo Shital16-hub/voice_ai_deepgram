@@ -80,6 +80,10 @@ class AudioProcessor:
             if audio_level < 1.0:  # Very quiet audio
                 audio_array = audio_array * min(5.0, 5.0/audio_level)
                 logger.debug(f"Applied gain to quiet audio. New level: {np.mean(np.abs(audio_array)) * 100:.1f}%")
+
+            else:
+                # Don't apply gain if audio level is zero
+                pass
             
             return audio_array
             
