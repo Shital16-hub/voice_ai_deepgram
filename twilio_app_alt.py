@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Twilio application without barge-in detection.
+Updated Twilio application using Google Cloud STT v2.25.0+ without deprecated fields.
 """
 import os
 import sys
 import asyncio
 import logging
 import json
-import base64
-import requests
-import time
 import threading
 import numpy as np
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, Response
 from simple_websocket import Server
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 
-# Import your modules
-from telephony.twilio_handler import TwilioHandler
-from telephony.websocket_handler import WebSocketHandler
-from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
+# Import updated modules
+from telephony.websocket.websocket_handler import WebSocketHandler
 from voice_ai_agent import VoiceAIAgent
 from integration.pipeline import VoiceAIAgentPipeline
 from text_to_speech import ElevenLabsTTS
@@ -28,154 +23,60 @@ from text_to_speech import ElevenLabsTTS
 # Load environment variables
 load_dotenv()
 
-def configure_detailed_logging():
-    """Configure detailed logging for debugging."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    # Set specific loggers to debug level
-    debug_loggers = [
-        'speech_to_text.simple_google_stt',
-        'telephony.websocket.speech_processor',
-        'telephony.websocket.audio_manager',
-        'telephony.websocket.message_router'
-    ]
-    
-    for logger_name in debug_loggers:
-        logging.getLogger(logger_name).setLevel(logging.DEBUG)
-    
-    # Disable noisy loggers
-    logging.getLogger('google.cloud').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-
-
-configure_detailed_logging()
-
-
-# Configure logging with reduced noise from small audio chunks
-def configure_logging():
-    # Set up root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    
-    # Remove existing handlers to avoid duplication
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-    
-    # Create a handler for console output
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    
-    # Create a formatter
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    console_handler.setFormatter(formatter)
-    
-    # Add handler to root logger
-    root_logger.addHandler(console_handler)
-    
-    # Set specific loggers to higher levels to reduce noise
-    logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)  # Only show errors
-    
-    # Create a filter to ignore specific messages
-    class IgnoreSmallMulawFilter(logging.Filter):
-        def filter(self, record):
-            return not (record.getMessage().startswith("Very small mulaw data"))
-    
-    # Add filter to the handlers
-    for handler in root_logger.handlers:
-        handler.addFilter(IgnoreSmallMulawFilter())
-    
-    # Optionally create a file handler for full logs
-    file_handler = logging.FileHandler('full_debug.log')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
-    
-    return root_logger
-
 # Configure logging
-logger = configure_logging()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+logger = logging.getLogger(__name__)
 
 # Flask app setup
 app = Flask(__name__)
 
-# Global instances
-twilio_handler = None
-voice_ai_pipeline = None
+# Global variables
 base_url = None
-
-# Dictionary to store event loops and state for each call
+voice_ai_pipeline = None
 call_event_loops = {}
 
-# Helper function to split audio into chunks
-def split_audio_into_chunks(audio_data: bytes) -> list:
-    """
-    Split audio into smaller chunks for processing.
-    
-    Args:
-        audio_data: Audio data to split
-        
-    Returns:
-        List of chunks
-    """
-    # Simple chunking
-    chunk_size = 800  # 100ms at 8kHz
-    chunks = []
-    
-    # Split into equal-sized chunks
-    for i in range(0, len(audio_data), chunk_size):
-        chunks.append(audio_data[i:i+chunk_size])
-        
-    return chunks
-
 async def initialize_system():
-    """Initialize all system components with ElevenLabs TTS integration."""
-    global twilio_handler, voice_ai_pipeline, base_url
+    """Initialize the Voice AI system with updated components."""
+    global voice_ai_pipeline, base_url
     
-    logger.info("Initializing Voice AI Agent with ElevenLabs TTS integration...")
+    logger.info("Initializing Voice AI system with updated Google Cloud STT...")
     
-    # Verify ElevenLabs API key is set
-    elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
-    if not elevenlabs_api_key:
-        logger.warning("ELEVENLABS_API_KEY not set in environment, attempting to proceed without it")
-    
-    # Define a generic telephony-optimized prompt
-    telephony_prompt = (
-        "This is a telephone conversation with a customer. "
-        "The customer may ask questions about products, services, pricing, or features. "
-        "Transcribe exactly what is spoken, filtering out noise, static, and line interference. "
-        "Common terms in business conversations include: pricing, plan, cost, features, "
-        "monthly, subscription, support, upgrade, details, information."
-    )
-    
-    # Get base URL from environment
+    # Get base URL
     base_url = os.getenv('BASE_URL')
     if not base_url:
         logger.error("BASE_URL not set in environment")
         raise ValueError("BASE_URL must be set")
     
-    logger.info(f"Using BASE_URL: {base_url}")
+    # Verify API keys
+    elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not elevenlabs_api_key:
+        logger.error("ELEVENLABS_API_KEY not set")
+        raise ValueError("ELEVENLABS_API_KEY must be set")
     
-    # Initialize Voice AI Agent with optimized parameters
+    # Check Google Cloud credentials
+    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        logger.warning("GOOGLE_APPLICATION_CREDENTIALS not set. Make sure you have authentication configured.")
+    
+    # Initialize Voice AI Agent with updated configuration
     agent = VoiceAIAgent(
         storage_dir='./storage',
         model_name='mistral:7b-instruct-v0.2-q4_0',
         llm_temperature=0.7,
-        # Pass optimized telephony parameters
-        whisper_initial_prompt=telephony_prompt,
-        whisper_temperature=0.0,  # Greedy decoding for more reliable transcription
-        whisper_no_context=True,  # Each utterance is independent
-        whisper_preset="default",
-        # Pass ElevenLabs parameters
+        # Updated Google Cloud STT parameters
+        language='en-US',
+        enhanced_model=True,
+        # ElevenLabs parameters
         elevenlabs_api_key=elevenlabs_api_key,
-        elevenlabs_voice_id=os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'),  # Default to Bella voice
-        elevenlabs_model_id=os.getenv('TTS_MODEL_ID', 'eleven_turbo_v2')  # Latest model
+        elevenlabs_voice_id=os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'),
+        elevenlabs_model_id=os.getenv('TTS_MODEL_ID', 'eleven_turbo_v2')
     )
     await agent.init()
     
-    # Initialize TTS integration with ElevenLabs
+    # Initialize TTS integration
     from integration.tts_integration import TTSIntegration
     tts = TTSIntegration(
         voice_id=os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'),
@@ -183,142 +84,108 @@ async def initialize_system():
     )
     await tts.init()
     
-    # Create pipeline
+    # Create pipeline with updated components
     voice_ai_pipeline = VoiceAIAgentPipeline(
-        speech_recognizer=agent.speech_recognizer,
+        speech_recognizer=agent.speech_recognizer,  # Now uses updated Google Cloud STT
         conversation_manager=agent.conversation_manager,
         query_engine=agent.query_engine,
         tts_integration=tts
     )
     
-    # Initialize Twilio handler
-    twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
-    await twilio_handler.start()
-    
-    logger.info("System initialized successfully with ElevenLabs TTS integration")
+    logger.info("System initialized successfully with updated Google Cloud STT v2.25.0+")
 
 @app.route('/', methods=['GET'])
 def index():
-    """Simple test endpoint."""
-    return "Voice AI Agent is running with ElevenLabs TTS integration!"
+    """Health check endpoint."""
+    return {"status": "Voice AI Agent Running", "version": "updated_v2.25.0"}
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
-    """Handle incoming voice calls without barge-in support."""
+    """Handle incoming voice calls."""
     logger.info("Received incoming call request")
     logger.info(f"Request headers: {request.headers}")
     logger.info(f"Request form data: {request.form}")
     
-    if not twilio_handler:
+    if not voice_ai_pipeline:
         logger.error("System not initialized")
-        fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>System is not initialized. Please try again later.</Say>
-</Response>'''
-        return Response(fallback_twiml, mimetype='text/xml')
+        return Response(
+            '<?xml version="1.0" encoding="UTF-8"?><Response><Say>System not ready. Please try again.</Say></Response>',
+            mimetype='text/xml'
+        )
     
     # Get call parameters
     from_number = request.form.get('From')
     to_number = request.form.get('To')
     call_sid = request.form.get('CallSid')
     
-    logger.info(f"Incoming call - From: {from_number}, To: {to_number}, CallSid: {call_sid}")
+    logger.info(f"Incoming call from {from_number} to {to_number}, SID: {call_sid}")
     
     try:
-        # Add call to manager
-        twilio_handler.call_manager.add_call(call_sid, from_number, to_number)
-        
-        # Create TwiML response without barge-in handling
+        # Create TwiML response
         response = VoiceResponse()
         
-        # Add a 1 second silence before starting - this helps avoid initial echo problems
+        # Add brief pause to avoid initial audio issues
         response.pause(length=1)
         
-        # Create WebSocket URL for streaming
+        # Create WebSocket URL
         ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
         
-        # Create Connect with Stream for bi-directional audio
+        # Create Connect with Stream
         connect = Connect()
-        
-        # Create Stream with standard parameters
         stream = Stream(
-            name="stream", 
-            url=ws_url, 
+            name="speech_stream",
+            url=ws_url,
             track="inbound_track"
         )
         
-        # Set basic parameters
+        # Optimized parameters for Google Cloud STT
         stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
+        stream.parameter(name="amd", value="false")  # Disable answering machine detection
         
-        # Add stream to connect
         connect.append(stream)
-        
-        # Add connect to response
         response.append(connect)
         
-        # Return TwiML
-        twiml = str(response)
-        return Response(twiml, mimetype='text/xml')
+        return Response(str(response), mimetype='text/xml')
+        
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
-        # Fallback response
-        fallback_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>An error occurred. Please try again later.</Say>
-</Response>'''
-        return Response(fallback_twiml, mimetype='text/xml')
+        return Response(
+            '<?xml version="1.0" encoding="UTF-8"?><Response><Say>An error occurred. Please try again.</Say></Response>',
+            mimetype='text/xml'
+        )
 
 @app.route('/voice/status', methods=['POST'])
 def handle_status_callback():
     """Handle call status callbacks."""
-    logger.info("Received status callback")
-    logger.info(f"Status data: {request.form}")
-    
-    if not twilio_handler:
-        logger.error("System not initialized")
-        return Response('', status=204)
-    
-    # Get status parameters
     call_sid = request.form.get('CallSid')
     call_status = request.form.get('CallStatus')
     
     logger.info(f"Call {call_sid} status: {call_status}")
     
-    try:
-        # Handle status update
-        twilio_handler.handle_status_callback(call_sid, call_status)
+    # Clean up event loop if call is completed
+    if call_status in ['completed', 'failed', 'busy', 'no-answer'] and call_sid in call_event_loops:
+        loop_info = call_event_loops[call_sid]
         
-        # Clean up event loop if call is completed and exists in call_event_loops
-        if call_status in ['completed', 'failed', 'busy', 'no-answer'] and call_sid in call_event_loops:
-            loop_info = call_event_loops[call_sid]
-            # Signal termination
-            if 'terminate_flag' in loop_info:
-                loop_info['terminate_flag'].set()
-                
-            # Remove from dictionary
-            if loop_info.get('thread'):
-                # Wait for thread to join with timeout
-                thread = loop_info['thread']
-                thread.join(timeout=1.0)
-                
-            # Remove from tracking
-            try:
-                del call_event_loops[call_sid]
-                logger.info(f"Cleaned up event loop resources for call {call_sid}")
-            except KeyError:
-                logger.warning(f"Call {call_sid} not found in event loops - already cleaned up")
-                
-        return Response('', status=204)
-    except Exception as e:
-        logger.error(f"Error handling status callback: {e}")
-        return Response('', status=204)
+        # Signal termination
+        if 'loop' in loop_info and loop_info['loop'].is_running():
+            loop_info['loop'].call_soon_threadsafe(loop_info['loop'].stop)
+        
+        # Join thread with timeout
+        if 'thread' in loop_info:
+            loop_info['thread'].join(timeout=1.0)
+        
+        # Remove from tracking
+        del call_event_loops[call_sid]
+        logger.info(f"Cleaned up resources for call {call_sid}")
+    
+    return Response('', status=204)
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream without barge-in detection."""
+    """Handle WebSocket media stream."""
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
-    if not twilio_handler or not voice_ai_pipeline:
+    if not voice_ai_pipeline:
         logger.error("System not initialized")
         return ""
     
@@ -327,48 +194,47 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Initialize WebSocketHandler without barge-in handling
+        # Create updated WebSocket handler
         ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
         
-        # Create a new event loop for this WebSocket connection
+        # Create event loop for this connection
         loop = asyncio.new_event_loop()
         
-        # Create a thread to run the event loop
-        def run_ws_handler_loop():
+        def run_handler_loop():
             asyncio.set_event_loop(loop)
             try:
-                # Create tasks for handling the initial connection and message processing
+                # Handle initial connection
                 loop.create_task(ws_handler.handle_message(json.dumps({
                     "event": "connected",
                     "protocol": "Call",
                     "version": "1.0.0"
                 }), ws))
                 
-                # Run the event loop
+                # Run the loop
                 loop.run_forever()
             except Exception as e:
-                logger.error(f"Error in WebSocket handler loop: {e}", exc_info=True)
+                logger.error(f"Error in handler loop: {e}", exc_info=True)
             finally:
                 loop.close()
         
-        # Start the thread
-        thread = threading.Thread(target=run_ws_handler_loop, daemon=True)
+        # Start handler thread
+        thread = threading.Thread(target=run_handler_loop, daemon=True)
         thread.start()
         
-        # Store the thread and loop for cleanup
+        # Store for cleanup
         call_event_loops[call_sid] = {
             'loop': loop,
             'thread': thread
         }
         
-        # Process messages in the main thread and send them to the event loop
+        # Process messages in main thread
         while True:
             try:
                 message = ws.receive(timeout=5)
                 if message is None:
                     continue
                 
-                # Schedule the message to be processed in the event loop
+                # Send to handler loop
                 asyncio.run_coroutine_threadsafe(
                     ws_handler.handle_message(message, ws),
                     loop
@@ -376,31 +242,28 @@ def handle_media_stream(call_sid):
             except Exception as e:
                 logger.error(f"Error receiving WebSocket message: {e}", exc_info=True)
                 break
-        
+    
     except Exception as e:
         logger.error(f"Error establishing WebSocket connection: {e}", exc_info=True)
     finally:
-        # Clean up
+        # Cleanup
         if call_sid in call_event_loops:
             info = call_event_loops[call_sid]
             if 'loop' in info and info['loop'].is_running():
                 info['loop'].call_soon_threadsafe(info['loop'].stop)
-            
-            # Remove from tracking
             del call_event_loops[call_sid]
         
         if ws:
             try:
                 ws.close()
-            except Exception as e:
-                logger.error(f"Error closing WebSocket: {e}")
+            except:
+                pass
         
-        logger.info(f"WebSocket connection cleanup complete for call {call_sid}")
+        logger.info(f"WebSocket cleanup complete for call {call_sid}")
         return ""
 
-# Function to initialize the system synchronously
 def init_system():
-    """Run the async initialization in a synchronous context."""
+    """Initialize system synchronously."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -408,13 +271,16 @@ def init_system():
     finally:
         loop.close()
 
-# Starting point of the application
 if __name__ == '__main__':
-    print("Starting Voice AI Agent with ElevenLabs TTS integration...")
+    print("Starting Voice AI Agent with updated Google Cloud STT v2.25.0+...")
     
-    # Initialize the system before starting the Flask app
+    # Initialize system
     init_system()
     
-    # Run the Flask app
-    print(f"Starting Flask server on {HOST}:{PORT}")
-    app.run(host=HOST, port=PORT, debug=DEBUG)
+    # Start Flask app
+    host = os.getenv('HOST', '0.0.0.0')
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('DEBUG', 'False').lower() == 'true'
+    
+    print(f"Starting Flask server on {host}:{port}")
+    app.run(host=host, port=port, debug=debug)

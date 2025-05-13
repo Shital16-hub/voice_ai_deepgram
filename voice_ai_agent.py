@@ -1,9 +1,8 @@
 # voice_ai_agent.py
 
 """
-Voice AI Agent main class that coordinates all components with Google Cloud STT integration
-and ElevenLabs TTS.
-Generic version that works with any knowledge base.
+Voice AI Agent main class that coordinates all components with Google Cloud STT v2.25.0+
+and ElevenLabs TTS. Updated to use the new simplified Google Cloud STT implementation.
 """
 import os
 import logging
@@ -13,7 +12,7 @@ from typing import Optional, Dict, Any, Union, Callable, Awaitable
 import numpy as np
 from scipy import signal
 
-# Google Cloud STT imports
+# Import the updated Google Cloud STT
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 from speech_to_text.stt_integration import STTIntegration
 from knowledge_base.conversation_manager import ConversationManager
@@ -27,7 +26,7 @@ from text_to_speech import ElevenLabsTTS
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """Main Voice AI Agent class that coordinates all components with Google Cloud STT and ElevenLabs TTS."""
+    """Main Voice AI Agent class using updated Google Cloud STT v2.25.0+ and ElevenLabs TTS."""
     
     def __init__(
         self,
@@ -37,7 +36,7 @@ class VoiceAIAgent:
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with Google Cloud STT and ElevenLabs TTS.
+        Initialize the Voice AI Agent with updated Google Cloud STT v2.25.0+.
         
         Args:
             storage_dir: Directory for persistent storage
@@ -49,18 +48,15 @@ class VoiceAIAgent:
         self.model_name = model_name
         self.llm_temperature = llm_temperature
         
-        # STT Parameters
-        self.stt_language = kwargs.get('language', 'en-US')
+        # STT Parameters for updated Google Cloud STT
+        self.language = kwargs.get('language', 'en-US')
         self.stt_keywords = kwargs.get('keywords', ['price', 'plan', 'cost', 'subscription', 'service'])
-        
-        # Whether to use enhanced model for telephony
         self.enhanced_model = kwargs.get('enhanced_model', True)
         
         # TTS Parameters for ElevenLabs
         self.elevenlabs_api_key = kwargs.get('elevenlabs_api_key', os.getenv('ELEVENLABS_API_KEY'))
-        # Updated to use environment variables with better defaults
-        self.elevenlabs_voice_id = kwargs.get('elevenlabs_voice_id', os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'))  # Bella voice
-        self.elevenlabs_model_id = kwargs.get('elevenlabs_model_id', os.getenv('TTS_MODEL_ID', 'eleven_turbo_v2'))  # Latest model
+        self.elevenlabs_voice_id = kwargs.get('elevenlabs_voice_id', os.getenv('TTS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL'))
+        self.elevenlabs_model_id = kwargs.get('elevenlabs_model_id', os.getenv('TTS_MODEL_ID', 'eleven_turbo_v2'))
         
         # Component placeholders
         self.speech_recognizer = None
@@ -144,16 +140,16 @@ class VoiceAIAgent:
                 )
         
     async def init(self):
-        """Initialize all components with Google Cloud STT and ElevenLabs TTS."""
-        logger.info("Initializing Voice AI Agent components with Google Cloud STT and ElevenLabs TTS...")
+        """Initialize all components with updated Google Cloud STT v2.25.0+."""
+        logger.info("Initializing Voice AI Agent components with updated Google Cloud STT v2.25.0+...")
         
-        # Initialize speech recognizer with Google Cloud
+        # Initialize speech recognizer with updated Google Cloud STT
         self.speech_recognizer = GoogleCloudStreamingSTT(
-            language=self.stt_language,
-            sample_rate=16000,
-            encoding="LINEAR16",
+            language=self.language,
+            sample_rate=8000,  # Use 8kHz for Twilio compatibility
+            encoding="MULAW",   # Use MULAW for Twilio
             channels=1,
-            interim_results=True,
+            interim_results=False,  # Disable for lower latency
             speech_context_phrases=self.stt_keywords,
             enhanced_model=self.enhanced_model
         )
@@ -161,7 +157,7 @@ class VoiceAIAgent:
         # Initialize STT integration 
         self.stt_integration = STTIntegration(
             speech_recognizer=self.speech_recognizer,
-            language=self.stt_language
+            language=self.language[:2]  # Extract language code (e.g., 'en' from 'en-US')
         )
         
         # Initialize document store and index manager
@@ -198,7 +194,7 @@ class VoiceAIAgent:
                 model_id=self.elevenlabs_model_id,
                 container_format="mulaw",  # For Twilio compatibility
                 sample_rate=8000,  # For Twilio compatibility
-                optimize_streaming_latency=4  # Maximum optimization for real-time performance
+                optimize_streaming_latency=3  # Optimized for real-time (reduced from 4 to 3)
             )
             
             logger.info(f"Initialized ElevenLabs TTS with voice ID: {self.elevenlabs_voice_id}, model ID: {self.elevenlabs_model_id}")
@@ -206,7 +202,7 @@ class VoiceAIAgent:
             logger.error(f"Error initializing ElevenLabs TTS: {e}")
             raise
         
-        logger.info("Voice AI Agent initialization complete with Google Cloud STT and ElevenLabs TTS")
+        logger.info("Voice AI Agent initialization complete with updated Google Cloud STT v2.25.0+")
         
     async def process_audio(
         self,
@@ -214,7 +210,7 @@ class VoiceAIAgent:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        Process audio data with Google Cloud STT.
+        Process audio data with updated Google Cloud STT.
         
         Args:
             audio_data: Audio data as numpy array or bytes
@@ -230,7 +226,7 @@ class VoiceAIAgent:
         if isinstance(audio_data, np.ndarray):
             audio_data = self._process_audio(audio_data)
         
-        # Use STT integration for processing with Google Cloud
+        # Use STT integration for processing with updated Google Cloud STT
         result = await self.stt_integration.transcribe_audio_data(audio_data, callback=callback)
         
         # Only process valid transcriptions
@@ -308,7 +304,7 @@ class VoiceAIAgent:
                 if isinstance(chunk, np.ndarray):
                     chunk = self._process_audio(chunk)
                 
-                # Process through Google Cloud STT
+                # Process through updated Google Cloud STT
                 async def process_result(result):
                     # Only handle final results
                     if result.is_final:
