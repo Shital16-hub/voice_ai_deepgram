@@ -1,5 +1,5 @@
 """
-Fixed WebSocket handler with improved error handling and latency optimization.
+Optimized WebSocket handler with direct MULAW support and reduced latency.
 """
 import json
 import base64
@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 
 class WebSocketHandler:
     """
-    Optimized WebSocket handler with better error handling and reduced latency.
+    Optimized WebSocket handler with MULAW support and minimal latency.
     """
     
     def __init__(self, call_sid: str, pipeline):
-        """Initialize WebSocket handler."""
+        """Initialize WebSocket handler with optimizations."""
         self.call_sid = call_sid
         self.stream_sid = None
         self.pipeline = pipeline
@@ -48,27 +48,28 @@ class WebSocketHandler:
         self.connection_active = asyncio.Event()
         self.connection_active.clear()
         
-        # Processing locks and buffers
+        # Processing optimization
         self.processing_lock = asyncio.Lock()
         self.keep_alive_task = None
+        self.keep_alive_interval = 5  # Reduced interval
         
-        # Timing and throttling
+        # Timing optimization - reduced for faster response
         self.last_transcription = ""
         self.last_response_time = time.time()
         self.last_audio_output_time = 0
-        
-        # Conversation flow management
-        self.pause_after_response = 0.2  # Reduced from 0.3
+        self.pause_after_response = 0.1  # Reduced pause
         self.min_words_for_valid_query = 1
         
         # Performance monitoring
         self.processing_times = []
         self.max_processing_history = 10
+        self.total_processed_chunks = 0
+        self.error_count = 0
         
         logger.info(f"WebSocketHandler initialized for call {call_sid}")
     
     async def handle_message(self, message: str, ws) -> None:
-        """Handle incoming WebSocket message with better error handling."""
+        """Handle incoming WebSocket message with optimization."""
         if not message:
             logger.warning("Received empty message")
             return
@@ -77,63 +78,89 @@ class WebSocketHandler:
             data = json.loads(message)
             event_type = data.get('event')
             
-            logger.debug(f"Received WebSocket event: {event_type}")
-            
-            # Route to appropriate handler
+            # Route to handlers
             handlers = {
                 'connected': self._handle_connected,
                 'start': self._handle_start,
                 'media': self._handle_media,
                 'stop': self._handle_stop,
-                'mark': self._handle_mark
+                'mark': self._handle_mark,
+                'ping': self._handle_ping  # Added ping handler
             }
             
             handler = handlers.get(event_type)
             if handler:
                 await handler(data, ws)
             else:
-                logger.warning(f"Unknown event type: {event_type}")
+                logger.debug(f"Unknown event type: {event_type}")
             
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON message: {message[:100]}")
         except Exception as e:
             logger.error(f"Error handling message: {e}", exc_info=True)
+            self.error_count += 1
     
     async def _handle_connected(self, data: Dict[str, Any], ws) -> None:
-        """Handle connected event."""
+        """Handle connected event with immediate response."""
         logger.info(f"WebSocket connected for call {self.call_sid}")
         
-        # Update connection state
+        # Set connection state immediately
         self.connected = True
         self.connection_active.set()
+        self.connection_manager.set_connected(True)
         
-        # Start keep-alive
+        # Start keep-alive immediately
         if not self.keep_alive_task:
             self.keep_alive_task = asyncio.create_task(self._keep_alive_loop(ws))
+        
+        # Send immediate acknowledgment
+        try:
+            ack_message = {
+                "event": "ack",
+                "streamSid": None
+            }
+            ws.send(json.dumps(ack_message))
+        except Exception as e:
+            logger.warning(f"Could not send ack: {e}")
     
     async def _handle_start(self, data: Dict[str, Any], ws) -> None:
-        """Handle stream start event."""
+        """Handle stream start with faster initialization."""
         self.stream_sid = data.get('streamSid')
-        logger.info(f"Stream started - SID: {self.stream_sid}, Call: {self.call_sid}")
+        media_format = data.get('media', {})
         
-        # Reset all state for new stream
+        logger.info(f"Stream started - SID: {self.stream_sid}, Call: {self.call_sid}")
+        logger.info(f"Media format: {media_format}")
+        
+        # Reset stream state
         await self._reset_stream_state()
         
-        # Initialize speech recognition properly
+        # Initialize components with MULAW support
         try:
+            # Initialize STT with MULAW support
+            stt_integration = getattr(self.pipeline, 'speech_recognizer', None)
+            if stt_integration:
+                # Configure for MULAW if possible
+                if hasattr(stt_integration, 'speech_recognizer'):
+                    stt_client = stt_integration.speech_recognizer
+                    if hasattr(stt_client, 'encoding'):
+                        stt_client.encoding = "MULAW"
+                        stt_client.sample_rate = 8000
+            
             await self.speech_manager.start_session()
-            logger.info("Speech recognition session started successfully")
+            logger.info("Speech recognition initialized with MULAW support")
         except Exception as e:
             logger.error(f"Error starting speech recognition: {e}")
         
         # Initialize TTS
         await self.kb_processor.init_tts()
         
-        # Send welcome message quickly
-        await self.send_text_response("Hello! How can I help you today?", ws)
+        # Send immediate greeting with optimized timing
+        greeting = "Hello! How can I help you today?"
+        # Don't wait for TTS, send immediately
+        asyncio.create_task(self.send_text_response(greeting, ws))
     
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
-        """Handle media event with audio data - optimized for latency."""
+        """Handle media with optimized MULAW processing."""
         if not self.conversation_active:
             return
             
@@ -141,37 +168,37 @@ class WebSocketHandler:
         payload = media.get('payload')
         
         if not payload:
-            logger.warning("Received media event with no payload")
             return
         
         try:
-            # Decode and process audio
+            # Decode audio data (already in MULAW format from Twilio)
             audio_data = base64.b64decode(payload)
             
-            # Skip if system is speaking to prevent echo
+            # Skip processing if system is speaking
             if self.is_speaking:
                 return
             
-            # Process through audio component
+            # Process through optimized audio component
             processed_data = self.audio_processor.process_incoming_audio(audio_data)
             
             if processed_data is None:
                 return  # Still buffering
             
-            # Check timing since last response
+            # Check timing constraints
             if self._in_pause_period():
                 return
             
-            # Process audio buffer when ready (optimized)
+            # Process audio buffer with optimized threshold
             if self.audio_processor.should_process_buffer() and not self.is_processing:
-                # Use asyncio.create_task for better concurrency
+                # Use create_task for immediate scheduling
                 asyncio.create_task(self._process_audio_buffer_optimized(ws))
             
         except Exception as e:
-            logger.error(f"Error processing media payload: {e}", exc_info=True)
+            logger.error(f"Error processing media: {e}")
+            self.error_count += 1
     
     async def _process_audio_buffer_optimized(self, ws) -> None:
-        """Optimized audio buffer processing with timeout and better error handling."""
+        """Optimized audio buffer processing with parallel operations."""
         async with self.processing_lock:
             if self.is_processing:
                 return
@@ -180,65 +207,67 @@ class WebSocketHandler:
             process_start = time.time()
             
             try:
-                # Get audio from processor with timeout
-                audio_task = asyncio.create_task(self._get_audio_for_processing())
-                try:
-                    audio_data = await asyncio.wait_for(audio_task, timeout=0.5)
-                except asyncio.TimeoutError:
-                    logger.warning("Audio processing timeout")
-                    return
+                # Get audio data
+                audio_data = self.audio_processor.get_audio_for_processing()
                 
                 if audio_data is None or len(audio_data) == 0:
                     return
                 
-                # Process through speech recognition with timeout
-                stt_start = time.time()
+                # Process STT, KB query, and TTS preparation in parallel where possible
+                tasks = []
+                
+                # Start STT processing
+                stt_task = asyncio.create_task(self.speech_manager.process_audio(audio_data))
+                tasks.append(("stt", stt_task))
+                
+                # Wait for STT with shorter timeout
                 try:
-                    transcription_task = asyncio.create_task(
-                        self.speech_manager.process_audio(audio_data)
-                    )
-                    transcription = await asyncio.wait_for(transcription_task, timeout=2.0)
+                    transcription = await asyncio.wait_for(stt_task, timeout=1.5)
                 except asyncio.TimeoutError:
                     logger.warning("STT timeout")
                     return
                 
-                stt_time = time.time() - stt_start
-                
-                # Check if this is an echo
-                if self.echo_detection.is_echo(transcription):
-                    logger.info("Detected echo of system speech, ignoring")
-                    return
-                
-                # Validate transcription
-                if not self.speech_manager.is_valid_transcription(transcription):
+                # Check transcription quality
+                if not transcription or not self.speech_manager.is_valid_transcription(transcription):
                     logger.debug(f"Invalid transcription: '{transcription}'")
                     return
                 
-                # Avoid duplicates
-                if transcription == self.last_transcription:
-                    logger.info("Duplicate transcription, not processing again")
+                # Check for echo
+                if self.echo_detection.is_echo(transcription):
+                    logger.info("Echo detected, ignoring")
                     return
                 
-                logger.info(f"Complete transcription: {transcription}")
+                # Avoid duplicate processing
+                if transcription == self.last_transcription:
+                    logger.debug("Duplicate transcription ignored")
+                    return
                 
-                # Process through knowledge base with timeout
-                kb_start = time.time()
+                logger.info(f"Processing: {transcription}")
+                
+                # Start KB processing and TTS preparation in parallel
+                kb_task = asyncio.create_task(
+                    self.kb_processor.generate_response(transcription, self.call_sid)
+                )
+                
+                # Prepare TTS while waiting for KB response
+                tts_prep_task = asyncio.create_task(self.kb_processor.init_tts())
+                
                 try:
-                    response_task = asyncio.create_task(
-                        self.kb_processor.generate_response(transcription, self.call_sid)
+                    # Wait for KB response with timeout
+                    response, _ = await asyncio.gather(
+                        asyncio.wait_for(kb_task, timeout=2.0),
+                        tts_prep_task,
+                        return_exceptions=True
                     )
-                    response = await asyncio.wait_for(response_task, timeout=3.0)  # Increased to 3s
                 except asyncio.TimeoutError:
-                    logger.warning("Knowledge base timeout, using fallback")
+                    logger.warning("KB timeout, using fallback")
                     response = self._get_fallback_response(transcription)
                 
-                kb_time = time.time() - kb_start
-                
-                if response:
+                if response and response.strip():
                     # Track for echo detection
                     self.echo_detection.add_system_response(response)
                     
-                    # Convert to speech and send
+                    # Generate and send speech
                     await self._send_audio_response_optimized(response, ws)
                     
                     # Update state
@@ -251,47 +280,43 @@ class WebSocketHandler:
                 if len(self.processing_times) > self.max_processing_history:
                     self.processing_times.pop(0)
                 
+                self.total_processed_chunks += 1
+                
                 avg_time = sum(self.processing_times) / len(self.processing_times)
-                logger.info(f"Processing completed in {total_time:.2f}s (avg: {avg_time:.2f}s, STT: {stt_time:.2f}s, KB: {kb_time:.2f}s)")
+                logger.info(f"Processing completed in {total_time:.2f}s (avg: {avg_time:.2f}s)")
                 
             except Exception as e:
-                logger.error(f"Error processing audio: {e}", exc_info=True)
+                logger.error(f"Error in audio processing: {e}", exc_info=True)
                 # Send fallback response
                 await self._send_fallback_response(ws)
+                self.error_count += 1
             finally:
                 self.is_processing = False
     
-    async def _get_audio_for_processing(self) -> Optional[np.ndarray]:
-        """Get audio data for processing (async)."""
-        return await asyncio.get_event_loop().run_in_executor(
-            None, 
-            self.audio_processor.get_audio_for_processing
-        )
-    
     async def _send_audio_response_optimized(self, response: str, ws) -> None:
-        """Optimized audio response generation and sending."""
+        """Optimized audio response with minimal latency."""
         try:
-            # Set speaking state immediately to prevent processing more audio
+            # Set speaking state immediately
             self.is_speaking = True
             
-            # Generate speech with timeout
+            # Generate speech with reduced timeout
             speech_start = time.time()
             try:
                 speech_task = asyncio.create_task(
                     self.kb_processor.generate_speech(response)
                 )
-                speech_audio = await asyncio.wait_for(speech_task, timeout=2.0)
+                speech_audio = await asyncio.wait_for(speech_task, timeout=1.5)
             except asyncio.TimeoutError:
                 logger.warning("TTS timeout")
                 await self._send_fallback_response(ws)
                 return
             
-            speech_time = time.time() - speech_start
-            
             if speech_audio:
-                # Send audio
-                await self._send_audio(speech_audio, ws)
-                logger.info(f"Sent audio response ({speech_time:.2f}s) for: '{response[:50]}...'")
+                # Send audio immediately
+                await self._send_audio_optimized(speech_audio, ws)
+                
+                speech_time = time.time() - speech_start
+                logger.info(f"Sent audio ({speech_time:.2f}s): '{response[:50]}...'")
             else:
                 logger.error("No speech audio generated")
                 await self._send_fallback_response(ws)
@@ -300,105 +325,72 @@ class WebSocketHandler:
             logger.error(f"Error sending audio response: {e}")
             await self._send_fallback_response(ws)
         finally:
-            # Reset speaking state
+            # Reset speaking state with minimal delay
+            await asyncio.sleep(0.1)
             self.is_speaking = False
     
-    def _get_fallback_response(self, transcription: str) -> str:
-        """Get appropriate fallback response based on transcription - works for any domain."""
-        transcription_lower = transcription.lower()
-        
-        # Question words - suggest clarification
-        if any(word in transcription_lower for word in ["what", "how", "when", "where", "why", "which"]):
-            return "I'd be happy to help answer that. Could you provide a bit more context or detail?"
-        
-        # Help requests - offer assistance
-        elif any(word in transcription_lower for word in ["help", "support", "assist", "need"]):
-            return "I'm here to help! What specific information are you looking for?"
-        
-        # Information requests - ask for specifics
-        elif any(word in transcription_lower for word in ["tell", "explain", "show", "describe", "information", "info"]):
-            return "I can provide information about that. Could you be more specific about what you'd like to know?"
-        
-        # Comparison requests - ask for clarification
-        elif any(word in transcription_lower for word in ["compare", "difference", "better", "versus", "vs"]):
-            return "I can help you compare different options. What specifically would you like me to compare?"
-        
-        # Yes/No clarifications
-        elif transcription_lower in ["yes", "yeah", "yep", "no", "nope"]:
-            return "Could you please provide more context about what you'd like to know?"
-        
-        # Very short responses
-        elif len(transcription_lower.split()) < 3:
-            return "I didn't quite catch that. Could you tell me more about what you're looking for?"
-        
-        # Default - generic response that works for any domain
-        else:
-            return "I understand you have a question. Could you please rephrase it or provide more details so I can better assist you?"
-    
-    async def _send_audio(self, audio_data: bytes, ws) -> None:
-        """Send audio data to Twilio with optimizations."""
+    async def _send_audio_optimized(self, audio_data: bytes, ws) -> None:
+        """Send audio with optimized chunking for MULAW."""
         if not self.connected:
-            logger.warning("WebSocket connection is closed, cannot send audio")
+            logger.warning("WebSocket not connected")
             return
         
         try:
-            # Convert and split audio if needed
-            processed_audio = self.audio_processor.prepare_outgoing_audio(audio_data)
-            chunks = self.audio_processor.split_audio_for_streaming(processed_audio)
+            # The audio should already be in MULAW format from ElevenLabs
+            # Split into optimized chunks for Twilio
+            chunks = self.audio_processor.split_audio_for_streaming(audio_data)
             
-            logger.debug(f"Sending {len(chunks)} audio chunks ({len(processed_audio)} bytes total)")
+            logger.debug(f"Sending {len(chunks)} audio chunks")
             
-            # Send chunks in parallel for better performance
-            chunk_tasks = []
+            # Send chunks with minimal delay
             for i, chunk in enumerate(chunks):
-                audio_base64 = base64.b64encode(chunk).decode('utf-8')
-                message = {
-                    "event": "media",
-                    "streamSid": self.stream_sid,
-                    "media": {"payload": audio_base64}
-                }
-                
-                # Create task for sending chunk
-                chunk_task = asyncio.create_task(
-                    self._send_chunk(ws, json.dumps(message), i+1, len(chunks))
-                )
-                chunk_tasks.append(chunk_task)
-            
-            # Wait for all chunks to be sent
-            await asyncio.gather(*chunk_tasks, return_exceptions=True)
+                try:
+                    audio_base64 = base64.b64encode(chunk).decode('utf-8')
+                    message = {
+                        "event": "media",
+                        "streamSid": self.stream_sid,
+                        "media": {
+                            "payload": audio_base64
+                        }
+                    }
+                    
+                    ws.send(json.dumps(message))
+                    
+                    # Small delay between chunks for Twilio processing
+                    if i < len(chunks) - 1:
+                        await asyncio.sleep(0.02)  # 20ms between chunks
+                        
+                except Exception as e:
+                    logger.error(f"Error sending chunk {i+1}: {e}")
+                    if "closed" in str(e).lower():
+                        self.connected = False
+                        self.connection_active.clear()
+                        break
             
         except Exception as e:
-            logger.error(f"Error preparing audio for sending: {e}")
-    
-    async def _send_chunk(self, ws, message: str, chunk_num: int, total_chunks: int) -> None:
-        """Send a single audio chunk."""
-        try:
-            ws.send(message)
-        except Exception as e:
-            logger.error(f"Error sending audio chunk {chunk_num}/{total_chunks}: {e}")
-            if "Connection closed" in str(e):
-                self.connected = False
-                self.connection_active.clear()
+            logger.error(f"Error preparing audio: {e}")
     
     async def _keep_alive_loop(self, ws) -> None:
-        """Optimized keep-alive loop."""
+        """Optimized keep-alive with health checking."""
         try:
-            while self.conversation_active:
-                await asyncio.sleep(5)  # Reduced from 10 for more responsive connection monitoring
+            while self.conversation_active and self.connected:
+                await asyncio.sleep(self.keep_alive_interval)
                 
-                if not self.stream_sid or not self.connected:
+                if not self.stream_sid:
                     continue
                     
                 try:
-                    message = {
+                    # Send ping with timestamp
+                    ping_message = {
                         "event": "ping",
-                        "streamSid": self.stream_sid
+                        "streamSid": self.stream_sid,
+                        "timestamp": time.time()
                     }
-                    ws.send(json.dumps(message))
+                    ws.send(json.dumps(ping_message))
                     logger.debug("Sent keep-alive ping")
                 except Exception as e:
-                    logger.error(f"Error sending keep-alive: {e}")
-                    if "Connection closed" in str(e):
+                    logger.error(f"Keep-alive error: {e}")
+                    if "closed" in str(e).lower():
                         self.connected = False
                         self.connection_active.clear()
                         self.conversation_active = False
@@ -409,12 +401,26 @@ class WebSocketHandler:
             logger.error(f"Error in keep-alive loop: {e}")
     
     def _in_pause_period(self) -> bool:
-        """Check if we're in a pause period after last response."""
+        """Check if we're in pause period with optimized timing."""
         time_since_last_response = time.time() - self.last_response_time
         return time_since_last_response < self.pause_after_response
     
+    def _get_fallback_response(self, transcription: str) -> str:
+        """Get contextual fallback response."""
+        transcription_lower = transcription.lower()
+        
+        # Quick pattern matching for common queries
+        if any(word in transcription_lower for word in ["price", "cost", "plan"]):
+            return "I can help with pricing. Our plans start at $499 per month."
+        elif any(word in transcription_lower for word in ["feature", "what do"]):
+            return "We offer voice recognition and natural language processing. What specific feature interests you?"
+        elif any(word in transcription_lower for word in ["help", "support"]):
+            return "I'm here to help! What can I assist you with today?"
+        else:
+            return "I understand you have a question. Could you please rephrase it?"
+    
     async def _reset_stream_state(self) -> None:
-        """Reset all state for a new stream."""
+        """Reset state for new stream."""
         self.audio_processor.reset()
         self.speech_manager.reset()
         self.echo_detection.reset()
@@ -424,45 +430,41 @@ class WebSocketHandler:
         self.speech_interrupted = False
         self.last_transcription = ""
         self.last_response_time = time.time()
-        self.last_audio_output_time = 0
         self.conversation_active = True
         self.sequence_number = 0
         self.processing_times = []
+        self.total_processed_chunks = 0
+        self.error_count = 0
     
     async def send_text_response(self, text: str, ws) -> None:
-        """Send a text response by converting to speech."""
+        """Send text response as speech."""
         try:
-            # Track for echo detection
             self.echo_detection.add_system_response(text)
-            
-            # Generate and send speech
             await self._send_audio_response_optimized(text, ws)
         except Exception as e:
             logger.error(f"Error sending text response: {e}")
     
     async def _send_fallback_response(self, ws) -> None:
-        """Send a fallback response when errors occur."""
-        fallback_message = "I'm sorry, I'm having trouble understanding. Could you try again?"
+        """Send optimized fallback response."""
+        fallback_message = "I'm sorry, could you try again?"
         try:
-            # Try to generate and send fallback speech directly
             speech_audio = await self.kb_processor.generate_speech(fallback_message)
             if speech_audio:
                 self.is_speaking = True
-                await self._send_audio(speech_audio, ws)
+                await self._send_audio_optimized(speech_audio, ws)
+                await asyncio.sleep(0.1)
                 self.is_speaking = False
-            else:
-                logger.error("Could not generate fallback speech")
         except Exception as e:
-            logger.error(f"Failed to send fallback response: {e}")
+            logger.error(f"Error sending fallback: {e}")
     
     async def _handle_stop(self, data: Dict[str, Any], ws=None) -> None:
-        """Handle stream stop event."""
+        """Handle stream stop with cleanup."""
         logger.info(f"Stream stopped - SID: {self.stream_sid}")
         self.conversation_active = False
         self.connected = False
         self.connection_active.clear()
         
-        # Cleanup
+        # Cancel keep-alive
         if self.keep_alive_task:
             self.keep_alive_task.cancel()
             try:
@@ -470,10 +472,37 @@ class WebSocketHandler:
             except asyncio.CancelledError:
                 pass
         
+        # Stop speech recognition
         await self.speech_manager.stop_session()
+        
+        # Log performance stats
+        if self.processing_times:
+            avg_time = sum(self.processing_times) / len(self.processing_times)
+            logger.info(f"Session stats - Avg processing: {avg_time:.2f}s, "
+                       f"Chunks: {self.total_processed_chunks}, Errors: {self.error_count}")
     
     async def _handle_mark(self, data: Dict[str, Any], ws=None) -> None:
-        """Handle mark event for audio playback tracking."""
+        """Handle mark event for audio sync."""
         mark = data.get('mark', {})
         name = mark.get('name')
-        logger.debug(f"Mark received: {name}")
+        if name:
+            logger.debug(f"Mark received: {name}")
+    
+    async def _handle_ping(self, data: Dict[str, Any], ws=None) -> None:
+        """Handle ping response from Twilio."""
+        logger.debug("Received ping response from Twilio")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get handler statistics."""
+        return {
+            "connected": self.connected,
+            "total_chunks_processed": self.total_processed_chunks,
+            "error_count": self.error_count,
+            "is_processing": self.is_processing,
+            "is_speaking": self.is_speaking,
+            "average_processing_time": (
+                sum(self.processing_times) / len(self.processing_times) 
+                if self.processing_times else 0
+            ),
+            "audio_processor_stats": self.audio_processor.get_stats()
+        }

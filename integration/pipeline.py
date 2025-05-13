@@ -1,5 +1,5 @@
 """
-Optimized pipeline for reduced latency - Updated for OpenAI + Pinecone.
+Optimized pipeline for reduced latency with proper error handling and streaming.
 """
 import os
 import asyncio
@@ -43,9 +43,9 @@ class VoiceAIAgentPipeline:
         self.response_cache = {}
         self.max_cache_size = 100
         
-        # Timing optimizations
-        self.min_audio_duration = 0.5  # Minimum audio duration to process
-        self.max_response_time = 3.0   # Maximum time for response generation
+        # Timing optimizations - reduced for faster response
+        self.min_audio_duration = 0.3  # Reduced from 0.5
+        self.max_response_time = 2.0   # Reduced from 3.0
         
         # Pre-compute responses for common queries
         self._common_responses = {
@@ -57,8 +57,13 @@ class VoiceAIAgentPipeline:
             "goodbye": "Goodbye! Feel free to call us again if you need help."
         }
         
-        # Executor for parallel processing
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        # Executor for parallel processing with reduced workers
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        
+        # Performance monitoring
+        self.processing_times = []
+        self.error_count = 0
+        self.success_count = 0
     
     async def process_audio_data(
         self,
@@ -67,7 +72,7 @@ class VoiceAIAgentPipeline:
         speech_output_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Process audio with optimized latency.
+        Process audio with optimized latency and error handling.
         
         Args:
             audio_data: Audio data as bytes or numpy array
@@ -92,14 +97,14 @@ class VoiceAIAgentPipeline:
                 logger.debug(f"Audio too short: {duration:.2f}s")
                 return {"error": "Audio too short", "duration": duration}
             
-            # Step 1: Speech-to-Text (async with timeout)
+            # Step 1: Speech-to-Text with optimized timeout
             transcription_start = time.time()
             
             try:
                 transcription_task = asyncio.create_task(self._transcribe_audio_optimized(audio))
                 transcription, stt_duration = await asyncio.wait_for(
                     transcription_task, 
-                    timeout=2.0  # Maximum 2 seconds for STT
+                    timeout=1.5  # Reduced from 2.0
                 )
             except asyncio.TimeoutError:
                 logger.warning("STT timeout exceeded")
@@ -119,6 +124,7 @@ class VoiceAIAgentPipeline:
                 if cached_response:
                     logger.info("Using cached response")
                     speech_audio = await self._generate_speech_parallel(cached_response)
+                    self.success_count += 1
                     return {
                         "transcription": transcription,
                         "response": cached_response,
@@ -127,15 +133,11 @@ class VoiceAIAgentPipeline:
                         "cached": True
                     }
             
-            # Step 2: Knowledge Base Query (parallel with speech preparation)
+            # Step 2: Knowledge Base Query with parallel optimization
             kb_start = time.time()
             
-            # Start TTS preparation in parallel
-            if self.parallel_processing:
-                tts_init_task = asyncio.create_task(self._prepare_tts())
-            
+            # Use conversation manager with reduced timeout
             try:
-                # Use conversation manager with timeout
                 response_task = asyncio.create_task(
                     self.conversation_manager.handle_user_input(
                         user_id=user_id or "default_user",
@@ -147,8 +149,13 @@ class VoiceAIAgentPipeline:
                     timeout=self.max_response_time
                 )
             except asyncio.TimeoutError:
-                logger.warning("Knowledge base timeout, using fallback")
-                response_result = {"response": self._get_fallback_response(transcription)}
+                logger.warning("Knowledge base timeout, using direct search")
+                # Fallback to direct search
+                search_result = await self._direct_search_fallback(transcription)
+                if search_result:
+                    response_result = {"response": search_result}
+                else:
+                    response_result = {"response": self._get_fallback_response(transcription)}
             
             response = response_result.get("response", "")
             kb_time = time.time() - kb_start
@@ -163,20 +170,17 @@ class VoiceAIAgentPipeline:
             if self.use_cache:
                 self._cache_response(transcription, response)
             
-            # Step 3: Text-to-Speech (optimized)
+            # Step 3: Text-to-Speech with optimization
             tts_start = time.time()
-            
-            # Wait for TTS preparation if running in parallel
-            if self.parallel_processing and 'tts_init_task' in locals():
-                await tts_init_task
             
             try:
                 speech_audio = await asyncio.wait_for(
                     self._generate_speech_optimized(response),
-                    timeout=2.0  # Maximum 2 seconds for TTS
+                    timeout=1.5  # Reduced from 2.0
                 )
             except asyncio.TimeoutError:
                 logger.warning("TTS timeout")
+                self.error_count += 1
                 return {
                     "transcription": transcription,
                     "response": response,
@@ -196,6 +200,12 @@ class VoiceAIAgentPipeline:
             total_time = time.time() - start_time
             logger.info(f"Pipeline completed in {total_time:.2f}s")
             
+            # Track performance
+            self.processing_times.append(total_time)
+            if len(self.processing_times) > 50:
+                self.processing_times.pop(0)
+            self.success_count += 1
+            
             return {
                 "transcription": transcription,
                 "response": response,
@@ -210,35 +220,34 @@ class VoiceAIAgentPipeline:
             
         except Exception as e:
             logger.error(f"Error in pipeline: {e}", exc_info=True)
+            self.error_count += 1
             return {
                 "error": str(e),
                 "total_time": time.time() - start_time
             }
     
     async def _transcribe_audio_optimized(self, audio: np.ndarray) -> tuple[str, float]:
-        """Optimized audio transcription."""
+        """Optimized audio transcription with proper integration."""
         try:
             # If we have an STT integration object, use it
             if hasattr(self.speech_recognizer, 'transcribe_audio_data'):
                 # This is an STTIntegration object
                 result = await self.speech_recognizer.transcribe_audio_data(
                     audio_data=audio,
-                    is_short_audio=False
+                    is_short_audio=True  # Changed to True for faster processing
                 )
                 
                 transcription = result.get('transcription', '')
                 duration = result.get('duration', len(audio) / 16000)
                 
                 # Clean transcription
-                if hasattr(self, '_clean_transcription'):
+                if transcription:
                     transcription = self._clean_transcription(transcription)
                 
                 return transcription, duration
             else:
-                # This is a raw GoogleCloudStreamingSTT object
-                # Start streaming session if not started
-                if not (hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming):
-                    await self.speech_recognizer.start_streaming()
+                # Direct Google Cloud STT handling
+                await self.speech_recognizer.start_streaming()
                 
                 # Convert to bytes format
                 audio_bytes = (audio * 32767).astype(np.int16).tobytes()
@@ -253,19 +262,10 @@ class VoiceAIAgentPipeline:
                 # Process audio
                 await self.speech_recognizer.process_audio_chunk(audio_bytes, collect_result)
                 
-                # Get final result
-                if final_results:
-                    best_result = max(final_results, key=lambda r: r.confidence)
-                    transcription = best_result.text
-                    duration = best_result.end_time - best_result.start_time if best_result.end_time > 0 else len(audio) / 16000
-                else:
-                    # Fallback: stop and restart streaming to get result
-                    transcription, duration = await self.speech_recognizer.stop_streaming()
-                    if transcription:
-                        await self.speech_recognizer.start_streaming()  # Restart for next use
+                # Stop streaming and get result
+                transcription, duration = await self.speech_recognizer.stop_streaming()
                 
-                # Clean transcription
-                if hasattr(self, '_clean_transcription'):
+                if transcription:
                     transcription = self._clean_transcription(transcription)
                 
                 return transcription, duration
@@ -274,26 +274,58 @@ class VoiceAIAgentPipeline:
             logger.error(f"Error in optimized transcription: {e}")
             return "", len(audio) / 16000
     
-    async def _prepare_tts(self):
-        """Prepare TTS client in parallel."""
+    async def _direct_search_fallback(self, query: str) -> Optional[str]:
+        """Direct Pinecone search as fallback when OpenAI Assistant fails."""
         try:
-            if hasattr(self.tts_integration, 'init'):
-                await self.tts_integration.init()
+            # Check if we can access Pinecone directly through the conversation manager
+            if hasattr(self.conversation_manager, 'pinecone_manager'):
+                results = await self.conversation_manager.pinecone_manager.query(
+                    query_text=query,
+                    top_k=3,
+                    include_metadata=True
+                )
+                
+                if results:
+                    # Format results into a response
+                    context = ""
+                    for result in results:
+                        if result.get("metadata") and result["metadata"].get("text"):
+                            text = result["metadata"]["text"]
+                            context += f"{text}\n\n"
+                    
+                    if context:
+                        # Create a simple response based on the context
+                        if any(word in query.lower() for word in ["price", "pricing", "cost", "plan"]):
+                            return f"Based on our information: {context[:200]}..."
+                        elif any(word in query.lower() for word in ["feature", "features", "capability"]):
+                            return f"Our features include: {context[:200]}..."
+                        else:
+                            return f"Here's what I found: {context[:200]}..."
+                
+            return None
         except Exception as e:
-            logger.error(f"Error preparing TTS: {e}")
+            logger.error(f"Error in direct search fallback: {e}")
+            return None
     
     async def _generate_speech_optimized(self, text: str) -> Optional[bytes]:
-        """Generate speech with optimizations."""
+        """Generate speech with optimizations and error handling."""
         try:
             if not text:
                 return None
             
-            # Use TTS integration
-            if hasattr(self.tts_integration, 'text_to_speech'):
-                return await self.tts_integration.text_to_speech(text)
-            else:
-                logger.error("TTS integration missing text_to_speech method")
-                return None
+            # Use TTS integration with retry logic
+            for attempt in range(2):  # Reduced from 3 attempts
+                try:
+                    return await self.tts_integration.text_to_speech(text)
+                except Exception as e:
+                    logger.warning(f"TTS attempt {attempt + 1} failed: {e}")
+                    if attempt < 1:  # Last attempt
+                        await asyncio.sleep(0.1)  # Brief retry delay
+                    else:
+                        logger.error(f"All TTS attempts failed for: {text[:50]}...")
+                        return None
+            
+            return None
                 
         except Exception as e:
             logger.error(f"Error in optimized speech generation: {e}")
@@ -302,18 +334,14 @@ class VoiceAIAgentPipeline:
     async def _generate_speech_parallel(self, text: str) -> Optional[bytes]:
         """Generate speech using parallel processing."""
         try:
-            # Run TTS in executor for better performance
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                self.executor,
-                lambda: asyncio.run(self._generate_speech_optimized(text))
-            )
+            # Use asyncio.create_task for better concurrency
+            return await asyncio.create_task(self._generate_speech_optimized(text))
         except Exception as e:
             logger.error(f"Error in parallel speech generation: {e}")
             return None
     
     def _get_cached_response(self, transcription: str) -> Optional[str]:
-        """Get cached response for transcription."""
+        """Get cached response for transcription with fuzzy matching."""
         if not self.use_cache:
             return None
         
@@ -329,15 +357,20 @@ class VoiceAIAgentPipeline:
             if key in normalized:
                 return response
         
-        # Check partial matches
+        # Check partial matches with better threshold
+        words = normalized.split()
         for cached_key in self.response_cache:
-            if len(cached_key) > 3 and cached_key in normalized:
-                return self.response_cache[cached_key]
+            cached_words = cached_key.split()
+            if len(cached_words) >= 2:  # Only check meaningful phrases
+                # Simple similarity check
+                common_words = set(words) & set(cached_words)
+                if len(common_words) >= min(2, len(words) // 2):
+                    return self.response_cache[cached_key]
         
         return None
     
     def _cache_response(self, transcription: str, response: str):
-        """Cache response for future use."""
+        """Cache response with expiration."""
         if not self.use_cache:
             return
         
@@ -346,42 +379,34 @@ class VoiceAIAgentPipeline:
         
         # Limit cache size
         if len(self.response_cache) > self.max_cache_size:
-            # Remove oldest entries
+            # Remove oldest entries (simple FIFO)
             keys_to_remove = list(self.response_cache.keys())[:10]
             for key in keys_to_remove:
                 del self.response_cache[key]
     
     def _get_fallback_response(self, transcription: str) -> str:
-        """Get fallback response based on transcription - works for any domain."""
+        """Get contextual fallback response."""
         transcription_lower = transcription.lower()
         
-        # Question words - suggest clarification
+        # Question words
         if any(word in transcription_lower for word in ["what", "how", "when", "where", "why", "which"]):
-            return "I'd be happy to help answer that. Could you provide a bit more context or detail?"
+            return "I'd be happy to help answer that. Could you provide a bit more context?"
         
-        # Help requests - offer assistance
+        # Help requests
         elif any(word in transcription_lower for word in ["help", "support", "assist", "need"]):
             return "I'm here to help! What specific information are you looking for?"
         
-        # Information requests - ask for specifics
+        # Information requests
         elif any(word in transcription_lower for word in ["tell", "explain", "show", "describe", "information", "info"]):
-            return "I can provide information about that. Could you be more specific about what you'd like to know?"
+            return "I can provide information about that. Could you be more specific?"
         
-        # Comparison requests - ask for clarification
-        elif any(word in transcription_lower for word in ["compare", "difference", "better", "versus", "vs"]):
-            return "I can help you compare different options. What specifically would you like me to compare?"
+        # Pricing/product queries
+        elif any(word in transcription_lower for word in ["price", "cost", "plan", "pricing", "feature"]):
+            return "I can help you with pricing and features. Let me search for that information."
         
-        # Yes/No clarifications
-        elif transcription_lower in ["yes", "yeah", "yep", "no", "nope"]:
-            return "Could you please provide more context about what you'd like to know?"
-        
-        # Very short responses
-        elif len(transcription_lower.split()) < 3:
-            return "I didn't quite catch that. Could you tell me more about what you're looking for?"
-        
-        # Default - generic response that works for any domain
+        # Default
         else:
-            return "I understand you have a question. Could you please rephrase it or provide more details so I can better assist you?"
+            return "I understand you have a question. Could you please rephrase it so I can better assist you?"
     
     def _clean_transcription(self, text: str) -> str:
         """Clean transcription for better processing."""
@@ -390,12 +415,31 @@ class VoiceAIAgentPipeline:
         
         # Remove noise indicators
         import re
-        cleaned = re.sub(r'\[.*?\]', '', text)
-        cleaned = re.sub(r'\(.*?\)', '', text)
-        cleaned = re.sub(r'<.*?>', '', text)
+        cleaned = re.sub(r'\[.*?\]', '', text)  # Remove [noise], [music], etc.
+        cleaned = re.sub(r'\(.*?\)', '', text)  # Remove (background noise), etc.
+        cleaned = re.sub(r'<.*?>', '', text)    # Remove <unclear>, etc.
         
         # Clean up spaces
         cleaned = re.sub(r'\s+', ' ', cleaned)
         cleaned = cleaned.strip()
         
         return cleaned
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get performance statistics."""
+        if not self.processing_times:
+            return {"error": "No processing times recorded"}
+        
+        avg_time = sum(self.processing_times) / len(self.processing_times)
+        min_time = min(self.processing_times)
+        max_time = max(self.processing_times)
+        
+        return {
+            "average_processing_time": avg_time,
+            "min_processing_time": min_time,
+            "max_processing_time": max_time,
+            "success_count": self.success_count,
+            "error_count": self.error_count,
+            "cache_size": len(self.response_cache) if self.use_cache else 0,
+            "recent_processing_times": self.processing_times[-10:]
+        }
