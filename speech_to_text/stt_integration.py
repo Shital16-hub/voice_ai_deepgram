@@ -11,7 +11,7 @@ import re
 import numpy as np
 from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union, AsyncIterator
 
-from speech_to_text.google_cloud_stt_v2 import GoogleCloudStreamingSTT_V2, StreamingTranscriptionResult
+from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +36,14 @@ class STTIntegration:
     
     def __init__(
         self,
-        speech_recognizer: Optional[GoogleCloudStreamingSTT_V2] = None,
+        speech_recognizer: Optional[GoogleCloudStreamingSTT] = None,
         language: str = "en"
     ):
         """
         Initialize the STT integration.
         
         Args:
-            speech_recognizer: Initialized GoogleCloudStreamingSTT_V2 instance
+            speech_recognizer: Initialized GoogleCloudStreamingSTT instance
             language: Language code for speech recognition
         """
         self.speech_recognizer = speech_recognizer
@@ -70,7 +70,7 @@ class STTIntegration:
             
         try:
             # Create a new Google Cloud streaming client
-            self.speech_recognizer = GoogleCloudStreamingSTT_V2(
+            self.speech_recognizer = GoogleCloudStreamingSTT(
                 language=self.language,
                 sample_rate=16000,
                 encoding="LINEAR16",
@@ -278,6 +278,14 @@ class STTIntegration:
     ) -> Dict[str, Any]:
         """
         Transcribe audio data with improved noise handling.
+        
+        Args:
+            audio_data: Audio data as bytes or numpy array
+            is_short_audio: Flag to indicate short audio for optimized handling
+            callback: Optional callback for interim results
+            
+        Returns:
+            Dictionary with transcription results
         """
         if not self.initialized:
             logger.error("STT integration not properly initialized")
@@ -289,31 +297,12 @@ class STTIntegration:
         try:
             # Convert to numpy array if needed
             if isinstance(audio_data, bytes):
-                # Check if it's MULAW format (from Twilio)
-                if len(audio_data) > 0:
-                    # MULAW is 8-bit, so just pass as bytes
-                    logger.info(f"Processing MULAW audio: {len(audio_data)} bytes")
-                    # Convert to 16-bit PCM for recognition
-                    import audioop
-                    linear_audio = audioop.ulaw2lin(audio_data, 2)
-                    audio = np.frombuffer(linear_audio, dtype=np.int16).astype(np.float32) / 32768.0
-                else:
-                    audio = np.array([], dtype=np.float32)
+                # Assume 16-bit PCM format
+                audio = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             elif isinstance(audio_data, list):
                 audio = np.array(audio_data, dtype=np.float32)
             else:
                 audio = audio_data
-            
-            if len(audio) == 0:
-                logger.warning("Empty audio data received")
-                return {
-                    "transcription": "",
-                    "confidence": 0.0,
-                    "duration": 0.0,
-                    "processing_time": time.time() - start_time,
-                    "is_final": True,
-                    "is_valid": False
-                }
             
             # Update ambient noise level
             self._update_ambient_noise_level(audio)
@@ -324,9 +313,6 @@ class STTIntegration:
             # Convert to bytes (16-bit PCM)
             audio_bytes = (audio * 32767).astype(np.int16).tobytes()
             
-            # Log audio properties
-            logger.info(f"Audio processed: {len(audio)} samples, {len(audio_bytes)} bytes")
-            
             # Get results
             final_results = []
             
@@ -334,7 +320,6 @@ class STTIntegration:
             async def store_result(result: StreamingTranscriptionResult):
                 if result.is_final:
                     final_results.append(result)
-                    logger.info(f"Received final result: '{result.text}' (confidence: {result.confidence:.2f})")
                 
                 # Call the original callback if provided
                 if callback:
@@ -344,29 +329,26 @@ class STTIntegration:
             await self.speech_recognizer.start_streaming()
             
             # Process the audio
-            result = await self.speech_recognizer.process_audio_chunk(audio_bytes, store_result)
+            await self.speech_recognizer.process_audio_chunk(audio_bytes, store_result)
             
             # Stop streaming to get final results
             final_text, duration = await self.speech_recognizer.stop_streaming()
             
-            # Use the final text or best result
+            # If we have a final text from stopping or final results, use that
             if final_text:
                 transcription = final_text
-                confidence = 0.9
+                confidence = 0.9  # Assume high confidence for final result
             elif final_results:
                 # Use the best final result based on confidence
                 best_result = max(final_results, key=lambda r: r.confidence)
                 transcription = best_result.text
                 confidence = best_result.confidence
-            elif result and result.is_final:
-                transcription = result.text
-                confidence = result.confidence
             else:
                 logger.warning("No transcription results obtained")
                 return {
                     "transcription": "",
                     "confidence": 0.0,
-                    "duration": len(audio) / 16000,
+                    "duration": len(audio) / 16000,  # Assuming 16kHz
                     "processing_time": time.time() - start_time,
                     "is_final": True,
                     "is_valid": False
@@ -386,7 +368,7 @@ class STTIntegration:
             }
             
         except Exception as e:
-            logger.error(f"Error transcribing audio data: {e}", exc_info=True)
+            logger.error(f"Error transcribing audio data: {e}")
             return {
                 "error": str(e),
                 "processing_time": time.time() - start_time

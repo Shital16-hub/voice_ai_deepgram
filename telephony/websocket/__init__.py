@@ -1,12 +1,12 @@
 """
-WebSocket handler components for Twilio media streams - Updated for v2 components.
+WebSocket handler components for Twilio media streams.
 """
 
 from .connection_manager import ConnectionManager
-from .audio_manager_v2 import AudioManager  # Changed from audio_manager to audio_manager_v2
-from .speech_processor_v3 import SpeechProcessor  # Changed to v3
+from .audio_manager import AudioManager
+from .speech_processor import SpeechProcessor
 from .response_generator import ResponseGenerator
-from .message_router_v2 import MessageRouter  # Changed to v2
+from .message_router import MessageRouter
 
 __all__ = [
     'ConnectionManager',
