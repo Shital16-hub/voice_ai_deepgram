@@ -12,7 +12,7 @@ from telephony.call_manager import CallManager
 
 __all__ = [
     'TwilioHandler',
-    'AudioProcessor', 
+    'AudioProcessor',
     'WebSocketHandler',
     'CallManager'
 ]

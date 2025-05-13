@@ -27,7 +27,7 @@ class StreamingTranscriptionResult:
     words: List[Dict[str, Any]] = None
 
 class SimpleGoogleSTT:
-    """Simple Google Cloud Speech client optimized for telephony."""
+    """Simple Google Cloud Speech client."""
     
     def __init__(
         self, 
@@ -49,60 +49,46 @@ class SimpleGoogleSTT:
         # State tracking
         self.is_streaming = False
         self.utterance_id = 0
-        
-        # Buffer for accumulating audio
-        self.audio_buffer = bytearray()
-        self.buffer_size = sample_rate * 2  # 2 seconds of audio
-        
-        logger.info("Initialized SimpleGoogleSTT with optimized telephony settings")
     
     def _get_config(self):
-        """Get the recognition config optimized for telephony."""
+        """Get the recognition config."""
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=self.sample_rate,
             language_code=self.language_code,
-            max_alternatives=1,
             enable_automatic_punctuation=self.enable_automatic_punctuation,
-            enable_word_time_offsets=True,
-            profanity_filter=False,
             use_enhanced=True,
-            model="phone_call",  # Optimized for telephony
+            model="phone_call",
             audio_channel_count=1
         )
         
-        # Add common telephony phrases for better recognition
-        speech_context = speech.SpeechContext(
-            phrases=[
-                "price", "cost", "plan", "subscription", "service", "features",
-                "support", "help", "information", "details", "cancel", "upgrade"
-            ],
-            boost=15.0  # Boost these phrases
+        streaming_config = speech.StreamingRecognitionConfig(
+            config=config,
+            interim_results=True
         )
-        config.speech_contexts.append(speech_context)
         
-        return config
+        return streaming_config
     
     async def start_streaming(self):
-        """Start streaming session (placeholder for compatibility)."""
+        """Start streaming session (placeholder)."""
         self.is_streaming = True
         self.utterance_id = 0
-        logger.info("Started SimpleGoogleSTT streaming session")
+        logger.info("Started Google Cloud Speech streaming session")
     
     async def stop_streaming(self):
-        """Stop streaming session (placeholder for compatibility)."""
+        """Stop streaming session (placeholder)."""
         self.is_streaming = False
-        logger.info("Stopped SimpleGoogleSTT streaming session")
+        logger.info("Stopped Google Cloud Speech streaming session")
         return "", 0.0
     
     async def process_audio_chunk(
         self, 
-        audio_chunk: Union[bytes, np.ndarray], 
+        audio_chunk, 
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
-    ) -> Optional[StreamingTranscriptionResult]:
-        """Process a chunk of audio with batch recognition optimized for real-time."""
+    ):
+        """Process a chunk of audio with synchronous recognition."""
         if not self.is_streaming:
-            logger.debug("Called process_audio_chunk but streaming is not active")
+            logger.warning("Called process_audio_chunk but streaming is not active")
             await self.start_streaming()
         
         # Convert numpy array to bytes if needed
@@ -114,23 +100,21 @@ class SimpleGoogleSTT:
         else:
             audio_bytes = audio_chunk
         
-        # Add to buffer
-        self.audio_buffer.extend(audio_bytes)
-        
-        # Only process when we have enough audio
-        if len(self.audio_buffer) < self.buffer_size:
-            return None
-        
-        # Get audio to process
-        audio_to_process = bytes(self.audio_buffer)
-        self.audio_buffer.clear()
-        
+        # Instead of trying to use streaming recognition, just use synchronous recognition
         try:
             # Create recognition config
-            config = self._get_config()
+            config = speech.RecognitionConfig(
+                encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=self.sample_rate,
+                language_code=self.language_code,
+                enable_automatic_punctuation=self.enable_automatic_punctuation,
+                use_enhanced=True,
+                model="phone_call",
+                audio_channel_count=1
+            )
             
             # Create recognition audio
-            audio = speech.RecognitionAudio(content=audio_to_process)
+            audio = speech.RecognitionAudio(content=audio_bytes)
             
             # Perform recognition
             response = self.client.recognize(config=config, audio=audio)
