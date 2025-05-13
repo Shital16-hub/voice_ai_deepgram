@@ -1,7 +1,7 @@
+# telephony/audio_processor.py
+
 """
 Optimized audio processing utilities for telephony integration.
-
-Simplified version that reduces latency and improves accuracy.
 """
 import audioop
 import numpy as np
@@ -14,14 +14,12 @@ logger = logging.getLogger(__name__)
 
 class AudioProcessor:
     """
-    Optimized audio converter between Twilio and Voice AI formats.
-    
-    Simplified to reduce latency and improve accuracy.
+    Optimized audio converter between Twilio and Voice AI formats with minimal quality loss.
     """
     
     def mulaw_to_pcm(self, mulaw_data: bytes) -> np.ndarray:
         """
-        Convert Twilio's mulaw audio to PCM with minimal processing.
+        Convert Twilio's mulaw audio to PCM with optimized processing.
         
         Args:
             mulaw_data: Audio data in mulaw format
@@ -34,8 +32,7 @@ class AudioProcessor:
             if len(mulaw_data) < 160:  # Less than 20ms at 8kHz
                 return np.array([], dtype=np.float32)
             
-            # For Google STT telephony optimization, we'll keep at 8kHz
-            # Convert mulaw to 16-bit PCM
+            # Convert mulaw to 16-bit PCM using built-in audioop
             pcm_data = audioop.ulaw2lin(mulaw_data, 2)
             
             # Convert to numpy array (float32)
@@ -43,10 +40,10 @@ class AudioProcessor:
             audio_array = audio_array.astype(np.float32) / 32768.0
             
             # Minimal processing for better accuracy
-            # Only apply basic normalization
+            # Only apply gentle normalization if needed
             max_val = np.max(np.abs(audio_array))
-            if max_val > 0:
-                # Gentle normalization to preserve dynamics
+            if max_val > 0.95:
+                # Gentle normalization to prevent clipping
                 audio_array = audio_array * (0.95 / max_val)
             
             return audio_array
@@ -119,19 +116,19 @@ class AudioProcessor:
 
 class MulawBufferProcessor:
     """
-    Optimized buffer processor for mulaw audio chunks.
+    Optimized buffer processor for mulaw audio chunks with improved buffering strategy.
     """
     
-    def __init__(self, min_chunk_size=1600):  # 200ms at 8kHz - better for STT
+    def __init__(self, min_chunk_size=6400):  # Changed from 1600 to 6400 (800ms)
         """
         Initialize buffer processor.
         
         Args:
-            min_chunk_size: Minimum chunk size to process (default 1600 bytes = 200ms)
+            min_chunk_size: Minimum chunk size to process (default 6400 bytes = 800ms)
         """
         self.buffer = bytearray()
         self.min_chunk_size = min_chunk_size
-        logger.info(f"Initialized MulawBufferProcessor with min_chunk_size={min_chunk_size}")
+        logger.info(f"MulawBufferProcessor initialized with min_chunk_size={min_chunk_size}")
     
     def process(self, data: bytes) -> Optional[bytes]:
         """
@@ -160,3 +157,31 @@ class MulawBufferProcessor:
             return result
         
         return None
+    
+    def flush(self) -> Optional[bytes]:
+        """
+        Flush any remaining data in the buffer.
+        
+        Returns:
+            Remaining data or None if buffer is empty
+        """
+        if self.buffer:
+            result = bytes(self.buffer)
+            self.buffer = bytearray()
+            return result
+        return None
+    
+    def get_buffer_size(self) -> int:
+        """Get current buffer size."""
+        return len(self.buffer)
+    
+    def clear_buffer(self) -> int:
+        """
+        Clear the buffer and return the size that was cleared.
+        
+        Returns:
+            Size of data that was cleared
+        """
+        size = len(self.buffer)
+        self.buffer = bytearray()
+        return size

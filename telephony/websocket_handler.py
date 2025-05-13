@@ -1,5 +1,7 @@
+# telephony/websocket_handler.py
+
 """
-Main WebSocket handler for Twilio media streams with modular architecture.
+Enhanced WebSocket handler for Twilio media streams with optimized components.
 """
 import json
 import asyncio
@@ -16,12 +18,12 @@ logger = logging.getLogger(__name__)
 
 class WebSocketHandler:
     """
-    Main WebSocket handler that orchestrates all components.
+    Enhanced WebSocket handler that orchestrates all components.
     """
     
     def __init__(self, call_sid: str, pipeline):
         """
-        Initialize WebSocket handler with modular components.
+        Initialize WebSocket handler with enhanced components.
         
         Args:
             call_sid: Twilio call SID
@@ -31,7 +33,7 @@ class WebSocketHandler:
         self.stream_sid = None  # Store stream_sid at handler level
         self.pipeline = pipeline
         
-        # Initialize component managers
+        # Initialize enhanced component managers
         self.connection_manager = ConnectionManager(call_sid)
         self.audio_manager = AudioManager()
         self.speech_processor = SpeechProcessor(pipeline)
@@ -40,6 +42,8 @@ class WebSocketHandler:
         
         # State tracking
         self.conversation_active = True
+        
+        logger.info(f"WebSocketHandler initialized for call {call_sid}")
     
     async def handle_message(self, message: str, ws) -> None:
         """
