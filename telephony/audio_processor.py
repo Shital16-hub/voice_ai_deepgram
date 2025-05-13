@@ -1,13 +1,12 @@
 """
-Audio processing utilities for telephony integration.
+Optimized audio processing utilities for telephony integration.
 
-Handles audio format conversion between Twilio and Voice AI Agent.
+Simplified version that reduces latency and improves accuracy.
 """
 import audioop
 import numpy as np
 import logging
 from typing import Optional, Dict, Any, List, Tuple, Union
-from scipy import signal
 
 from telephony.config import SAMPLE_RATE_TWILIO, SAMPLE_RATE_AI
 
@@ -15,14 +14,14 @@ logger = logging.getLogger(__name__)
 
 class AudioProcessor:
     """
-    Handles audio conversion between Twilio and Voice AI formats.
+    Optimized audio converter between Twilio and Voice AI formats.
     
-    Twilio uses 8kHz mulaw encoding, while our Voice AI uses 16kHz PCM.
+    Simplified to reduce latency and improve accuracy.
     """
     
     def mulaw_to_pcm(self, mulaw_data: bytes) -> np.ndarray:
         """
-        Convert Twilio's mulaw audio to PCM for Voice AI.
+        Convert Twilio's mulaw audio to PCM with minimal processing.
         
         Args:
             mulaw_data: Audio data in mulaw format
@@ -31,65 +30,29 @@ class AudioProcessor:
             Audio data as numpy array (float32)
         """
         try:
-            # Check if we have enough data to convert - log at debug level instead of warning
-            if len(mulaw_data) < 1000:
-                logger.debug(f"Small mulaw data: {len(mulaw_data)} bytes - accumulating")
-                # Return empty array for very small chunks instead of processing
-                if len(mulaw_data) < 320:  # Less than 20ms at 16kHz
-                    return np.array([], dtype=np.float32)
+            # Skip very small chunks
+            if len(mulaw_data) < 160:  # Less than 20ms at 8kHz
+                return np.array([], dtype=np.float32)
             
+            # For Google STT telephony optimization, we'll keep at 8kHz
             # Convert mulaw to 16-bit PCM
             pcm_data = audioop.ulaw2lin(mulaw_data, 2)
             
-            # Resample from 8kHz to 16kHz
-            pcm_data_16k, _ = audioop.ratecv(
-                pcm_data, 2, 1, 
-                SAMPLE_RATE_TWILIO, 
-                SAMPLE_RATE_AI, 
-                None
-            )
-            
             # Convert to numpy array (float32)
-            audio_array = np.frombuffer(pcm_data_16k, dtype=np.int16)
+            audio_array = np.frombuffer(pcm_data, dtype=np.int16)
             audio_array = audio_array.astype(np.float32) / 32768.0
             
-            # Apply basic audio filtering
-            # Apply high-pass filter to remove low-frequency noise
-            b, a = signal.butter(6, 100/(SAMPLE_RATE_AI/2), 'highpass')
-            audio_array = signal.filtfilt(b, a, audio_array)
-            
-            # Apply band-pass filter for telephony freq range (300-3400 Hz)
-            b, a = signal.butter(4, [300/(SAMPLE_RATE_AI/2), 3400/(SAMPLE_RATE_AI/2)], 'band')
-            audio_array = signal.filtfilt(b, a, audio_array)
-            
-            # Apply a simple noise gate
-            noise_threshold = 0.015
-            audio_array = np.where(np.abs(audio_array) < noise_threshold, 0, audio_array)
-            
-            # Normalize for consistent volume
+            # Minimal processing for better accuracy
+            # Only apply basic normalization
             max_val = np.max(np.abs(audio_array))
             if max_val > 0:
+                # Gentle normalization to preserve dynamics
                 audio_array = audio_array * (0.95 / max_val)
-            
-            # Check audio levels at debug level
-            audio_level = np.mean(np.abs(audio_array)) * 100
-            if audio_level > 5.0:  # Only log significant audio
-                logger.debug(f"Converted {len(mulaw_data)} bytes to {len(audio_array)} samples. Audio level: {audio_level:.1f}%")
-            
-            # Apply a gain if audio is very quiet
-            if audio_level < 1.0:  # Very quiet audio
-                audio_array = audio_array * min(5.0, 5.0/audio_level)
-                logger.debug(f"Applied gain to quiet audio. New level: {np.mean(np.abs(audio_array)) * 100:.1f}%")
-
-            else:
-                # Don't apply gain if audio level is zero
-                pass
             
             return audio_array
             
         except Exception as e:
             logger.error(f"Error converting mulaw to PCM: {e}")
-            # Return an empty array rather than raising an exception
             return np.array([], dtype=np.float32)
     
     def pcm_to_mulaw(self, pcm_data: bytes) -> bytes:
@@ -103,224 +66,68 @@ class AudioProcessor:
             Audio data in mulaw format
         """
         try:
-            # Check if the data length is a multiple of 2 (for 16-bit samples)
+            # Ensure even byte count
             if len(pcm_data) % 2 != 0:
-                # Pad with a zero byte to make it even
                 pcm_data = pcm_data + b'\x00'
-                logger.debug("Padded audio data to make even length")
             
-            # Resample from 16kHz to 8kHz
-            pcm_data_8k, _ = audioop.ratecv(
-                pcm_data, 2, 1, 
-                SAMPLE_RATE_AI, 
-                SAMPLE_RATE_TWILIO, 
-                None
-            )
-            
-            # Convert to mulaw
-            mulaw_data = audioop.lin2ulaw(pcm_data_8k, 2)
-            
-            logger.debug(f"Converted {len(pcm_data)} bytes of PCM to {len(mulaw_data)} bytes of mulaw")
+            # Convert to mulaw at 8kHz
+            mulaw_data = audioop.lin2ulaw(pcm_data, 2)
             
             return mulaw_data
             
         except Exception as e:
             logger.error(f"Error converting PCM to mulaw: {e}")
-            # Return empty data rather than raising an exception
             return b''
     
-    def normalize_audio(self, audio_data: np.ndarray) -> np.ndarray:
+    def convert_to_mulaw_direct(self, audio_data: bytes) -> bytes:
         """
-        Normalize audio to [-1, 1] range while preserving dynamics.
-        
-        Args:
-            audio_data: Audio data as numpy array
-            
-        Returns:
-            Normalized audio data
-        """
-        max_val = np.max(np.abs(audio_data))
-        if max_val > 0:
-            return audio_data / max_val
-        return audio_data
-    
-    def enhance_audio(self, audio_data: np.ndarray) -> np.ndarray:
-        """
-        Enhance audio quality by reducing noise and improving speech clarity.
-        
-        Args:
-            audio_data: Audio data as numpy array
-            
-        Returns:
-            Enhanced audio data
-        """
-        try:
-            # 1. Apply high-pass filter to remove low-frequency noise (below 80Hz)
-            # Telephone lines often have low frequency hum
-            b, a = signal.butter(4, 80/(SAMPLE_RATE_AI/2), 'highpass')
-            filtered_audio = signal.filtfilt(b, a, audio_data)
-            
-            # 2. Apply a mild de-emphasis filter to reduce hissing
-            b, a = signal.butter(1, 3400/(SAMPLE_RATE_AI/2), 'low')
-            de_emphasis = signal.filtfilt(b, a, filtered_audio)
-            
-            # 3. Apply a simple noise gate
-            noise_threshold = 0.005
-            noise_gate = np.where(np.abs(de_emphasis) < noise_threshold, 0, de_emphasis)
-            
-            # 4. Normalize audio to have consistent volume
-            if np.max(np.abs(noise_gate)) > 0:
-                normalized = noise_gate / np.max(np.abs(noise_gate)) * 0.95
-            else:
-                normalized = noise_gate
-            
-            return normalized
-            
-        except Exception as e:
-            logger.error(f"Error enhancing audio: {e}")
-            # Return original audio if enhancement fails
-            return audio_data
-    
-    def float32_to_pcm16(self, audio_data: np.ndarray) -> bytes:
-        """
-        Convert float32 audio to 16-bit PCM bytes.
-        
-        Args:
-            audio_data: Audio data as numpy array (float32)
-            
-        Returns:
-            Audio data as 16-bit PCM bytes
-        """
-        # Ensure audio is in [-1, 1] range
-        audio_data = np.clip(audio_data, -1.0, 1.0)
-        
-        # Convert to int16
-        audio_int16 = (audio_data * 32767).astype(np.int16)
-        
-        # Convert to bytes
-        return audio_int16.tobytes()
-    
-    def pcm16_to_float32(self, audio_data: bytes) -> np.ndarray:
-        """
-        Convert 16-bit PCM bytes to float32 audio.
-        
-        Args:
-            audio_data: Audio data as 16-bit PCM bytes
-            
-        Returns:
-            Audio data as numpy array (float32)
-        """
-        try:
-            # Convert to numpy array
-            audio_int16 = np.frombuffer(audio_data, dtype=np.int16)
-            
-            # Convert to float32
-            return audio_int16.astype(np.float32) / 32768.0
-        except Exception as e:
-            logger.error(f"Error converting PCM16 to float32: {e}")
-            return np.array([], dtype=np.float32)
-            
-    def convert_to_mulaw(self, audio_data: bytes, sample_rate: int = 8000) -> bytes:
-        """
-        Convert audio from any format to µ-law format specifically for Twilio.
-        Used for ElevenLabs TTS output processing.
+        Convert audio directly to mulaw format for Twilio.
         
         Args:
             audio_data: Audio data as bytes
-            sample_rate: Target sample rate for Twilio
             
         Returns:
-            Audio data converted to µ-law format
+            Audio data converted to mulaw format
         """
-        try:
-            import wave
-            import io
-            
-            # If it's already µ-law, don't convert
-            if self.is_mulaw(audio_data):
-                return audio_data
-                
-            # If it's WAV, extract PCM data
-            if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
-                with io.BytesIO(audio_data) as f:
-                    with wave.open(f, 'rb') as wav:
-                        pcm_data = wav.readframes(wav.getnframes())
-                        src_sample_rate = wav.getframerate()
-                        src_channels = wav.getnchannels()
-                        src_width = wav.getsampwidth()
-                        
-                        # Resample if needed
-                        if src_sample_rate != sample_rate:
-                            pcm_data, _ = audioop.ratecv(
-                                pcm_data, src_width, src_channels, 
-                                src_sample_rate, sample_rate, None
-                            )
-                        
-                        # Convert to mono if needed
-                        if src_channels > 1:
-                            pcm_data = audioop.tomono(pcm_data, src_width, 1, 0)
-                            
-                        # Convert to 16-bit if needed
-                        if src_width != 2:  # 2 bytes = 16-bit
-                            pcm_data = audioop.lin2lin(pcm_data, src_width, 2)
-                            
-                        # Convert to µ-law
-                        mulaw_data = audioop.lin2ulaw(pcm_data, 2)  # 2 bytes = 16-bit
-                        
-                        return mulaw_data
-            else:
-                # For MP3 or other formats from ElevenLabs, convert to WAV first
-                # and then to µ-law using an external utility (simulated here)
-                
-                # This would normally use ffmpeg or another converter
-                # For our purposes, treat as 16-bit PCM and convert directly
-                return audioop.lin2ulaw(audio_data, 2)
-                
-        except Exception as e:
-            logger.error(f"Error converting to mulaw: {e}")
-            return b''
-            
+        # If it's already mulaw (8-bit), return as-is
+        if self.is_mulaw(audio_data):
+            return audio_data
+        
+        # For other formats, convert through PCM
+        return self.pcm_to_mulaw(audio_data)
+    
     def is_mulaw(self, audio_data: bytes) -> bool:
         """
-        Check if audio data is in µ-law format.
+        Check if audio data is in mulaw format.
         
         Args:
             audio_data: Audio data as bytes
             
         Returns:
-            True if audio is in µ-law format
+            True if audio is in mulaw format
         """
-        # Simple heuristic check
         if len(audio_data) < 100:
             return False
-            
-        # Sample the first 100 bytes and check value distribution
-        sample = audio_data[:100]
         
-        # µ-law typically uses the full 8-bit range
-        value_count = {}
-        for b in sample:
-            range_key = b // 32  # Group into 8 ranges (0-31, 32-63, etc.)
-            value_count[range_key] = value_count.get(range_key, 0) + 1
-            
-        # If we have values across most ranges, it's likely µ-law
-        return len(value_count) >= 6  # At least 6 out of 8 ranges have values
+        # mulaw uses full 8-bit range
+        sample = audio_data[:100]
+        unique_values = len(set(sample))
+        
+        # mulaw typically has good distribution across full range
+        return unique_values > 50  # Simple heuristic
 
 
 class MulawBufferProcessor:
     """
-    Buffer processor for small mulaw audio chunks.
-    
-    This class accumulates small mulaw chunks to avoid processing many small
-    chunks and reduce "Very small mulaw data" warnings.
+    Optimized buffer processor for mulaw audio chunks.
     """
     
-    def __init__(self, min_chunk_size=640):  # 80ms at 8kHz
+    def __init__(self, min_chunk_size=1600):  # 200ms at 8kHz - better for STT
         """
         Initialize buffer processor.
         
         Args:
-            min_chunk_size: Minimum chunk size to process (default 640 bytes = 80ms at 8kHz)
+            min_chunk_size: Minimum chunk size to process (default 1600 bytes = 200ms)
         """
         self.buffer = bytearray()
         self.min_chunk_size = min_chunk_size
@@ -336,14 +143,9 @@ class MulawBufferProcessor:
         Returns:
             Processed data of minimum size or None if still buffering
         """
-        # Skip empty chunks
         if not data:
             return None
-            
-        # Log small chunks at debug level instead of warning
-        if 0 < len(data) < 320:  # Less than 40ms at 8kHz
-            logger.debug(f"Small mulaw data: {len(data)} bytes (accumulating)")
-            
+        
         # Add to buffer
         self.buffer.extend(data)
         
@@ -355,75 +157,6 @@ class MulawBufferProcessor:
             # Clear buffer
             self.buffer = bytearray()
             
-            logger.debug(f"Processed mulaw buffer: {len(result)} bytes")
             return result
         
-        # Not enough data yet
         return None
-
-
-def convert_mulaw_to_float(mulaw_data: bytes) -> np.ndarray:
-    """
-    Convert mulaw audio to float32 array.
-    
-    Args:
-        mulaw_data: Mulaw audio data
-        
-    Returns:
-        Float32 array in [-1.0, 1.0] range
-    """
-    # Convert to unsigned 8-bit integers
-    mulaw_samples = np.frombuffer(mulaw_data, dtype=np.uint8)
-    
-    # Convert mulaw to linear PCM (simplified conversion)
-    # This uses the μ-law algorithm to convert back to linear
-    mulaw_quantized = mulaw_samples.astype(np.float32) / 255.0  # Normalize to [0, 1]
-    mulaw_quantized = 2 * mulaw_quantized - 1  # Scale to [-1, 1]
-    
-    # Apply inverse μ-law transform
-    sign = np.sign(mulaw_quantized)
-    magnitude = (1.0 / 255.0) * (1.0 + 255.0 * np.abs(mulaw_quantized))
-    pcm_samples = sign * magnitude
-    
-    return pcm_samples
-
-
-def convert_float_to_mulaw(float_data: np.ndarray) -> bytes:
-    """
-    Convert float32 array to mulaw audio.
-    
-    Args:
-        float_data: Float32 array in [-1.0, 1.0] range
-        
-    Returns:
-        Mulaw audio data
-    """
-    # Clip to [-1.0, 1.0] range
-    float_data = np.clip(float_data, -1.0, 1.0)
-    
-    # Apply μ-law transform
-    sign = np.sign(float_data)
-    magnitude = np.log(1.0 + 255.0 * np.abs(float_data)) / np.log(1.0 + 255.0)
-    mulaw_quantized = sign * magnitude
-    
-    # Convert to [0, 1] range and then to 8-bit
-    mulaw_quantized = (mulaw_quantized + 1.0) / 2.0  # Convert to [0, 1]
-    mulaw_samples = (mulaw_quantized * 255.0).astype(np.uint8)  # Convert to 8-bit
-    
-    # Convert to bytes
-    return mulaw_samples.tobytes()
-
-
-def detect_silence(audio_data: np.ndarray, threshold: float = 0.01) -> bool:
-    """
-    Detect if audio chunk is silence.
-    
-    Args:
-        audio_data: Audio data as numpy array
-        threshold: Energy threshold for silence detection
-        
-    Returns:
-        True if audio is considered silence
-    """
-    energy = np.mean(np.abs(audio_data))
-    return energy < threshold

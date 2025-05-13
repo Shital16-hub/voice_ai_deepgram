@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 
 # Import your modules
-from telephony.audio_processor import MulawBufferProcessor, AudioProcessor
 from telephony.twilio_handler import TwilioHandler
 from telephony.websocket_handler import WebSocketHandler
 from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
@@ -29,46 +28,72 @@ from text_to_speech import ElevenLabsTTS
 # Load environment variables
 load_dotenv()
 
+def configure_detailed_logging():
+    """Configure detailed logging for debugging."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Set specific loggers to debug level
+    debug_loggers = [
+        'speech_to_text.simple_google_stt',
+        'telephony.websocket.speech_processor',
+        'telephony.websocket.audio_manager',
+        'telephony.websocket.message_router'
+    ]
+    
+    for logger_name in debug_loggers:
+        logging.getLogger(logger_name).setLevel(logging.DEBUG)
+    
+    # Disable noisy loggers
+    logging.getLogger('google.cloud').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+
+configure_detailed_logging()
+
+
 # Configure logging with reduced noise from small audio chunks
-def configure_logging():
-    # Set up root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+# def configure_logging():
+#     # Set up root logger
+#     root_logger = logging.getLogger()
+#     root_logger.setLevel(logging.INFO)
     
-    # Remove existing handlers to avoid duplication
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
+#     # Remove existing handlers to avoid duplication
+#     for handler in root_logger.handlers[:]:
+#         root_logger.removeHandler(handler)
     
-    # Create a handler for console output
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+#     # Create a handler for console output
+#     console_handler = logging.StreamHandler()
+#     console_handler.setLevel(logging.INFO)
     
-    # Create a formatter
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    console_handler.setFormatter(formatter)
+#     # Create a formatter
+#     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#     console_handler.setFormatter(formatter)
     
-    # Add handler to root logger
-    root_logger.addHandler(console_handler)
+#     # Add handler to root logger
+#     root_logger.addHandler(console_handler)
     
-    # Set specific loggers to higher levels to reduce noise
-    logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)  # Only show errors
+#     # Set specific loggers to higher levels to reduce noise
+#     logging.getLogger('telephony.audio_processor').setLevel(logging.ERROR)  # Only show errors
     
-    # Create a filter to ignore specific messages
-    class IgnoreSmallMulawFilter(logging.Filter):
-        def filter(self, record):
-            return not (record.getMessage().startswith("Very small mulaw data"))
+#     # Create a filter to ignore specific messages
+#     class IgnoreSmallMulawFilter(logging.Filter):
+#         def filter(self, record):
+#             return not (record.getMessage().startswith("Very small mulaw data"))
     
-    # Add filter to the handlers
-    for handler in root_logger.handlers:
-        handler.addFilter(IgnoreSmallMulawFilter())
+#     # Add filter to the handlers
+#     for handler in root_logger.handlers:
+#         handler.addFilter(IgnoreSmallMulawFilter())
     
-    # Optionally create a file handler for full logs
-    file_handler = logging.FileHandler('full_debug.log')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
+#     # Optionally create a file handler for full logs
+#     file_handler = logging.FileHandler('full_debug.log')
+#     file_handler.setLevel(logging.DEBUG)
+#     file_handler.setFormatter(formatter)
+#     root_logger.addHandler(file_handler)
     
-    return root_logger
+#     return root_logger
 
 # Configure logging
 logger = configure_logging()

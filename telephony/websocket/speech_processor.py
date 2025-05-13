@@ -1,5 +1,5 @@
 """
-Speech recognition and transcription processing.
+Enhanced speech processor with extensive debugging and error handling.
 """
 import logging
 import re
@@ -8,40 +8,44 @@ from typing import Dict, Any, Optional, List, Callable, Awaitable
 import numpy as np
 
 from speech_to_text.simple_google_stt import SimpleGoogleSTT
-from telephony.websocket.audio_manager import AudioManager
 
 logger = logging.getLogger(__name__)
 
 class SpeechProcessor:
-    """Handles speech recognition, transcription cleanup, and validation."""
+    """Speech processor with comprehensive debugging."""
     
     def __init__(self, pipeline):
         """Initialize speech processor."""
         self.pipeline = pipeline
+        
+        # Initialize with debug logging
+        logger.info("Initializing SpeechProcessor")
+        
         self.speech_client = SimpleGoogleSTT(
             language_code="en-US",
-            sample_rate=16000,
-            enable_automatic_punctuation=True
+            sample_rate=8000,
+            enable_automatic_punctuation=True,
+            enhanced_telephony=True
         )
         self.google_speech_active = False
         
-        # Transcription patterns
-        self.non_speech_patterns = self._compile_non_speech_patterns()
+        # Simple patterns
+        self.non_speech_patterns = re.compile(
+            r'\[.*?\]|\(.*?\)|music playing|background noise|static',
+            re.IGNORECASE
+        )
+        
+        # Echo detection
         self.echo_detection_history = []
-        self.max_echo_history = 5
+        self.max_echo_history = 3
         self.min_words_for_valid_query = 1
-    
-    def _compile_non_speech_patterns(self) -> re.Pattern:
-        """Compile regex patterns for non-speech annotations."""
-        patterns = [
-            r'\(.*?music.*?\)', r'\(.*?wind.*?\)', r'\(.*?engine.*?\)',
-            r'\(.*?noise.*?\)', r'\(.*?sound.*?\)', r'\(.*?silence.*?\)',
-            r'\[.*?silence.*?\]', r'\[.*?BLANK.*?\]', r'\(.*?applause.*?\)',
-            r'\(.*?laughter.*?\)', r'\(.*?footsteps.*?\)', r'\(.*?breathing.*?\)',
-            r'\(.*?static.*?\)', r'\[.*?unclear.*?\]', r'\(.*?inaudible.*?\)',
-            r'music playing', r'background noise', r'static'
-        ]
-        return re.compile('|'.join(patterns))
+        
+        # Debugging counters
+        self.audio_chunks_received = 0
+        self.successful_transcriptions = 0
+        self.failed_transcriptions = 0
+        
+        logger.info("SpeechProcessor initialized successfully")
     
     async def process_audio(
         self,
@@ -49,172 +53,166 @@ class SpeechProcessor:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Optional[str]:
         """
-        Process audio data through speech recognition.
-        
-        Args:
-            audio_data: Audio data as bytes
-            callback: Optional callback for interim results
-            
-        Returns:
-            Final transcription if available
+        Process audio with comprehensive debugging.
         """
         try:
-            # Convert to PCM format
-            from telephony.audio_processor import AudioProcessor
-            audio_processor = AudioProcessor()
-            pcm_audio = audio_processor.mulaw_to_pcm(audio_data)
-            
-            # Preprocess audio
-            pcm_audio = self._preprocess_audio(pcm_audio)
-            
-            # Convert to bytes for Google Speech
-            audio_bytes = (pcm_audio * 32767).astype(np.int16).tobytes()
+            self.audio_chunks_received += 1
+            logger.info(f"Processing audio chunk #{self.audio_chunks_received}, size: {len(audio_data)} bytes")
             
             # Initialize speech session if needed
             if not self.google_speech_active:
+                logger.info("Starting Google Speech session...")
                 await self.speech_client.start_streaming()
                 self.google_speech_active = True
+                logger.info("Google Speech session started successfully")
             
-            # Collect results
+            # Results collection
             transcription_results = []
             
             async def transcription_callback(result):
-                if hasattr(result, 'is_final') and result.is_final:
+                logger.info(f"Received transcription callback: is_final={result.is_final}, text='{result.text}'")
+                
+                if result.is_final:
                     transcription_results.append(result)
-                    logger.debug(f"Received final Google Speech result: {result.text}")
+                    logger.info(f"Added final result: '{result.text}' (confidence: {result.confidence})")
+                    self.successful_transcriptions += 1
+                
+                # Call original callback if provided
+                if callback:
+                    try:
+                        await callback(result)
+                    except Exception as e:
+                        logger.error(f"Error in original callback: {e}")
             
-            # Process audio chunk
-            await self.speech_client.process_audio_chunk(
-                audio_chunk=audio_bytes,
+            logger.info("Sending audio to Google Cloud STT...")
+            
+            # Process the audio
+            result = await self.speech_client.process_audio_chunk(
+                audio_chunk=audio_data,
                 callback=transcription_callback
             )
             
-            # Wait for results
-            await asyncio.sleep(0.5)
+            logger.info(f"Google Cloud STT returned: {result}")
             
-            # Get best transcription
+            # Return best result
             if transcription_results:
-                best_result = max(transcription_results, key=lambda r: getattr(r, 'confidence', 0))
-                transcription = best_result.text
+                best_result = max(transcription_results, key=lambda r: r.confidence)
+                logger.info(f"Returning best result: '{best_result.text}'")
+                return best_result.text
+            elif result and result.text:
+                logger.info(f"Returning direct result: '{result.text}'")
+                return result.text
             else:
-                # Try to get final results
-                if self.google_speech_active:
-                    final_transcription, _ = await self.speech_client.stop_streaming()
-                    await self.speech_client.start_streaming()
-                    self.google_speech_active = True
-                    transcription = final_transcription
-                else:
-                    transcription = ""
-            
-            return transcription
+                logger.warning("No transcription results obtained")
+                self.failed_transcriptions += 1
+                return None
             
         except Exception as e:
-            logger.error(f"Error processing audio: {e}")
+            logger.error(f"Error processing audio: {e}", exc_info=True)
+            self.failed_transcriptions += 1
             return None
     
-    def _preprocess_audio(self, audio_data: np.ndarray) -> np.ndarray:
-        """Preprocess audio for better recognition."""
-        try:
-            from scipy import signal
-            
-            # High-pass filter
-            b, a = signal.butter(4, 80/(16000/2), 'highpass')
-            filtered_audio = signal.filtfilt(b, a, audio_data)
-            
-            # Simple noise gate
-            noise_gate_threshold = 0.015
-            noise_gate = np.where(np.abs(filtered_audio) < noise_gate_threshold, 0, filtered_audio)
-            
-            # Normalize
-            if np.max(np.abs(noise_gate)) > 0:
-                normalized = noise_gate / np.max(np.abs(noise_gate)) * 0.95
-            else:
-                normalized = noise_gate
-                
-            return normalized
-            
-        except Exception as e:
-            logger.error(f"Error in audio preprocessing: {e}")
-            return audio_data
-    
     def cleanup_transcription(self, text: str) -> str:
-        """Clean up transcription text."""
+        """Clean up transcription text with logging."""
         if not text:
             return ""
-            
+        
+        original_text = text
+        
         # Remove non-speech annotations
         cleaned_text = self.non_speech_patterns.sub('', text)
         
-        # Remove filler words at beginning
-        cleaned_text = re.sub(r'^(um|uh|er|ah|like|so)\s+', '', cleaned_text, flags=re.IGNORECASE)
-        
-        # Remove repeated words
-        cleaned_text = re.sub(r'\b(\w+)( \1\b)+', r'\1', cleaned_text)
-        
-        # Clean up punctuation and spaces
-        cleaned_text = re.sub(r'\s+([.,!?])', r'\1', cleaned_text)
+        # Basic cleanup
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         
-        if text != cleaned_text:
-            logger.info(f"Cleaned transcription: '{text}' -> '{cleaned_text}'")
-            
+        if original_text != cleaned_text:
+            logger.info(f"Cleaned transcription: '{original_text}' -> '{cleaned_text}'")
+        
         return cleaned_text
     
     def is_valid_transcription(self, text: str) -> bool:
-        """Check if transcription is valid and worth processing."""
+        """Check if transcription is valid with detailed logging."""
+        logger.info(f"Validating transcription: '{text}'")
+        
         cleaned_text = self.cleanup_transcription(text)
         
         if not cleaned_text:
-            logger.info("Transcription contains only non-speech annotations")
+            logger.info("Rejected: Empty after cleanup")
             return False
         
-        # Check for question patterns
-        question_starters = ["what", "who", "where", "when", "why", "how", "can", "could", "do", "does", "is", "are"]
-        lowered_text = cleaned_text.lower()
+        # Always accept questions
+        question_words = ['what', 'how', 'when', 'where', 'why', 'who', 'can', 'could', 'would', 'is', 'are']
+        if any(word in cleaned_text.lower() for word in question_words):
+            logger.info(f"Accepted: Contains question word - '{cleaned_text}'")
+            return True
         
-        for starter in question_starters:
-            if lowered_text.startswith(starter):
-                logger.info(f"Allowing question pattern: {text}")
-                return True
+        # Accept if it contains relevant keywords
+        relevant_words = ['feature', 'price', 'cost', 'plan', 'service', 'support', 'voiceassist']
+        if any(word in cleaned_text.lower() for word in relevant_words):
+            logger.info(f"Accepted: Contains relevant keyword - '{cleaned_text}'")
+            return True
         
-        # Check word count
+        # Minimum word count
         word_count = len(cleaned_text.split())
-        if word_count < self.min_words_for_valid_query:
-            logger.info(f"Transcription too short: {word_count} words")
-            return False
-            
-        return True
+        if word_count >= self.min_words_for_valid_query:
+            logger.info(f"Accepted: Meets word count ({word_count}) - '{cleaned_text}'")
+            return True
+        
+        logger.info(f"Rejected: Doesn't meet criteria - '{cleaned_text}'")
+        return False
     
     def is_echo_of_system_speech(self, transcription: str) -> bool:
-        """Check if transcription is an echo of system's own speech."""
-        if not transcription:
+        """Check for echo with detailed logging."""
+        if not transcription or not self.echo_detection_history:
             return False
         
-        for phrase in self.echo_detection_history:
-            clean_phrase = self.cleanup_transcription(phrase)
-            
-            if clean_phrase and len(clean_phrase) > 5:
-                if clean_phrase in transcription or transcription in clean_phrase:
-                    similarity_ratio = len(clean_phrase) / max(len(transcription), 1)
-                    
-                    if similarity_ratio > 0.5:
-                        logger.info(f"Detected echo: '{clean_phrase}' similar to '{transcription}'")
-                        return True
-                    
+        logger.debug(f"Checking for echo: '{transcription}'")
+        logger.debug(f"Recent responses: {self.echo_detection_history}")
+        
+        # Simple echo detection
+        for i, recent_phrase in enumerate(self.echo_detection_history):
+            if len(recent_phrase) > 15:
+                # Check for word overlap
+                transcription_words = set(transcription.lower().split())
+                phrase_words = set(recent_phrase.lower().split())
+                overlap = len(transcription_words & phrase_words)
+                
+                if overlap > 2 and overlap > len(phrase_words) * 0.5:
+                    logger.info(f"Detected echo: {overlap} words overlap with response #{i}")
+                    logger.info(f"  Transcription: '{transcription}'")
+                    logger.info(f"  Recent phrase: '{recent_phrase}'")
+                    return True
+        
         return False
     
     def add_to_echo_history(self, response: str) -> None:
-        """Add response to echo detection history."""
-        self.echo_detection_history.append(response)
-        if len(self.echo_detection_history) > self.max_echo_history:
-            self.echo_detection_history.pop(0)
+        """Add response to echo history with logging."""
+        if len(response) > 20:
+            self.echo_detection_history.append(response)
+            if len(self.echo_detection_history) > self.max_echo_history:
+                removed = self.echo_detection_history.pop(0)
+                logger.debug(f"Removed old echo history: '{removed}'")
+            logger.debug(f"Added to echo history: '{response}' (total: {len(self.echo_detection_history)})")
     
     async def stop_speech_session(self) -> None:
-        """Stop the Google Speech session."""
+        """Stop the speech session with stats."""
         if self.google_speech_active:
             try:
                 await self.speech_client.stop_streaming()
                 self.google_speech_active = False
-                logger.info("Stopped Google Cloud Speech streaming session")
+                logger.info("Stopped Google Speech session")
+                logger.info(f"Session stats: {self.audio_chunks_received} chunks received, "
+                           f"{self.successful_transcriptions} successful, "
+                           f"{self.failed_transcriptions} failed")
             except Exception as e:
-                logger.error(f"Error stopping Google Speech session: {e}")
+                logger.error(f"Error stopping speech session: {e}")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get processing statistics."""
+        return {
+            "audio_chunks_received": self.audio_chunks_received,
+            "successful_transcriptions": self.successful_transcriptions,
+            "failed_transcriptions": self.failed_transcriptions,
+            "google_speech_active": self.google_speech_active,
+            "echo_history_size": len(self.echo_detection_history)
+        }
