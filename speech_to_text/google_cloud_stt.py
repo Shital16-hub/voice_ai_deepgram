@@ -1,8 +1,7 @@
 # speech_to_text/google_cloud_stt.py
 
 """
-Google Cloud Speech-to-Text implementation using v2.25.0+ API.
-Replaces the old complex implementation with a simplified, working version.
+Optimized Google Cloud Speech-to-Text implementation for Twilio telephony.
 """
 import logging
 import asyncio
@@ -10,6 +9,7 @@ import time
 from typing import Dict, Any, Optional, List, Callable, Awaitable, Union
 import numpy as np
 from dataclasses import dataclass
+import json
 
 from google.cloud import speech
 
@@ -28,8 +28,8 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Updated Google Cloud Speech-to-Text client for v2.25.0+.
-    Removes deprecated fields and uses the simplified API.
+    Optimized Google Cloud Speech-to-Text client for telephony with v2.32.0.
+    Uses telephony-specific models and minimal preprocessing for best accuracy.
     """
     
     def __init__(
@@ -43,16 +43,7 @@ class GoogleCloudStreamingSTT:
         enhanced_model: bool = True
     ):
         """
-        Initialize Google Cloud STT with proper v2.25.0+ configuration.
-        
-        Args:
-            language: Language code (e.g., 'en-US')
-            sample_rate: Audio sample rate in Hz
-            encoding: Audio encoding format
-            channels: Number of audio channels
-            interim_results: Whether to return interim results
-            speech_context_phrases: Phrases to boost recognition
-            enhanced_model: Whether to use enhanced model
+        Initialize with optimal settings for Twilio telephony.
         """
         self.language = language
         self.sample_rate = sample_rate
@@ -60,9 +51,9 @@ class GoogleCloudStreamingSTT:
         self.channels = channels
         self.interim_results = interim_results
         self.enhanced_model = enhanced_model
-        self.speech_context_phrases = speech_context_phrases or [
-            "price", "plan", "cost", "subscription", "service", "features", "support"
-        ]
+        
+        # Don't hardcode speech contexts - use Google's telephony model instead
+        self.speech_context_phrases = speech_context_phrases if speech_context_phrases else []
         
         # Initialize client
         self.client = speech.SpeechClient()
@@ -73,31 +64,40 @@ class GoogleCloudStreamingSTT:
         self.total_chunks = 0
         self.successful_transcriptions = 0
         
-        logger.info(f"Initialized GoogleCloudStreamingSTT: {sample_rate}Hz, {encoding}")
+        logger.info(f"Initialized GoogleCloudStreamingSTT: {sample_rate}Hz, {encoding}, telephony-optimized")
     
     def _get_recognition_config(self) -> speech.RecognitionConfig:
-        """Get recognition configuration with valid v2.25.0+ fields only."""
-        # Map encoding string to enum - REMOVED ALAW as it's deprecated
+        """Get optimized recognition configuration for telephony."""
+        # Map encoding string to enum
         encoding_map = {
             "LINEAR16": speech.RecognitionConfig.AudioEncoding.LINEAR16,
             "MULAW": speech.RecognitionConfig.AudioEncoding.MULAW,
-            # ALAW is deprecated and removed in v2.25.0+
         }
         
         encoding_enum = encoding_map.get(self.encoding, speech.RecognitionConfig.AudioEncoding.MULAW)
         
-        # Create config with ONLY valid fields for v2.25.0+
+        # Optimal configuration for telephony
         config = speech.RecognitionConfig(
             encoding=encoding_enum,
             sample_rate_hertz=self.sample_rate,
             language_code=self.language,
             audio_channel_count=self.channels,
-            enable_automatic_punctuation=True,
-            model="phone_call",  # Best for telephony
+            
+            # Key telephony optimizations
+            model="phone_call",  # Use telephony-optimized model
             use_enhanced=self.enhanced_model,
+            
+            # Enable features that improve accuracy
+            enable_automatic_punctuation=True,
+            enable_word_time_offsets=True,
+            enable_word_confidence=True,
+            max_alternatives=1,  # Focus on best result
+            
+            # Instead of hardcoded speech contexts, use adaptation if needed
+            # speech_contexts=[...] - Removed to avoid hardcoding
         )
         
-        # Add speech contexts
+        # Only add speech contexts if specifically provided
         if self.speech_context_phrases:
             speech_context = speech.SpeechContext(
                 phrases=self.speech_context_phrases,
@@ -128,14 +128,7 @@ class GoogleCloudStreamingSTT:
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
         """
-        Process audio chunk with the v2.25.0+ API.
-        
-        Args:
-            audio_chunk: Audio data as bytes or numpy array
-            callback: Optional callback for results
-            
-        Returns:
-            Transcription result or None
+        Process audio chunk with minimal preprocessing for optimal accuracy.
         """
         if not self.is_streaming:
             await self.start_streaming()
@@ -143,28 +136,32 @@ class GoogleCloudStreamingSTT:
         self.total_chunks += 1
         
         try:
-            # Convert numpy array to bytes if needed
+            # Convert numpy array to bytes if needed - NO preprocessing
             if isinstance(audio_chunk, np.ndarray):
+                # Don't modify the audio - just convert format
                 if audio_chunk.dtype == np.float32:
-                    # Convert float32 to mulaw
-                    import audioop
-                    audio_bytes = audioop.lin2ulaw(
-                        (audio_chunk * 32767).astype(np.int16).tobytes(), 2
-                    )
+                    if self.encoding == "MULAW":
+                        # Convert to mulaw directly
+                        import audioop
+                        # Convert float32 to 16-bit PCM first
+                        pcm_data = (audio_chunk * 32767).astype(np.int16).tobytes()
+                        audio_bytes = audioop.lin2ulaw(pcm_data, 2)
+                    else:
+                        # For LINEAR16, keep as PCM
+                        audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
                 else:
                     audio_bytes = audio_chunk.tobytes()
             else:
                 audio_bytes = audio_chunk
             
-            # Log audio details for debugging
-            logger.debug(f"Processing audio chunk #{self.total_chunks}: {len(audio_bytes)} bytes, encoding: {self.encoding}")
+            logger.debug(f"Processing audio chunk #{self.total_chunks}: {len(audio_bytes)} bytes")
             
             # Skip tiny chunks
             if len(audio_bytes) < 160:  # Less than 20ms at 8kHz
                 logger.debug("Skipping tiny audio chunk")
                 return None
             
-            # Create the recognition config
+            # Get recognition config
             config = self._get_recognition_config()
             
             # Create audio object
@@ -186,13 +183,13 @@ class GoogleCloudStreamingSTT:
                         self.chunk_count += 1
                         transcription_result = StreamingTranscriptionResult(
                             text=alternative.transcript,
-                            is_final=True,  # Synchronous recognition is always final
+                            is_final=True,
                             confidence=getattr(alternative, 'confidence', 0.9),
                             chunk_id=self.chunk_count
                         )
                         
                         self.successful_transcriptions += 1
-                        logger.info(f"Transcription: '{alternative.transcript}' (confidence: {transcription_result.confidence})")
+                        logger.info(f"Transcription: '{alternative.transcript}' (confidence: {transcription_result.confidence:.2f})")
                         
                         # Call callback if provided
                         if callback:
