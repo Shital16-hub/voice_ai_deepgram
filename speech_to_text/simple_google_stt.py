@@ -1,14 +1,18 @@
 """
-Optimized Google Cloud Speech client with direct MULAW support.
+Fixed Google Cloud Speech client with corrected streaming API usage.
 """
 import logging
 import asyncio
+import queue
+import threading
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Union
 import numpy as np
 from dataclasses import dataclass
 
 try:
     from google.cloud import speech
+    from google.api_core import retry as google_retry
+    from google.api_core import exceptions as google_exceptions
     GOOGLE_CLOUD_AVAILABLE = True
 except ImportError:
     GOOGLE_CLOUD_AVAILABLE = False
@@ -32,8 +36,8 @@ class GoogleCloudStreamingSTT:
     def __init__(
         self, 
         language="en-US", 
-        sample_rate=8000,  # Changed to 8000 for direct MULAW support
-        encoding="MULAW",  # Changed to MULAW
+        sample_rate=8000,  # 8kHz for Twilio
+        encoding="MULAW",  # MULAW for Twilio
         channels=1, 
         interim_results=True,
         enhanced_model=True,
@@ -65,13 +69,18 @@ class GoogleCloudStreamingSTT:
         # State tracking
         self.is_streaming = False
         self.utterance_id = 0
-        self._stream = None
-        self._config = None
+        
+        # For improved streaming
+        self.audio_queue = queue.Queue(maxsize=50)  # Limit queue size
+        self.result_queue = asyncio.Queue()
+        self.processing_thread = None
+        self.stop_processing = threading.Event()
+        self._current_loop = None
     
     def _get_config(self) -> speech.RecognitionConfig:
         """Get the recognition config optimized for MULAW telephony."""
         try:
-            # Get encoding enum
+            # Set encoding
             if self.encoding == "MULAW":
                 encoding_enum = speech.RecognitionConfig.AudioEncoding.MULAW
             else:
@@ -112,106 +121,111 @@ class GoogleCloudStreamingSTT:
             single_utterance=False
         )
     
+    def _process_audio_loop(self):
+        """Process audio chunks in a separate thread using correct API."""
+        while not self.stop_processing.is_set():
+            try:
+                # Get audio chunk with timeout
+                audio_bytes = self.audio_queue.get(timeout=1.0)
+                
+                # Create streaming config
+                streaming_config = self._get_streaming_config()
+                
+                # Create requests generator - CRITICAL FIX HERE
+                def request_generator():
+                    # First request: send config
+                    yield speech.StreamingRecognizeRequest(streaming_config=streaming_config)
+                    # Second request: send audio
+                    yield speech.StreamingRecognizeRequest(audio_content=audio_bytes)
+                
+                # FIXED: Pass the generator function result, not the function itself
+                responses = self.client.streaming_recognize(request_generator())
+                
+                # Process responses
+                for response in responses:
+                    for result in response.results:
+                        if result.alternatives:
+                            alt = result.alternatives[0]
+                            
+                            # Create result object
+                            self.utterance_id += 1
+                            transcription_result = StreamingTranscriptionResult(
+                                text=alt.transcript,
+                                is_final=result.is_final,
+                                confidence=alt.confidence if hasattr(alt, "confidence") else 0.8,
+                                chunk_id=self.utterance_id
+                            )
+                            
+                            # Put result in queue safely
+                            try:
+                                if self._current_loop and not self._current_loop.is_closed():
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        self.result_queue.put(transcription_result),
+                                        self._current_loop
+                                    )
+                                    future.result(timeout=1.0)
+                            except Exception as e:
+                                logger.debug(f"Error putting result in queue: {e}")
+                
+                # Mark task as done
+                self.audio_queue.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error in audio processing loop: {e}")
+                continue
+    
     async def start_streaming(self):
-        """Start streaming session with proper MULAW support."""
-        try:
-            if self.is_streaming:
-                await self.stop_streaming()
-            
-            self._config = self._get_streaming_config()
-            
-            # Create a generator for the audio stream
-            self._audio_generator = self._create_audio_generator()
-            
-            # Start the streaming recognize
-            self._stream = self.client.streaming_recognize(
-                requests=self._audio_generator,
-                retry=speech.types.Retry(
-                    predicate=speech.types.Retry.if_transient_error,
-                    initial=1.0,
-                    maximum=60.0,
-                    multiplier=2.0
-                )
-            )
-            
-            self.is_streaming = True
-            self.utterance_id = 0
-            logger.info("Started Google Cloud Speech streaming session with MULAW")
-        except Exception as e:
-            logger.error(f"Error starting streaming session: {e}")
-            self.is_streaming = False
-            raise
-    
-    def _create_audio_generator(self):
-        """Create audio generator for streaming."""
-        # Send the config in the first request
-        yield speech.StreamingRecognizeRequest(streaming_config=self._config)
+        """Start streaming session using improved approach."""
+        if self.is_streaming:
+            await self.stop_streaming()
         
-        # Then yield audio content as we receive it
-        while self.is_streaming:
-            # This generator will be fed with audio data
-            chunk = yield
-            if chunk is None:
+        self.is_streaming = True
+        self.stop_processing.clear()
+        self._current_loop = asyncio.get_event_loop()
+        
+        # Clear queues
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.task_done()
+            except queue.Empty:
                 break
-            yield speech.StreamingRecognizeRequest(audio_content=chunk)
-    
-    async def stop_streaming(self) -> tuple[str, float]:
-        """Stop streaming session and get final result."""
-        if not self.is_streaming:
-            return "", 0.0
         
-        try:
-            self.is_streaming = False
-            
-            # Close the generator
-            if hasattr(self, '_audio_generator'):
-                try:
-                    self._audio_generator.close()
-                except:
-                    pass
-            
-            # Get any final results from the stream
-            final_text = ""
-            duration = 0.0
-            
-            if self._stream:
-                try:
-                    # Process any remaining responses
-                    for response in self._stream:
-                        for result in response.results:
-                            if result.is_final and result.alternatives:
-                                final_text = result.alternatives[0].transcript
-                                if result.alternatives[0].words:
-                                    duration = (result.alternatives[0].words[-1].end_time.total_seconds() - 
-                                              result.alternatives[0].words[0].start_time.total_seconds())
-                                break
-                except:
-                    pass
-            
-            logger.info(f"Stopped Google Cloud Speech streaming session. Final text: '{final_text}'")
-            return final_text, duration
-        except Exception as e:
-            logger.error(f"Error stopping streaming session: {e}")
-            return "", 0.0
+        while not self.result_queue.empty():
+            try:
+                await self.result_queue.get()
+                self.result_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        
+        # Start processing thread
+        self.processing_thread = threading.Thread(target=self._process_audio_loop, daemon=True)
+        self.processing_thread.start()
+        
+        logger.info("Started Google Cloud Speech streaming session with MULAW")
     
     async def process_audio_chunk(
         self, 
         audio_chunk, 
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ):
-        """Process a chunk of audio with optimized MULAW handling."""
+        """Process a chunk of audio using the improved queue-based approach."""
         if not self.is_streaming:
             logger.warning("Called process_audio_chunk but streaming is not active")
             await self.start_streaming()
+            return None
         
         try:
-            # For MULAW, we can send the data directly
+            # Convert audio chunk to proper format
             if isinstance(audio_chunk, np.ndarray):
                 if self.encoding == "MULAW":
-                    # Convert float32 array back to MULAW bytes
-                    audio_bytes = (audio_chunk * 127).astype(np.uint8).tobytes()
+                    # For MULAW, we need uint8 bytes, with proper offset
+                    # MULAW is unsigned 8-bit, range 0-255
+                    audio_bytes = (audio_chunk * 127 + 128).clip(0, 255).astype(np.uint8).tobytes()
                 else:
-                    # Convert to int16 for LINEAR16
+                    # For LINEAR16, we need int16 bytes
                     audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
             else:
                 audio_bytes = audio_chunk
@@ -221,54 +235,81 @@ class GoogleCloudStreamingSTT:
                 logger.debug(f"Audio chunk too small: {len(audio_bytes)} bytes")
                 return None
             
-            # Send audio to the stream
+            # Add to processing queue with timeout
             try:
-                # Send audio data to the generator
-                self._audio_generator.send(audio_bytes)
-                
-                # Process any available responses
-                result = None
+                self.audio_queue.put(audio_bytes, timeout=0.1)
+            except queue.Full:
+                logger.warning("Audio queue is full, dropping chunk")
+                # Remove oldest item and try again
                 try:
-                    for response in self._stream:
-                        for speech_result in response.results:
-                            if speech_result.alternatives:
-                                alt = speech_result.alternatives[0]
-                                
-                                # Create result object
-                                self.utterance_id += 1
-                                transcription_result = StreamingTranscriptionResult(
-                                    text=alt.transcript,
-                                    is_final=speech_result.is_final,
-                                    confidence=alt.confidence if hasattr(alt, "confidence") else 0.8,
-                                    chunk_id=self.utterance_id
-                                )
-                                
-                                # Call callback if provided
-                                if callback:
-                                    await callback(transcription_result)
-                                
-                                # Return final results
-                                if speech_result.is_final:
-                                    result = transcription_result
-                                    break
-                        
-                        # Only process one response per chunk
-                        break
-                except Exception as e:
-                    logger.debug(f"No response available yet: {e}")
+                    self.audio_queue.get_nowait()
+                    self.audio_queue.task_done()
+                    self.audio_queue.put(audio_bytes, timeout=0.1)
+                except (queue.Empty, queue.Full):
+                    return None
+            
+            # Check for results with very short timeout
+            try:
+                result = await asyncio.wait_for(self.result_queue.get(), timeout=0.05)
                 
-                return result
+                if callback:
+                    await callback(result)
                 
-            except Exception as e:
-                logger.error(f"Error sending audio to stream: {e}")
-                # Try to restart the stream
-                await self.stop_streaming()
-                await self.start_streaming()
+                self.result_queue.task_done()
+                
+                # Return final results
+                if result.is_final:
+                    return result
+                
                 return None
                 
+            except asyncio.TimeoutError:
+                # No results available yet
+                return None
+            
         except Exception as e:
             logger.error(f"Error processing audio chunk: {e}")
             return None
+    
+    async def stop_streaming(self) -> tuple[str, float]:
+        """Stop streaming session."""
+        if not self.is_streaming:
+            return "", 0.0
+        
+        self.is_streaming = False
+        self.stop_processing.set()
+        
+        # Wait for processing thread to finish
+        if self.processing_thread and self.processing_thread.is_alive():
+            self.processing_thread.join(timeout=3.0)
+            
+        # Process any remaining audio in the queue
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.task_done()
+            except queue.Empty:
+                break
+        
+        # Get any remaining results
+        final_text = ""
+        duration = 0.0
+        
+        while not self.result_queue.empty():
+            try:
+                result = await asyncio.wait_for(self.result_queue.get(), timeout=0.1)
+                if result.is_final and result.text:
+                    final_text = result.text
+                    duration = result.end_time - result.start_time if result.end_time > result.start_time else 0.0
+                self.result_queue.task_done()
+            except asyncio.TimeoutError:
+                break
+            except:
+                break
+        
+        self._current_loop = None
+        logger.info(f"Stopped Google Cloud Speech streaming session. Final text: '{final_text}'")
+        return final_text, duration
     
     async def transcribe_file(
         self,

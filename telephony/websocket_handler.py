@@ -1,5 +1,5 @@
 """
-Optimized WebSocket handler with direct MULAW support and reduced latency.
+Optimized WebSocket handler with direct MULAW support and fixed streaming errors.
 """
 import json
 import base64
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class WebSocketHandler:
     """
-    Optimized WebSocket handler with MULAW support and minimal latency.
+    Optimized WebSocket handler with MULAW support and error recovery.
     """
     
     def __init__(self, call_sid: str, pipeline):
@@ -66,10 +66,16 @@ class WebSocketHandler:
         self.total_processed_chunks = 0
         self.error_count = 0
         
+        # Error recovery
+        self.consecutive_errors = 0
+        self.max_consecutive_errors = 5
+        self.last_error_time = 0
+        self.error_recovery_delay = 1.0  # seconds
+        
         logger.info(f"WebSocketHandler initialized for call {call_sid}")
     
     async def handle_message(self, message: str, ws) -> None:
-        """Handle incoming WebSocket message with optimization."""
+        """Handle incoming WebSocket message with error recovery."""
         if not message:
             logger.warning("Received empty message")
             return
@@ -85,7 +91,7 @@ class WebSocketHandler:
                 'media': self._handle_media,
                 'stop': self._handle_stop,
                 'mark': self._handle_mark,
-                'ping': self._handle_ping  # Added ping handler
+                'ping': self._handle_ping
             }
             
             handler = handlers.get(event_type)
@@ -94,11 +100,34 @@ class WebSocketHandler:
             else:
                 logger.debug(f"Unknown event type: {event_type}")
             
+            # Reset error count on successful processing
+            self.consecutive_errors = 0
+            
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON message: {message[:100]}")
+            self._handle_error("json_decode_error")
         except Exception as e:
             logger.error(f"Error handling message: {e}", exc_info=True)
-            self.error_count += 1
+            self._handle_error(str(e))
+    
+    def _handle_error(self, error_msg: str):
+        """Handle errors with recovery logic."""
+        self.error_count += 1
+        self.consecutive_errors += 1
+        
+        current_time = time.time()
+        if current_time - self.last_error_time < self.error_recovery_delay:
+            # Errors happening too quickly, increase delay
+            self.error_recovery_delay = min(5.0, self.error_recovery_delay * 1.5)
+        else:
+            # Reset delay if errors are spaced out
+            self.error_recovery_delay = 1.0
+        
+        self.last_error_time = current_time
+        
+        if self.consecutive_errors >= self.max_consecutive_errors:
+            logger.error(f"Too many consecutive errors ({self.consecutive_errors}), stopping conversation")
+            self.conversation_active = False
     
     async def _handle_connected(self, data: Dict[str, Any], ws) -> None:
         """Handle connected event with immediate response."""
@@ -134,33 +163,37 @@ class WebSocketHandler:
         # Reset stream state
         await self._reset_stream_state()
         
-        # Initialize components with MULAW support
+        # Initialize speech recognition with better error handling
         try:
-            # Initialize STT with MULAW support
+            # Get STT integration from pipeline
             stt_integration = getattr(self.pipeline, 'speech_recognizer', None)
             if stt_integration:
-                # Configure for MULAW if possible
-                if hasattr(stt_integration, 'speech_recognizer'):
-                    stt_client = stt_integration.speech_recognizer
-                    if hasattr(stt_client, 'encoding'):
-                        stt_client.encoding = "MULAW"
-                        stt_client.sample_rate = 8000
-            
-            await self.speech_manager.start_session()
-            logger.info("Speech recognition initialized with MULAW support")
+                # Pass the integration to speech manager
+                self.speech_manager = SpeechRecognitionManager(stt_integration)
+                await self.speech_manager.start_session()
+                logger.info("Speech recognition initialized successfully")
+            else:
+                logger.error("STT integration not found in pipeline")
+                # Create a default integration
+                self.speech_manager = SpeechRecognitionManager()
+                await self.speech_manager.start_session()
         except Exception as e:
             logger.error(f"Error starting speech recognition: {e}")
+            # Continue with degraded functionality
         
         # Initialize TTS
-        await self.kb_processor.init_tts()
+        try:
+            await self.kb_processor.init_tts()
+        except Exception as e:
+            logger.error(f"Error initializing TTS: {e}")
         
         # Send immediate greeting with optimized timing
         greeting = "Hello! How can I help you today?"
-        # Don't wait for TTS, send immediately
+        # Use asyncio.create_task for non-blocking execution
         asyncio.create_task(self.send_text_response(greeting, ws))
     
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
-        """Handle media with optimized MULAW processing."""
+        """Handle media with optimized MULAW processing and error recovery."""
         if not self.conversation_active:
             return
             
@@ -195,10 +228,10 @@ class WebSocketHandler:
             
         except Exception as e:
             logger.error(f"Error processing media: {e}")
-            self.error_count += 1
+            self._handle_error(f"media_processing_error: {e}")
     
     async def _process_audio_buffer_optimized(self, ws) -> None:
-        """Optimized audio buffer processing with parallel operations."""
+        """Optimized audio buffer processing with enhanced error handling."""
         async with self.processing_lock:
             if self.is_processing:
                 return
@@ -213,21 +246,27 @@ class WebSocketHandler:
                 if audio_data is None or len(audio_data) == 0:
                     return
                 
-                # Process STT, KB query, and TTS preparation in parallel where possible
-                tasks = []
-                
-                # Start STT processing
-                stt_task = asyncio.create_task(self.speech_manager.process_audio(audio_data))
-                tasks.append(("stt", stt_task))
-                
-                # Wait for STT with shorter timeout
+                # Process STT with timeout and error recovery
+                transcription = ""
                 try:
-                    transcription = await asyncio.wait_for(stt_task, timeout=1.5)
+                    # Use speech manager for processing
+                    transcription = await asyncio.wait_for(
+                        self.speech_manager.process_audio(audio_data),
+                        timeout=2.0  # Increased timeout for MULAW processing
+                    )
                 except asyncio.TimeoutError:
-                    logger.warning("STT timeout")
+                    logger.warning("STT timeout - skipping this chunk")
+                    return
+                except Exception as e:
+                    logger.error(f"STT error: {e}")
+                    # Try to reset the speech session
+                    try:
+                        await self.speech_manager.start_session()
+                    except:
+                        pass
                     return
                 
-                # Check transcription quality
+                # Validate transcription
                 if not transcription or not self.speech_manager.is_valid_transcription(transcription):
                     logger.debug(f"Invalid transcription: '{transcription}'")
                     return
@@ -244,23 +283,18 @@ class WebSocketHandler:
                 
                 logger.info(f"Processing: {transcription}")
                 
-                # Start KB processing and TTS preparation in parallel
-                kb_task = asyncio.create_task(
-                    self.kb_processor.generate_response(transcription, self.call_sid)
-                )
-                
-                # Prepare TTS while waiting for KB response
-                tts_prep_task = asyncio.create_task(self.kb_processor.init_tts())
-                
+                # Generate response with error handling
+                response = ""
                 try:
-                    # Wait for KB response with timeout
-                    response, _ = await asyncio.gather(
-                        asyncio.wait_for(kb_task, timeout=2.0),
-                        tts_prep_task,
-                        return_exceptions=True
+                    response = await asyncio.wait_for(
+                        self.kb_processor.generate_response(transcription, self.call_sid),
+                        timeout=3.0  # Increased timeout for knowledge base
                     )
                 except asyncio.TimeoutError:
                     logger.warning("KB timeout, using fallback")
+                    response = self._get_fallback_response(transcription)
+                except Exception as e:
+                    logger.error(f"KB error: {e}")
                     response = self._get_fallback_response(transcription)
                 
                 if response and response.strip():
@@ -268,7 +302,12 @@ class WebSocketHandler:
                     self.echo_detection.add_system_response(response)
                     
                     # Generate and send speech
-                    await self._send_audio_response_optimized(response, ws)
+                    try:
+                        await self._send_audio_response_optimized(response, ws)
+                    except Exception as e:
+                        logger.error(f"Error sending audio response: {e}")
+                        # Try sending a fallback response
+                        await self._send_fallback_response(ws)
                     
                     # Update state
                     self.last_transcription = transcription
@@ -288,28 +327,43 @@ class WebSocketHandler:
             except Exception as e:
                 logger.error(f"Error in audio processing: {e}", exc_info=True)
                 # Send fallback response
-                await self._send_fallback_response(ws)
-                self.error_count += 1
+                try:
+                    await self._send_fallback_response(ws)
+                except:
+                    pass
+                self._handle_error(f"audio_processing_error: {e}")
             finally:
                 self.is_processing = False
     
     async def _send_audio_response_optimized(self, response: str, ws) -> None:
-        """Optimized audio response with minimal latency."""
+        """Optimized audio response with enhanced error handling."""
         try:
             # Set speaking state immediately
             self.is_speaking = True
             
-            # Generate speech with reduced timeout
+            # Generate speech with timeout and retry
             speech_start = time.time()
-            try:
-                speech_task = asyncio.create_task(
-                    self.kb_processor.generate_speech(response)
-                )
-                speech_audio = await asyncio.wait_for(speech_task, timeout=1.5)
-            except asyncio.TimeoutError:
-                logger.warning("TTS timeout")
-                await self._send_fallback_response(ws)
-                return
+            speech_audio = None
+            
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    speech_task = asyncio.create_task(
+                        self.kb_processor.generate_speech(response)
+                    )
+                    speech_audio = await asyncio.wait_for(speech_task, timeout=2.0)
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"TTS timeout attempt {attempt + 1}")
+                    if attempt == max_retries - 1:
+                        await self._send_fallback_response(ws)
+                        return
+                except Exception as e:
+                    logger.error(f"TTS error attempt {attempt + 1}: {e}")
+                    if attempt == max_retries - 1:
+                        await self._send_fallback_response(ws)
+                        return
+                    await asyncio.sleep(0.1)  # Brief delay before retry
             
             if speech_audio:
                 # Send audio immediately
@@ -324,13 +378,14 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Error sending audio response: {e}")
             await self._send_fallback_response(ws)
+            self._handle_error(f"audio_send_error: {e}")
         finally:
             # Reset speaking state with minimal delay
             await asyncio.sleep(0.1)
             self.is_speaking = False
     
     async def _send_audio_optimized(self, audio_data: bytes, ws) -> None:
-        """Send audio with optimized chunking for MULAW."""
+        """Send audio with optimized chunking for MULAW and error handling."""
         if not self.connected:
             logger.warning("WebSocket not connected")
             return
@@ -342,7 +397,7 @@ class WebSocketHandler:
             
             logger.debug(f"Sending {len(chunks)} audio chunks")
             
-            # Send chunks with minimal delay
+            # Send chunks with minimal delay and error handling
             for i, chunk in enumerate(chunks):
                 try:
                     audio_base64 = base64.b64encode(chunk).decode('utf-8')
@@ -366,9 +421,11 @@ class WebSocketHandler:
                         self.connected = False
                         self.connection_active.clear()
                         break
+                    # Continue with other chunks
             
         except Exception as e:
             logger.error(f"Error preparing audio: {e}")
+            self._handle_error(f"audio_send_error: {e}")
     
     async def _keep_alive_loop(self, ws) -> None:
         """Optimized keep-alive with health checking."""
@@ -435,6 +492,7 @@ class WebSocketHandler:
         self.processing_times = []
         self.total_processed_chunks = 0
         self.error_count = 0
+        self.consecutive_errors = 0
     
     async def send_text_response(self, text: str, ws) -> None:
         """Send text response as speech."""
@@ -473,7 +531,10 @@ class WebSocketHandler:
                 pass
         
         # Stop speech recognition
-        await self.speech_manager.stop_session()
+        try:
+            await self.speech_manager.stop_session()
+        except Exception as e:
+            logger.warning(f"Error stopping speech session: {e}")
         
         # Log performance stats
         if self.processing_times:
@@ -498,6 +559,7 @@ class WebSocketHandler:
             "connected": self.connected,
             "total_chunks_processed": self.total_processed_chunks,
             "error_count": self.error_count,
+            "consecutive_errors": self.consecutive_errors,
             "is_processing": self.is_processing,
             "is_speaking": self.is_speaking,
             "average_processing_time": (

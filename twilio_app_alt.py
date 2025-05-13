@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Optimized Twilio application with direct MULAW support and improved error handling.
+Optimized Twilio application with fixed streaming and error handling.
 """
 import os
 import sys
@@ -12,7 +12,6 @@ import requests
 import time
 import threading
 import signal
-from contextlib import asynccontextmanager
 import numpy as np
 from flask import Flask, request, Response, jsonify
 from simple_websocket import Server
@@ -82,7 +81,7 @@ logger = configure_logging()
 # Flask app setup
 app = Flask(__name__)
 
-# Global instances
+# Global instances - FIXED to use single instances
 twilio_handler = None
 voice_ai_pipeline = None
 conversation_manager = None
@@ -91,6 +90,7 @@ base_url = None
 call_event_loops = {}
 initialization_lock = asyncio.Lock()
 system_initialized = False
+init_loop = None
 
 # Graceful shutdown handler
 def signal_handler(signum, frame):
@@ -108,7 +108,9 @@ def signal_handler(signum, frame):
     # Close TTS connections
     if voice_ai_pipeline and hasattr(voice_ai_pipeline, 'tts_integration'):
         try:
-            asyncio.run(voice_ai_pipeline.tts_integration.close())
+            # Run in the init loop if available
+            if init_loop and not init_loop.is_closed():
+                init_loop.run_until_complete(voice_ai_pipeline.tts_integration.close())
         except Exception as e:
             logger.error(f"Error closing TTS: {e}")
     
@@ -117,24 +119,6 @@ def signal_handler(signum, frame):
 # Register signal handlers
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
-
-@asynccontextmanager
-async def get_system_components():
-    """Context manager for system components."""
-    global system_initialized
-    
-    if not system_initialized:
-        async with initialization_lock:
-            if not system_initialized:  # Double-check locking
-                await initialize_system()
-                system_initialized = True
-    
-    yield {
-        'twilio_handler': twilio_handler,
-        'pipeline': voice_ai_pipeline,
-        'conversation_manager': conversation_manager,
-        'query_engine': query_engine
-    }
 
 async def initialize_system():
     """Initialize all system components with optimizations."""
@@ -274,242 +258,260 @@ def health_check():
     return jsonify(health_status)
 
 @app.route('/voice/incoming', methods=['POST'])
-async def handle_incoming_call():
+def handle_incoming_call():
     """Handle incoming voice calls with optimizations."""
     logger.info("Processing incoming call...")
     
-    async with get_system_components() as components:
-        handler = components['twilio_handler']
+    # Use global instance directly
+    global twilio_handler
+    
+    if not twilio_handler:
+        logger.error("System not initialized")
+        return Response(
+            '<?xml version="1.0" encoding="UTF-8"?><Response><Say>System unavailable</Say></Response>',
+            mimetype='text/xml'
+        )
+    
+    # Extract call info
+    from_number = request.form.get('From')
+    to_number = request.form.get('To')
+    call_sid = request.form.get('CallSid')
+    
+    logger.info(f"Incoming call - From: {from_number}, To: {to_number}, CallSid: {call_sid}")
+    
+    try:
+        # Use the existing handler's method
+        response_twiml = twilio_handler.handle_incoming_call(from_number, to_number, call_sid)
+        return Response(response_twiml, mimetype='text/xml')
         
-        if not handler:
-            logger.error("System not initialized")
-            return Response(
-                '<?xml version="1.0" encoding="UTF-8"?><Response><Say>System unavailable</Say></Response>',
-                mimetype='text/xml'
-            )
-        
-        # Extract call info
-        from_number = request.form.get('From')
-        to_number = request.form.get('To')
-        call_sid = request.form.get('CallSid')
-        
-        logger.info(f"Incoming call - From: {from_number}, To: {to_number}, CallSid: {call_sid}")
-        
-        try:
-            # Handle the call with optimized TwiML
-            response = VoiceResponse()
-            
-            # Create WebSocket URL for MULAW streaming
-            ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
-            
-            # Create Connect with optimized Stream
-            connect = Connect()
-            stream = Stream(
-                name="audio_stream",
-                url=ws_url,
-                track="inbound_track"
-            )
-            
-            # Set MULAW parameters for optimal performance
-            stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
-            
-            connect.append(stream)
-            response.append(connect)
-            
-            # Add minimal greeting to start conversation quickly
-            response.say("Hello", voice='alice', rate='medium')
-            
-            return Response(str(response), mimetype='text/xml')
-            
-        except Exception as e:
-            logger.error(f"Error handling incoming call: {e}", exc_info=True)
-            return Response(
-                '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Service unavailable</Say></Response>',
-                mimetype='text/xml'
-            )
+    except Exception as e:
+        logger.error(f"Error handling incoming call: {e}", exc_info=True)
+        return Response(
+            '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Service unavailable</Say></Response>',
+            mimetype='text/xml'
+        )
 
 @app.route('/voice/status', methods=['POST'])
-async def handle_status_callback():
+def handle_status_callback():
     """Handle call status callbacks with cleanup."""
     call_sid = request.form.get('CallSid')
     call_status = request.form.get('CallStatus')
     
     logger.info(f"Status callback - CallSid: {call_sid}, Status: {call_status}")
     
-    async with get_system_components() as components:
-        handler = components['twilio_handler']
+    # Use global instance directly
+    global twilio_handler
+    
+    if twilio_handler:
+        twilio_handler.handle_status_callback(call_sid, call_status)
+    
+    # Clean up event loop resources for completed calls
+    if call_status in ['completed', 'failed', 'busy', 'no-answer'] and call_sid in call_event_loops:
+        loop_info = call_event_loops[call_sid]
         
-        if handler:
-            handler.handle_status_callback(call_sid, call_status)
-        
-        # Clean up event loop resources for completed calls
-        if call_status in ['completed', 'failed', 'busy', 'no-answer'] and call_sid in call_event_loops:
-            loop_info = call_event_loops[call_sid]
+        try:
+            # Stop the loop
+            if 'loop' in loop_info and loop_info['loop'].is_running():
+                loop_info['loop'].call_soon_threadsafe(loop_info['loop'].stop)
             
-            try:
-                # Stop the loop
-                if 'loop' in loop_info and loop_info['loop'].is_running():
-                    loop_info['loop'].call_soon_threadsafe(loop_info['loop'].stop)
-                
-                # Wait for thread to finish
-                if 'thread' in loop_info:
-                    loop_info['thread'].join(timeout=1.0)
-                
-                # Clean up
-                del call_event_loops[call_sid]
-                logger.info(f"Cleaned up resources for call {call_sid}")
-            except Exception as e:
-                logger.error(f"Error cleaning up call {call_sid}: {e}")
+            # Wait for thread to finish
+            if 'thread' in loop_info:
+                loop_info['thread'].join(timeout=1.0)
+            
+            # Clean up
+            del call_event_loops[call_sid]
+            logger.info(f"Cleaned up resources for call {call_sid}")
+        except Exception as e:
+            logger.error(f"Error cleaning up call {call_sid}: {e}")
     
     return Response('', status=204)
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
-async def handle_media_stream(call_sid):
+def handle_media_stream(call_sid):
     """Handle WebSocket media stream with MULAW optimization."""
     logger.info(f"WebSocket connection for call {call_sid}")
     
-    async with get_system_components() as components:
-        if not components['pipeline']:
-            logger.error("System not initialized")
-            return ""
+    # Use global instances directly
+    global voice_ai_pipeline
+    
+    if not voice_ai_pipeline:
+        logger.error("System not initialized")
+        return ""
+    
+    ws = None
+    try:
+        # Accept WebSocket connection
+        ws = Server.accept(request.environ)
+        logger.info(f"WebSocket established for call {call_sid}")
         
-        ws = None
-        try:
-            # Accept WebSocket connection
-            ws = Server.accept(request.environ)
-            logger.info(f"WebSocket established for call {call_sid}")
-            
-            # Create WebSocket handler with optimized pipeline
-            ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=components['pipeline'])
-            
-            # Create dedicated event loop
-            loop = asyncio.new_event_loop()
-            
-            def run_ws_handler():
-                """Run WebSocket handler in dedicated thread."""
-                asyncio.set_event_loop(loop)
-                try:
-                    # Send initial connected event
-                    loop.create_task(ws_handler.handle_message(
+        # Create WebSocket handler with optimized pipeline
+        ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
+        
+        # Create dedicated event loop
+        loop = asyncio.new_event_loop()
+        
+        def run_ws_handler():
+            """Run WebSocket handler in dedicated thread."""
+            asyncio.set_event_loop(loop)
+            try:
+                # Create a proper async function to handle the connected event
+                async def handle_connected():
+                    await ws_handler.handle_message(
                         json.dumps({
                             "event": "connected",
                             "protocol": "Call",
                             "version": "1.0.0"
                         }), ws
-                    ))
-                    
-                    # Run the event loop
-                    loop.run_forever()
-                except Exception as e:
-                    logger.error(f"Error in WebSocket handler: {e}", exc_info=True)
-                finally:
-                    loop.close()
-            
-            # Start handler thread
-            thread = threading.Thread(target=run_ws_handler, daemon=True)
-            thread.start()
-            
-            # Store for cleanup
-            call_event_loops[call_sid] = {
-                'loop': loop,
-                'thread': thread,
-                'start_time': time.time()
-            }
-            
-            # Process incoming messages
-            while True:
-                try:
-                    message = ws.receive(timeout=10)  # 10s timeout
-                    if message is None:
-                        continue
-                    
-                    # Forward to handler
-                    asyncio.run_coroutine_threadsafe(
-                        ws_handler.handle_message(message, ws),
+                    )
+                
+                # Run the connected handler
+                loop.run_until_complete(handle_connected())
+                
+                # Keep the loop running for other coroutines
+                loop.run_forever()
+            except Exception as e:
+                logger.error(f"Error in WebSocket handler: {e}", exc_info=True)
+            finally:
+                loop.close()
+        
+        # Start handler thread
+        thread = threading.Thread(target=run_ws_handler, daemon=True)
+        thread.start()
+        
+        # Store for cleanup
+        call_event_loops[call_sid] = {
+            'loop': loop,
+            'thread': thread,
+            'start_time': time.time()
+        }
+        
+        # Process incoming messages
+        while True:
+            try:
+                message = ws.receive(timeout=10)  # 10s timeout
+                if message is None:
+                    continue
+                
+                # Create an async function to handle the message
+                async def handle_message_async():
+                    await ws_handler.handle_message(message, ws)
+                
+                # Forward to handler in the event loop
+                if loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(
+                        handle_message_async(),
                         loop
                     )
-                except Exception as e:
-                    if "timeout" not in str(e).lower():
-                        logger.error(f"WebSocket message error: {e}")
-                    # Exit the loop on error
+                    # Don't wait for completion to avoid blocking
+                else:
                     break
-        
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}", exc_info=True)
-        finally:
-            # Clean up
-            if call_sid in call_event_loops:
-                loop_info = call_event_loops[call_sid]
+                    
+            except Exception as e:
+                if "timeout" not in str(e).lower():
+                    logger.error(f"WebSocket message error: {e}")
+                # Exit the loop on error
+                break
+    
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}", exc_info=True)
+    finally:
+        # Clean up
+        if call_sid in call_event_loops:
+            loop_info = call_event_loops[call_sid]
+            
+            try:
+                # Stop the loop gracefully
+                if 'loop' in loop_info and loop_info['loop'].is_running():
+                    loop_info['loop'].call_soon_threadsafe(loop_info['loop'].stop)
                 
-                try:
-                    # Stop the loop gracefully
-                    if 'loop' in loop_info and loop_info['loop'].is_running():
-                        loop_info['loop'].call_soon_threadsafe(loop_info['loop'].stop)
-                    
-                    # Wait for thread
-                    if 'thread' in loop_info:
-                        loop_info['thread'].join(timeout=2.0)
-                    
-                    # Calculate session duration
-                    session_duration = time.time() - loop_info.get('start_time', time.time())
-                    logger.info(f"WebSocket session duration: {session_duration:.1f}s")
-                    
-                    del call_event_loops[call_sid]
-                except Exception as e:
-                    logger.error(f"Cleanup error: {e}")
-            
-            # Close WebSocket
-            if ws:
-                try:
-                    ws.close()
-                except:
-                    pass
-            
-            logger.info(f"WebSocket cleanup complete for call {call_sid}")
+                # Wait for thread
+                if 'thread' in loop_info:
+                    loop_info['thread'].join(timeout=2.0)
+                
+                # Calculate session duration
+                session_duration = time.time() - loop_info.get('start_time', time.time())
+                logger.info(f"WebSocket session duration: {session_duration:.1f}s")
+                
+                del call_event_loops[call_sid]
+            except Exception as e:
+                logger.error(f"Cleanup error: {e}")
+        
+        # Close WebSocket
+        if ws:
+            try:
+                ws.close()
+            except:
+                pass
+        
+        logger.info(f"WebSocket cleanup complete for call {call_sid}")
     
     return ""
 
 # Test endpoint for system verification
 @app.route('/test', methods=['POST'])
-async def test_system():
+def test_system():
     """Test system components."""
     test_query = request.json.get('query', 'Hello, this is a test')
     
-    async with get_system_components() as components:
-        if not components['conversation_manager']:
-            return jsonify({"error": "System not initialized"}), 503
-        
-        try:
+    # Use global instances directly
+    global conversation_manager
+    
+    if not conversation_manager:
+        return jsonify({"error": "System not initialized"}), 503
+    
+    try:
+        # Run async function in the init loop
+        async def run_test():
             start_time = time.time()
-            result = await components['conversation_manager'].handle_user_input(
+            result = await conversation_manager.handle_user_input(
                 "test_user",
                 test_query
             )
             processing_time = time.time() - start_time
             
-            return jsonify({
+            return {
                 "query": test_query,
                 "response": result.get('response', 'No response'),
                 "processing_time": processing_time,
                 "cached": result.get('cached', False),
                 "source": result.get('source', 'unknown')
-            })
-        except Exception as e:
-            logger.error(f"Test error: {e}")
-            return jsonify({"error": str(e)}), 500
+            }
+        
+        # Execute in the init loop
+        if init_loop and not init_loop.is_closed():
+            future = asyncio.run_coroutine_threadsafe(run_test(), init_loop)
+            result = future.result(timeout=10)
+            return jsonify(result)
+        else:
+            return jsonify({"error": "Event loop not available"}), 500
+        
+    except Exception as e:
+        logger.error(f"Test error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 def init_system_sync():
     """Initialize system synchronously for Flask startup."""
-    """Run async initialization in sync context."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    global init_loop, system_initialized
+    
+    # Create and set the event loop for initialization
+    init_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(init_loop)
+    
     try:
-        loop.run_until_complete(initialize_system())
+        # Run initialization in the loop
+        init_loop.run_until_complete(initialize_system())
+        system_initialized = True
+        
+        # Keep the loop running in a background thread
+        def run_loop():
+            init_loop.run_forever()
+        
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+        
     except Exception as e:
         logger.error(f"Failed to initialize system: {e}")
         sys.exit(1)
-    finally:
-        loop.close()
 
 if __name__ == '__main__':
     print("Starting optimized Voice AI Agent with MULAW support...")
