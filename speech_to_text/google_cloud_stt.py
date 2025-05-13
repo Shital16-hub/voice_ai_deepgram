@@ -77,11 +77,11 @@ class GoogleCloudStreamingSTT:
     
     def _get_recognition_config(self) -> speech.RecognitionConfig:
         """Get recognition configuration with valid v2.25.0+ fields only."""
-        # Map encoding string to enum
+        # Map encoding string to enum - REMOVED ALAW as it's deprecated
         encoding_map = {
             "LINEAR16": speech.RecognitionConfig.AudioEncoding.LINEAR16,
             "MULAW": speech.RecognitionConfig.AudioEncoding.MULAW,
-            "ALAW": speech.RecognitionConfig.AudioEncoding.ALAW,
+            # ALAW is deprecated and removed in v2.25.0+
         }
         
         encoding_enum = encoding_map.get(self.encoding, speech.RecognitionConfig.AudioEncoding.MULAW)
@@ -156,12 +156,13 @@ class GoogleCloudStreamingSTT:
             else:
                 audio_bytes = audio_chunk
             
+            # Log audio details for debugging
+            logger.debug(f"Processing audio chunk #{self.total_chunks}: {len(audio_bytes)} bytes, encoding: {self.encoding}")
+            
             # Skip tiny chunks
             if len(audio_bytes) < 160:  # Less than 20ms at 8kHz
                 logger.debug("Skipping tiny audio chunk")
                 return None
-            
-            logger.debug(f"Processing audio chunk: {len(audio_bytes)} bytes")
             
             # Create the recognition config
             config = self._get_recognition_config()
@@ -217,5 +218,6 @@ class GoogleCloudStreamingSTT:
             "is_streaming": self.is_streaming,
             "language_code": self.language,
             "model": "phone_call",
-            "enhanced": self.enhanced_model
+            "enhanced": self.enhanced_model,
+            "encoding": self.encoding
         }

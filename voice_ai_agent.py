@@ -37,12 +37,6 @@ class VoiceAIAgent:
     ):
         """
         Initialize the Voice AI Agent with updated Google Cloud STT v2.25.0+.
-        
-        Args:
-            storage_dir: Directory for persistent storage
-            model_name: LLM model name for knowledge base
-            llm_temperature: LLM temperature for response generation
-            **kwargs: Additional parameters for customization
         """
         self.storage_dir = storage_dir
         self.model_name = model_name
@@ -71,15 +65,7 @@ class VoiceAIAgent:
         self.max_noise_samples = 20
         
     def _process_audio(self, audio: np.ndarray) -> np.ndarray:
-        """
-        Process audio for better speech recognition.
-        
-        Args:
-            audio: Audio data as numpy array
-            
-        Returns:
-            Processed audio data
-        """
+        """Process audio for better speech recognition."""
         try:
             # Update noise floor from quiet sections
             self._update_noise_floor(audio)
@@ -147,7 +133,7 @@ class VoiceAIAgent:
         self.speech_recognizer = GoogleCloudStreamingSTT(
             language=self.language,
             sample_rate=8000,  # Use 8kHz for Twilio compatibility
-            encoding="MULAW",   # Use MULAW for Twilio
+            encoding="MULAW",   # Use MULAW for Twilio (NOT ALAW)
             channels=1,
             interim_results=False,  # Disable for lower latency
             speech_context_phrases=self.stt_keywords,
@@ -211,13 +197,6 @@ class VoiceAIAgent:
     ) -> Dict[str, Any]:
         """
         Process audio data with updated Google Cloud STT.
-        
-        Args:
-            audio_data: Audio data as numpy array or bytes
-            callback: Optional callback function
-            
-        Returns:
-            Processing result
         """
         if not self.initialized:
             raise RuntimeError("Voice AI Agent not initialized")
@@ -274,16 +253,7 @@ class VoiceAIAgent:
         audio_stream,
         result_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
-        """
-        Process streaming audio with real-time response.
-        
-        Args:
-            audio_stream: Async iterator of audio chunks
-            result_callback: Callback for streaming results
-            
-        Returns:
-            Final processing stats
-        """
+        """Process streaming audio with real-time response."""
         if not self.initialized:
             raise RuntimeError("Voice AI Agent not initialized")
             

@@ -32,7 +32,7 @@ class SpeechProcessor:
         self.speech_client = GoogleCloudStreamingSTT(
             language="en-US",
             sample_rate=8000,  # Twilio uses 8kHz
-            encoding="MULAW",   # Twilio uses MULAW
+            encoding="MULAW",   # Twilio uses MULAW (NOT ALAW)
             channels=1,
             interim_results=False,  # Disable for lower latency
             enhanced_model=True

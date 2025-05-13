@@ -38,13 +38,13 @@ MAX_PROCESSING_TIME = 3.0   # Reduced processing time
 RESPONSE_TIMEOUT = 3.0      # Faster response timeout
 MIN_TRANSCRIPTION_LENGTH = 1  # Reduced to catch single words
 
-# STT Optimization Settings for Google Cloud
+# STT Optimization Settings for Google Cloud - FIXED
 STT_TELEPHONY_OPTIMIZED = True
 STT_USE_ENHANCED_MODEL = True
 STT_MODEL_NAME = "phone_call"  # Use telephony-optimized model
 STT_INTERIM_RESULTS = False    # Disable for lower latency
 STT_SAMPLE_RATE = 8000         # Match Twilio's rate
-STT_ENCODING = "MULAW"         # Direct mulaw support
+STT_ENCODING = "MULAW"         # Direct mulaw support (NOT ALAW)
 
 # Logging Configuration
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')

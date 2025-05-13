@@ -138,12 +138,14 @@ def handle_incoming_call():
             track="inbound_track"
         )
         
-        # Optimized parameters for Google Cloud STT
+        # Optimized parameters for Google Cloud STT - UPDATED FOR MULAW
         stream.parameter(name="mediaEncoding", value="audio/x-mulaw;rate=8000")
         stream.parameter(name="amd", value="false")  # Disable answering machine detection
         
         connect.append(stream)
         response.append(connect)
+        
+        logger.info(f"Created TwiML with stream URL: {ws_url}")
         
         return Response(str(response), mimetype='text/xml')
         
