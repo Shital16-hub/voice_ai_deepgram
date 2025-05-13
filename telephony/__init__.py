@@ -1,18 +1,18 @@
+# telephony/__init__.py - Option 1: Minimal imports to avoid circular dependencies
+
 """
 Telephony integration package for Voice AI Agent.
-
-This package provides integration with Twilio for voice call handling,
-audio streaming, and telephony services.
 """
 
-from telephony.twilio_handler import TwilioHandler
-from telephony.audio_processor import AudioProcessor
-from telephony.websocket_handler import WebSocketHandler
-from telephony.call_manager import CallManager
+# Only import what's absolutely necessary to avoid circular dependencies
+# Remove imports that cause the circular dependency chain
 
 __all__ = [
-    'TwilioHandler',
-    'AudioProcessor',
-    'WebSocketHandler',
+    # 'TwilioHandler',  # Commented out to break the import chain
+    # 'AudioProcessor',  # Commented out to break the import chain  
+    # 'WebSocketHandler',  # Commented out to break the import chain
     'CallManager'
 ]
+
+# Import only CallManager which doesn't have problematic dependencies
+from telephony.call_manager import CallManager

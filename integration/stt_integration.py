@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union,
 import numpy as np
 
 # Import the Google Cloud STT
-from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
+from speech_to_text.google_cloud_stt_v2 import GoogleCloudStreamingSTT_V2, StreamingTranscriptionResult
 from speech_to_text.utils.audio_utils import load_audio_file
 
 logger = logging.getLogger(__name__)
@@ -38,14 +38,14 @@ class STTIntegration:
     
     def __init__(
         self,
-        speech_recognizer: Optional[GoogleCloudStreamingSTT] = None,
+        speech_recognizer: Optional[GoogleCloudStreamingSTT_V2] = None,
         language: str = "en"
     ):
         """
         Initialize the STT integration.
         
         Args:
-            speech_recognizer: Initialized GoogleCloudStreamingSTT instance
+            speech_recognizer: Initialized GoogleCloudStreamingSTT_V2 instance
             language: Language code for speech recognition
         """
         self.speech_recognizer = speech_recognizer
@@ -73,7 +73,7 @@ class STTIntegration:
             
         try:
             # Create a new Google Cloud streaming client
-            self.speech_recognizer = GoogleCloudStreamingSTT(
+            self.speech_recognizer = GoogleCloudStreamingSTT_V2(
                 language=self.language,
                 sample_rate=16000,
                 encoding="LINEAR16",

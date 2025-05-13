@@ -13,7 +13,7 @@ from typing import Optional, Dict, Any, AsyncIterator, Union, List, Callable, Aw
 
 import numpy as np
 
-from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
+from speech_to_text.google_cloud_stt_v2 import GoogleCloudStreamingSTT_V2
 from speech_to_text.stt_integration import STTIntegration
 from knowledge_base.conversation_manager import ConversationManager
 from knowledge_base.llama_index.query_engine import QueryEngine
@@ -36,7 +36,7 @@ class VoiceAIAgentPipeline:
     
     def __init__(
         self,
-        speech_recognizer: Union[GoogleCloudStreamingSTT, Any],
+        speech_recognizer: Union[GoogleCloudStreamingSTT_V2, Any],
         conversation_manager: ConversationManager,
         query_engine: QueryEngine,
         tts_integration: TTSIntegration
@@ -59,7 +59,7 @@ class VoiceAIAgentPipeline:
         self.stt_helper = STTIntegration(speech_recognizer)
         
         # Determine if we're using Google Cloud STT
-        self.using_google_cloud = isinstance(speech_recognizer, GoogleCloudStreamingSTT)
+        self.using_google_cloud = isinstance(speech_recognizer, GoogleCloudStreamingSTT_V2)
         logger.info(f"Pipeline initialized with {'Google Cloud' if self.using_google_cloud else 'Other'} STT and ElevenLabs TTS")
     
     async def _is_valid_transcription(self, transcription: str) -> bool:

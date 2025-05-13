@@ -1,24 +1,26 @@
-# telephony/websocket_handler.py
+# telephony/websocket_handler.py - Updated to use v2 components
 
 """
-Enhanced WebSocket handler for Twilio media streams with optimized components.
+WebSocket handler for Twilio media streams - Updated to use v2 components.
 """
 import json
 import asyncio
 import logging
 from typing import Dict, Any, Optional
 
+# Use the v2 components directly
 from telephony.websocket.connection_manager import ConnectionManager
-from telephony.websocket.audio_manager import AudioManager
-from telephony.websocket.speech_processor import SpeechProcessor
+from telephony.websocket.audio_manager_v2 import AudioManager  # Use v2
+from telephony.websocket.speech_processor_v3 import SpeechProcessor  # Use v3
 from telephony.websocket.response_generator import ResponseGenerator
-from telephony.websocket.message_router import MessageRouter
+from telephony.websocket.message_router_v2 import MessageRouter  # Use v2
 
 logger = logging.getLogger(__name__)
 
 class WebSocketHandler:
     """
     Enhanced WebSocket handler that orchestrates all components.
+    Updated to use v2 components.
     """
     
     def __init__(self, call_sid: str, pipeline):
@@ -33,17 +35,17 @@ class WebSocketHandler:
         self.stream_sid = None  # Store stream_sid at handler level
         self.pipeline = pipeline
         
-        # Initialize enhanced component managers
+        # Initialize enhanced component managers with v2 components
         self.connection_manager = ConnectionManager(call_sid)
-        self.audio_manager = AudioManager()
-        self.speech_processor = SpeechProcessor(pipeline)
+        self.audio_manager = AudioManager()  # This is now audio_manager_v2
+        self.speech_processor = SpeechProcessor(pipeline)  # This is now speech_processor_v3
         self.response_generator = ResponseGenerator(pipeline, self)  # Pass self reference
-        self.message_router = MessageRouter(self)
+        self.message_router = MessageRouter(self)  # This is now message_router_v2
         
         # State tracking
         self.conversation_active = True
         
-        logger.info(f"WebSocketHandler initialized for call {call_sid}")
+        logger.info(f"WebSocketHandler initialized for call {call_sid} with v2 components")
     
     async def handle_message(self, message: str, ws) -> None:
         """
