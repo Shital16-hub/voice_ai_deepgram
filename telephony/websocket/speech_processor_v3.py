@@ -17,17 +17,16 @@ logger = logging.getLogger(__name__)
 
 class SpeechProcessor:
     """
-    Advanced speech processor that leverages Google Cloud STT's automatic features.
-    No hardcoded keywords or patterns - lets the API do its job!
+    Clean speech processor that relies on Google Cloud STT's intelligence.
     """
     
     def __init__(self, pipeline):
         """Initialize speech processor with minimal intervention."""
         self.pipeline = pipeline
         
-        logger.info("Initializing SpeechProcessor with Google Cloud STT automatic features")
+        logger.info("Initializing SpeechProcessor with pure Google Cloud STT automatic features")
         
-        # Use the fixed Google Cloud STT with automatic features enabled
+        # Use clean Google Cloud STT - no hardcoded patterns!
         self.speech_client = GoogleCloudStreamingSTT_V2(
             language="en-US",
             sample_rate=8000,  # Twilio's sample rate
@@ -35,17 +34,17 @@ class SpeechProcessor:
             channels=1,
             interim_results=True,  # Enable for better responsiveness
             enhanced_model=True,  # Use premium model for best accuracy
-            timeout=60.0  # Increased timeout for better connection stability
+            timeout=60.0
         )
         
-        # Minimal intervention - only basic cleanup
+        # Minimal cleanup - only technical artifacts
         self.basic_cleanup_patterns = [
-            # Remove only clear technical artifacts
+            # Remove only clear technical artifacts - no content filtering!
             (re.compile(r'\[INAUDIBLE\]', re.IGNORECASE), ''),
             (re.compile(r'\[MUSIC\]', re.IGNORECASE), ''),
             (re.compile(r'\[NOISE\]', re.IGNORECASE), ''),
             
-            # Fix spacing around punctuation (API sometimes adds extra spaces)
+            # Fix spacing around punctuation
             (re.compile(r'\s+([.!?])'), r'\1'),
             (re.compile(r'([.!?])\s+([.!?])'), r'\1\2'),
             
