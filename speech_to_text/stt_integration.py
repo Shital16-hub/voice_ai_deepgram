@@ -1,6 +1,6 @@
 """
 Enhanced Speech-to-Text integration module optimized for telephony with v2 API.
-Uses latest_long model for better conversation handling.
+Uses telephony_short model for MULAW audio.
 """
 import logging
 import time
@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 class STTIntegration:
     """
-    Enhanced Speech-to-Text integration optimized for telephony with minimal processing.
-    Uses Google Cloud Speech-to-Text v2 API with latest_long model.
+    Enhanced Speech-to-Text integration optimized for telephony MULAW with minimal processing.
+    Uses Google Cloud Speech-to-Text v2 API with telephony_short model.
     """
     
     def __init__(
@@ -69,11 +69,11 @@ class STTIntegration:
             )
             
         try:
-            # Create a new Google Cloud v2 streaming client with optimal settings
+            # Create a new Google Cloud v2 streaming client with MULAW-specific settings
             self.speech_recognizer = GoogleCloudStreamingSTT(
                 language=self.language,
                 sample_rate=8000,      # Match Twilio
-                encoding="MULAW",      # Keep MULAW for compatibility
+                encoding="MULAW",      # Explicit MULAW support
                 channels=1,
                 interim_results=False, # Disabled for better accuracy
                 project_id=final_project_id,
@@ -82,7 +82,7 @@ class STTIntegration:
             )
             
             self.initialized = True
-            logger.info(f"Initialized STT with Google Cloud v2 API (conversation-optimized)")
+            logger.info(f"Initialized STT with Google Cloud v2 API (MULAW-optimized)")
         except Exception as e:
             logger.error(f"Error initializing STT: {e}")
             raise
@@ -129,6 +129,7 @@ class STTIntegration:
     ) -> Dict[str, Any]:
         """
         Transcribe audio data with minimal processing using v2 API.
+        Expects MULAW-encoded audio data.
         """
         if not self.initialized:
             logger.error("STT integration not properly initialized")
@@ -138,13 +139,22 @@ class STTIntegration:
         start_time = time.time()
         
         try:
-            # Convert to numpy array if needed - minimal preprocessing
-            if isinstance(audio_data, bytes):
-                # Keep as bytes for direct processing
-                pass
-            elif isinstance(audio_data, list):
-                audio_data = np.array(audio_data, dtype=np.float32)
-            # For numpy arrays, let the STT handle conversion
+            # Handle different input types for MULAW audio
+            # The audio should already be MULAW encoded by the telephony layer
+            if isinstance(audio_data, list):
+                # Convert list to numpy array first
+                audio_data = np.array(audio_data, dtype=np.uint8)
+            
+            # For numpy arrays, ensure they're the right type for MULAW
+            elif isinstance(audio_data, np.ndarray):
+                # If it's float32, it should have been converted to MULAW already
+                # by the telephony WebSocket handler
+                if audio_data.dtype == np.float32:
+                    # The float32 array should actually contain MULAW byte values
+                    # Convert to uint8 for proper handling
+                    audio_data = audio_data.astype(np.uint8)
+            
+            # bytes are passed through as-is (should be MULAW encoded)
             
             # Get results directly from STT v2
             final_results = []
@@ -198,7 +208,7 @@ class STTIntegration:
                 "is_final": True,
                 "is_valid": self.is_valid_transcription(cleaned_text),
                 "api_version": "v2",
-                "model": "latest_long"
+                "model": "telephony_short"
             }
             
         except Exception as e:
@@ -230,7 +240,11 @@ class STTIntegration:
             logger.error("STT integration not properly initialized")
             return None
         
-        # Don't preprocess - pass directly to STT v2
+        # Ensure proper data type for MULAW
+        if isinstance(audio_chunk, np.ndarray) and audio_chunk.dtype == np.float32:
+            # Convert float32 to uint8 for MULAW processing
+            audio_chunk = audio_chunk.astype(np.uint8)
+        
         return await self.speech_recognizer.process_audio_chunk(
             audio_chunk=audio_chunk,
             callback=callback
@@ -257,5 +271,5 @@ class STTIntegration:
     
     def optimize_for_telephony(self):
         """Already optimized for telephony with v2 API - this is a no-op."""
-        logger.info("STT integration already optimized for telephony with v2 API and latest_long model")
+        logger.info("STT integration already optimized for telephony with v2 API and telephony_short model")
         pass
