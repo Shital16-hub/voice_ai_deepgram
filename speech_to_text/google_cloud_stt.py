@@ -1,7 +1,7 @@
 # speech_to_text/google_cloud_stt.py
 
 """
-Fixed Google Cloud Speech-to-Text v2 implementation for Twilio with proper recognizer configuration.
+Fixed Google Cloud Speech-to-Text v2 implementation with proper request generation.
 """
 import logging
 import asyncio
@@ -37,8 +37,7 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Fixed Google Cloud Speech-to-Text v2 client with proper Twilio integration.
-    Key fix: Using recognizer resource instead of default recognizer.
+    Fixed Google Cloud Speech-to-Text v2 client with proper streaming for Twilio.
     """
     
     def __init__(
@@ -71,17 +70,17 @@ class GoogleCloudStreamingSTT:
         # Initialize v2 client
         self._initialize_client()
         
-        # CRITICAL FIX: Create a proper recognizer instead of using default
-        # The "_" recognizer often has issues with Twilio
-        self.recognizer_path = self._create_or_get_recognizer()
+        # Use the default recognizer
+        self.recognizer_path = f"projects/{self.project_id}/locations/{self.location}/recognizers/{self.recognizer_id}"
         
         # Streaming state
         self.is_streaming = False
-        self._streaming_responses = None
+        self._streaming_call = None
         self._stream_thread = None
-        self._stream_queue = queue.Queue(maxsize=50)  # Reduced queue size
-        self._result_queue = queue.Queue()
+        self._audio_queue = queue.Queue(maxsize=100)
+        self._result_queue = asyncio.Queue()
         self._stop_event = threading.Event()
+        self._config_sent = False
         
         # Performance tracking
         self.total_chunks = 0
@@ -89,7 +88,7 @@ class GoogleCloudStreamingSTT:
         self.last_result = None
         
         # Audio validation
-        self.min_chunk_size = 320   # 40ms at 8kHz (reduced)
+        self.min_chunk_size = 160   # 20ms at 8kHz
         self.max_chunk_size = 20480 # 20KB limit
         
         logger.info(f"Initialized Google Cloud STT v2: {sample_rate}Hz, {encoding}, project: {self.project_id}")
@@ -130,45 +129,6 @@ class GoogleCloudStreamingSTT:
         self.client = speech_v2.SpeechClient(client_options=client_options)
         logger.info(f"Initialized v2 client for location: {self.location}")
     
-    def _create_or_get_recognizer(self) -> str:
-        """Create or get a proper recognizer for Twilio."""
-        # For Twilio, we need to create a specific recognizer optimized for telephony
-        recognizer_name = f"twilio-telephony-{int(time.time())}"
-        recognizer_path = f"projects/{self.project_id}/locations/{self.location}/recognizers/{recognizer_name}"
-        
-        try:
-            # Create recognition config
-            recognition_config = self._get_recognition_config()
-            
-            # Create recognizer request
-            recognizer = speech_v2.Recognizer(
-                name=recognizer_path,
-                language_codes=[self.language],
-                model=recognition_config.model,
-                default_recognition_config=recognition_config
-            )
-            
-            # Create the recognizer
-            create_request = speech_v2.CreateRecognizerRequest(
-                parent=f"projects/{self.project_id}/locations/{self.location}",
-                recognizer_id=recognizer_name,
-                recognizer=recognizer
-            )
-            
-            logger.info(f"Creating new recognizer for Twilio: {recognizer_path}")
-            operation = self.client.create_recognizer(request=create_request)
-            
-            # Wait for operation to complete
-            recognizer_result = operation.result(timeout=30)
-            logger.info(f"Created recognizer: {recognizer_result.name}")
-            
-            return recognizer_result.name
-            
-        except Exception as e:
-            logger.warning(f"Could not create custom recognizer, using default: {e}")
-            # Fall back to default recognizer with proper path
-            return f"projects/{self.project_id}/locations/{self.location}/recognizers/_"
-    
     def _get_recognition_config(self) -> speech_v2.RecognitionConfig:
         """Get recognition configuration optimized for Twilio MULAW."""
         
@@ -188,8 +148,7 @@ class GoogleCloudStreamingSTT:
             max_alternatives=1,
         )
         
-        # CRITICAL: Use the correct model for Twilio telephony
-        # telephony_short is specifically designed for 8kHz MULAW audio
+        # Use the correct model for Twilio telephony
         model = "telephony_short"
         
         # Create recognition config
@@ -213,10 +172,7 @@ class GoogleCloudStreamingSTT:
             config=recognition_config,
             streaming_features=speech_v2.StreamingRecognitionFeatures(
                 interim_results=self.interim_results,
-                # No voice activity events for Twilio (causes issues)
-                enable_voice_activity_events=False,
-                # Use shorter timeout for better responsiveness
-                end_pointer_events=speech_v2.StreamingRecognitionFeatures.EndpointerEvents.END_OF_UTTERANCE
+                enable_voice_activity_events=False
             ),
         )
         return config
@@ -235,143 +191,139 @@ class GoogleCloudStreamingSTT:
             logger.warning(f"Audio chunk too large: {len(audio_chunk)} bytes")
             return False
         
-        # MULAW validation - check for variation
-        sample = audio_chunk[:min(100, len(audio_chunk))]
-        non_zero_count = sum(1 for b in sample if b != 0)
-        if non_zero_count < len(sample) * 0.1:
-            logger.debug("Audio chunk appears to be silence")
-            return False
-            
-        # Check for reasonable MULAW distribution
-        mean_val = sum(sample) / len(sample)
-        if mean_val < 50 or mean_val > 200:
-            logger.debug(f"Unusual MULAW distribution, mean: {mean_val}")
-            # Don't reject, just log
-        
         return True
     
     def _generate_requests(self):
-        """Generate streaming recognition requests."""
+        """Generate streaming recognition requests with proper sequencing."""
         # First request - configuration only
-        config_request = speech_v2.StreamingRecognizeRequest(
-            recognizer=self.recognizer_path,
-            streaming_config=self._get_streaming_config(),
-        )
-        
-        logger.info(f"Sending config request: recognizer={self.recognizer_path}")
-        logger.info(f"Config: model=telephony_short, encoding=MULAW, rate={self.sample_rate}")
-        yield config_request
+        if not self._config_sent:
+            config_request = speech_v2.StreamingRecognizeRequest(
+                recognizer=self.recognizer_path,
+                streaming_config=self._get_streaming_config(),
+            )
+            
+            logger.info(f"Sending config request: recognizer={self.recognizer_path}")
+            logger.info(f"Config: model=telephony_short, encoding=MULAW, rate={self.sample_rate}")
+            self._config_sent = True
+            yield config_request
         
         # Subsequent requests - audio data only
+        audio_chunks_sent = 0
         while not self._stop_event.is_set():
             try:
-                # Get audio chunk with shorter timeout for responsiveness
-                audio_chunk = self._stream_queue.get(timeout=0.5)
+                # Get audio chunk with timeout
+                audio_chunk = self._audio_queue.get(timeout=1.0)
                 
                 if audio_chunk is None:  # Sentinel to stop
+                    logger.info("Received stop sentinel")
                     break
                 
                 # Validate audio chunk
                 if not self._validate_audio_chunk(audio_chunk):
                     logger.debug(f"Skipping invalid audio chunk: {len(audio_chunk)} bytes")
-                    self._stream_queue.task_done()
                     continue
                 
-                # Log first few bytes for debugging
-                if len(audio_chunk) >= 10:
-                    sample_bytes = list(audio_chunk[:10])
-                    logger.debug(f"Sending MULAW audio: {len(audio_chunk)} bytes, "
-                               f"sample: {sample_bytes}")
+                # Log audio details
+                audio_chunks_sent += 1
+                logger.debug(f"Sending audio chunk {audio_chunks_sent}: {len(audio_chunk)} bytes")
                 
-                # Create audio request with raw MULAW bytes
+                # Create audio request
                 audio_request = speech_v2.StreamingRecognizeRequest(audio=audio_chunk)
                 yield audio_request
                 
-                self._stream_queue.task_done()
-                
             except queue.Empty:
+                # No audio chunk available, continue waiting
                 continue
             except Exception as e:
                 logger.error(f"Error generating request: {e}")
                 break
+        
+        logger.info(f"Finished generating requests. Total audio chunks sent: {audio_chunks_sent}")
     
     def _stream_recognition(self):
         """Run streaming recognition in a separate thread."""
         try:
             logger.info("Starting streaming recognition thread...")
             
-            # Create streaming recognition call
-            self._streaming_responses = self.client.streaming_recognize(
-                self._generate_requests()
-            )
-            
-            logger.info("Started streaming recognition, waiting for responses...")
-            
-            # Process responses
-            response_count = 0
-            result_count = 0
-            
-            for response in self._streaming_responses:
-                if self._stop_event.is_set():
-                    break
+            # Create streaming recognition call with proper error handling
+            try:
+                request_generator = self._generate_requests()
+                self._streaming_call = self.client.streaming_recognize(
+                    request_generator,
+                    timeout=120.0  # Increased timeout
+                )
                 
-                response_count += 1
-                logger.debug(f"Received response #{response_count}")
+                logger.info("Started streaming recognition, waiting for responses...")
                 
-                # Check for error in response
-                if hasattr(response, 'error') and response.error:
-                    logger.error(f"STT API error: {response.error}")
-                    continue
+                # Process responses with proper error handling
+                response_count = 0
+                result_count = 0
                 
-                # Process each result in the response
-                for result_idx, result in enumerate(response.results):
-                    result_count += 1
-                    logger.info(f"Processing result {result_idx}: is_final={result.is_final}, "
-                               f"alternatives={len(result.alternatives)}")
+                for response in self._streaming_call:
+                    if self._stop_event.is_set():
+                        logger.info("Stop event set, breaking from response loop")
+                        break
                     
-                    if result.alternatives:
-                        alternative = result.alternatives[0]
+                    response_count += 1
+                    logger.info(f"Received response #{response_count}")
+                    
+                    # Check for error in response
+                    if hasattr(response, 'error') and response.error:
+                        logger.error(f"STT API error: {response.error}")
+                        continue
+                    
+                    # Process each result in the response
+                    for result_idx, result in enumerate(response.results):
+                        result_count += 1
+                        logger.info(f"Processing result {result_idx}: is_final={result.is_final}, "
+                                   f"alternatives={len(result.alternatives)}")
                         
-                        # Create transcription result
-                        transcription_result = StreamingTranscriptionResult(
-                            text=alternative.transcript,
-                            is_final=result.is_final,
-                            confidence=alternative.confidence if result.is_final else 0.0,
-                            chunk_id=self.total_chunks
-                        )
-                        
-                        # Store latest result
-                        self.last_result = transcription_result
-                        
-                        # Put in result queue
-                        self._result_queue.put(transcription_result)
-                        
-                        # Log results
-                        if result.is_final:
-                            self.successful_transcriptions += 1
-                            logger.info(f"FINAL transcription: '{alternative.transcript}' "
-                                       f"(confidence: {alternative.confidence:.2f})")
+                        if result.alternatives:
+                            alternative = result.alternatives[0]
+                            
+                            # Create transcription result
+                            transcription_result = StreamingTranscriptionResult(
+                                text=alternative.transcript,
+                                is_final=result.is_final,
+                                confidence=alternative.confidence if result.is_final else 0.0,
+                                chunk_id=self.total_chunks
+                            )
+                            
+                            # Store latest result
+                            self.last_result = transcription_result
+                            
+                            # Put in result queue using thread-safe method
+                            asyncio.run_coroutine_threadsafe(
+                                self._result_queue.put(transcription_result),
+                                asyncio.get_event_loop()
+                            )
+                            
+                            # Log results
+                            if result.is_final:
+                                self.successful_transcriptions += 1
+                                logger.info(f"FINAL transcription: '{alternative.transcript}' "
+                                           f"(confidence: {alternative.confidence:.2f})")
+                            else:
+                                logger.debug(f"Interim: '{alternative.transcript}'")
                         else:
-                            logger.debug(f"Interim: '{alternative.transcript}'")
-                    else:
-                        logger.warning(f"Result {result_idx} has no alternatives")
-            
-            logger.info(f"Finished streaming recognition - responses: {response_count}, "
-                       f"results: {result_count}")
-                        
-        except grpc.RpcError as e:
-            logger.error(f"gRPC error in streaming: {e}")
-            logger.error(f"gRPC details: {e.details()}")
-            logger.error(f"gRPC code: {e.code()}")
-            
-            # Check for common errors
-            if e.code() == grpc.StatusCode.INVALID_ARGUMENT:
-                logger.error("Invalid argument - check audio format and recognizer configuration")
-            elif e.code() == grpc.StatusCode.PERMISSION_DENIED:
-                logger.error("Permission denied - check your Google Cloud credentials and permissions")
-            elif e.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
-                logger.error("Resource exhausted - you may have exceeded quota limits")
+                            logger.warning(f"Result {result_idx} has no alternatives")
                 
+                logger.info(f"Finished streaming recognition - responses: {response_count}, "
+                           f"results: {result_count}")
+                           
+            except grpc.RpcError as e:
+                logger.error(f"gRPC error in streaming: {e}")
+                logger.error(f"gRPC details: {e.details()}")
+                logger.error(f"gRPC code: {e.code()}")
+                
+                # Check for common errors
+                if e.code() == grpc.StatusCode.INVALID_ARGUMENT:
+                    logger.error("Invalid argument - check audio format and recognizer configuration")
+                elif e.code() == grpc.StatusCode.PERMISSION_DENIED:
+                    logger.error("Permission denied - check your Google Cloud credentials and permissions")
+                elif e.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                    logger.error("Resource exhausted - you may have exceeded quota limits")
+                    
         except Exception as e:
             logger.error(f"Error in streaming recognition: {e}", exc_info=True)
         finally:
@@ -384,23 +336,23 @@ class GoogleCloudStreamingSTT:
         
         try:
             # Clear queues
-            while not self._stream_queue.empty():
+            while not self._audio_queue.empty():
                 try:
-                    self._stream_queue.get_nowait()
-                    self._stream_queue.task_done()
+                    self._audio_queue.get_nowait()
                 except queue.Empty:
                     break
             
+            # Clear async result queue
             while not self._result_queue.empty():
                 try:
                     self._result_queue.get_nowait()
-                    self._result_queue.task_done()
-                except queue.Empty:
+                except asyncio.QueueEmpty:
                     break
             
             # Reset state
             self.is_streaming = True
             self._stop_event.clear()
+            self._config_sent = False
             
             # Start streaming thread
             self._stream_thread = threading.Thread(
@@ -408,6 +360,9 @@ class GoogleCloudStreamingSTT:
                 daemon=True
             )
             self._stream_thread.start()
+            
+            # Wait a bit for the thread to initialize
+            await asyncio.sleep(0.3)
             
             logger.info("Started v2 streaming session with telephony_short model")
             
@@ -427,44 +382,42 @@ class GoogleCloudStreamingSTT:
         
         self.total_chunks += 1
         
-        # Ensure we have raw bytes (MULAW audio should already be bytes)
+        # Ensure we have raw bytes
         if isinstance(audio_chunk, np.ndarray):
-            # Convert numpy array to bytes if needed
             audio_bytes = audio_chunk.tobytes()
         else:
-            # Should already be raw MULAW bytes from Twilio
             audio_bytes = audio_chunk
         
         # Validate and send to queue
         if self._validate_audio_chunk(audio_bytes):
             try:
-                self._stream_queue.put(audio_bytes, block=False)
-                logger.debug(f"Queued {len(audio_bytes)} bytes of MULAW audio")
+                self._audio_queue.put(audio_bytes, block=False)
+                logger.debug(f"Queued {len(audio_bytes)} bytes of MULAW audio (chunk #{self.total_chunks})")
             except queue.Full:
-                logger.warning("Stream queue full, dropping audio chunk")
+                logger.warning("Audio queue full, dropping audio chunk")
                 # Clear some older items from queue
                 try:
                     for _ in range(5):
-                        self._stream_queue.get_nowait()
-                        self._stream_queue.task_done()
-                    self._stream_queue.put(audio_bytes, block=False)
-                except (queue.Empty, queue.Full):
+                        self._audio_queue.get_nowait()
+                    self._audio_queue.put(audio_bytes, block=False)
+                except queue.Empty:
                     pass
         
         # Process any results
         final_result = None
-        while not self._result_queue.empty():
-            try:
-                result = self._result_queue.get_nowait()
-                self._result_queue.task_done()
+        try:
+            while not self._result_queue.empty():
+                result = await asyncio.wait_for(self._result_queue.get(), timeout=0.1)
                 
                 if callback:
                     await callback(result)
                 
                 if result.is_final:
                     final_result = result
-            except queue.Empty:
-                break
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.QueueEmpty:
+            pass
         
         return final_result
     
@@ -481,36 +434,43 @@ class GoogleCloudStreamingSTT:
             
             # Send sentinel to stop request generator
             try:
-                self._stream_queue.put(None, block=False)
+                self._audio_queue.put(None, block=False)
             except queue.Full:
-                pass
+                # If queue is full, clear it and then put sentinel
+                while not self._audio_queue.empty():
+                    try:
+                        self._audio_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                self._audio_queue.put(None, block=False)
             
             # Wait for streaming thread to finish
             if self._stream_thread and self._stream_thread.is_alive():
-                self._stream_thread.join(timeout=2.0)
+                self._stream_thread.join(timeout=5.0)
+                if self._stream_thread.is_alive():
+                    logger.warning("Streaming thread did not finish in time")
             
             # Cancel streaming call
-            if self._streaming_responses:
+            if self._streaming_call:
                 try:
-                    self._streaming_responses.cancel()
+                    self._streaming_call.cancel()
                 except:
                     pass
-                self._streaming_responses = None
+                self._streaming_call = None
             
             # Collect any final results
             final_text = ""
             duration = 0.0
             
             # Process any remaining results
-            while not self._result_queue.empty():
-                try:
-                    result = self._result_queue.get_nowait()
-                    self._result_queue.task_done()
+            try:
+                while not self._result_queue.empty():
+                    result = await asyncio.wait_for(self._result_queue.get(), timeout=0.5)
                     if result.is_final and result.text:
                         final_text = result.text
                         duration = result.end_time - result.start_time
-                except queue.Empty:
-                    break
+            except (asyncio.TimeoutError, asyncio.QueueEmpty):
+                pass
             
             # If no final results, check the last result
             if not final_text and self.last_result and self.last_result.text:
@@ -523,6 +483,7 @@ class GoogleCloudStreamingSTT:
             # Reset state
             self.is_streaming = False
             self._stream_thread = None
+            self._config_sent = False
             
             return final_text, duration
             
@@ -532,7 +493,7 @@ class GoogleCloudStreamingSTT:
         finally:
             # Ensure state is reset
             self.is_streaming = False
-            self._streaming_responses = None
+            self._streaming_call = None
             self._stream_thread = None
             self.last_result = None
     
@@ -553,22 +514,6 @@ class GoogleCloudStreamingSTT:
             "project_id": self.project_id,
             "location": self.location,
             "recognizer_path": self.recognizer_path,
-            "stream_queue_size": self._stream_queue.qsize(),
+            "audio_queue_size": self._audio_queue.qsize(),
             "result_queue_size": self._result_queue.qsize(),
         }
-    
-    def __del__(self):
-        """Cleanup when object is destroyed."""
-        try:
-            # Try to delete the custom recognizer if we created one
-            if hasattr(self, 'recognizer_path') and 'twilio-telephony' in self.recognizer_path:
-                try:
-                    delete_request = speech_v2.DeleteRecognizerRequest(
-                        name=self.recognizer_path
-                    )
-                    self.client.delete_recognizer(request=delete_request)
-                    logger.info(f"Deleted recognizer: {self.recognizer_path}")
-                except Exception as e:
-                    logger.debug(f"Could not delete recognizer: {e}")
-        except Exception:
-            pass
