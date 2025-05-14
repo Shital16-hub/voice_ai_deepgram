@@ -1,5 +1,8 @@
+# speech_to_text/google_cloud_stt.py
+
 """
-Google Cloud Speech-to-Text v2 implementation optimized for telephony with proper streaming.
+Google Cloud Speech-to-Text v2 implementation following official documentation.
+Proper implementation for telephony streaming.
 """
 import logging
 import asyncio
@@ -17,6 +20,7 @@ from google.cloud import speech_v2
 from google.api_core.client_options import ClientOptions
 from google.protobuf.duration_pb2 import Duration
 import grpc
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +38,8 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Google Cloud Speech-to-Text v2 client optimized for telephony.
-    Uses a ping-based approach to keep the stream alive and handle intermittent audio.
+    Google Cloud Speech-to-Text v2 client properly implemented for telephony.
+    Following official v2 documentation pattern.
     """
     
     def __init__(
@@ -50,9 +54,7 @@ class GoogleCloudStreamingSTT:
         enhanced_model: bool = True,
         recognizer_id: str = "_"
     ):
-        """
-        Initialize with optimal settings for telephony using v2 streaming API.
-        """
+        """Initialize Google Cloud STT v2 for telephony."""
         self.language = language
         self.sample_rate = sample_rate
         self.encoding = encoding
@@ -67,36 +69,29 @@ class GoogleCloudStreamingSTT:
         if not self.project_id:
             raise ValueError("Google Cloud project ID is required")
         
-        # Initialize v2 client with proper endpoint
+        # Initialize v2 client
         self._initialize_client()
         
         # Construct recognizer path for v2 API
-        self.recognizer_path = self.client.recognizer_path(
-            project=self.project_id,
-            location=location,
-            recognizer=recognizer_id
-        )
+        self.recognizer_path = f"projects/{self.project_id}/locations/{location}/recognizers/{recognizer_id}"
         
         # Streaming state
         self.is_streaming = False
-        self.streaming_call = None
-        self.request_queue = queue.Queue(maxsize=100)  # Limit queue size
-        self.result_queue = queue.Queue()
-        self.response_thread = None
-        self.sender_thread = None
-        self.keep_alive_thread = None
+        self._streaming_responses = None
+        self._stream_thread = None
+        self._stream_queue = queue.Queue(maxsize=100)
+        self._result_queue = queue.Queue()
+        self._stop_event = threading.Event()
         
         # Performance tracking
         self.total_chunks = 0
         self.successful_transcriptions = 0
         self.last_result = None
-        self.callback_function = None
         
-        # Keep alive mechanism
-        self.last_audio_time = 0
-        self.keep_alive_interval = 5.0  # Send keep-alive every 5 seconds
+        # Thread pool for async operations
+        self._executor = ThreadPoolExecutor(max_workers=2)
         
-        logger.info(f"Initialized Google Cloud STT v2: {sample_rate}Hz, {encoding}, project: {project_id}")
+        logger.info(f"Initialized Google Cloud STT v2: {sample_rate}Hz, {encoding}, project: {self.project_id}")
     
     def _get_project_id(self) -> Optional[str]:
         """Auto-extract project ID from environment or credentials."""
@@ -182,7 +177,7 @@ class GoogleCloudStreamingSTT:
             config=self._get_recognition_config(),
             streaming_features=speech_v2.StreamingRecognitionFeatures(
                 interim_results=self.interim_results,
-                enable_voice_activity_events=True,  # Required for voice activity timeouts
+                enable_voice_activity_events=True,
                 voice_activity_timeout=speech_v2.StreamingRecognitionFeatures.VoiceActivityTimeout(
                     speech_start_timeout=Duration(seconds=5),
                     speech_end_timeout=Duration(seconds=1),
@@ -191,63 +186,50 @@ class GoogleCloudStreamingSTT:
         )
         return config
     
-    def _request_sender(self):
-        """Send requests to the streaming call in a separate thread."""
-        try:
-            # First request - configuration
-            config_request = speech_v2.StreamingRecognizeRequest(
-                recognizer=self.recognizer_path,
-                streaming_config=self._get_streaming_config(),
-            )
-            self.streaming_call.send(config_request)
-            logger.debug("Sent configuration request")
-            
-            # Continuous loop to send audio and keep-alive
-            while self.is_streaming:
-                try:
-                    # Try to get audio chunk
-                    audio_chunk = self.request_queue.get(timeout=1.0)
-                    
-                    if audio_chunk is None:  # Sentinel to stop
-                        break
-                    
-                    # Create audio request
-                    audio_request = speech_v2.StreamingRecognizeRequest(audio=audio_chunk)
-                    self.streaming_call.send(audio_request)
-                    self.last_audio_time = time.time()
-                    
-                    self.request_queue.task_done()
-                    logger.debug(f"Sent audio chunk: {len(audio_chunk)} bytes")
-                    
-                except queue.Empty:
-                    # No audio available - send keep-alive if needed
-                    current_time = time.time()
-                    if current_time - self.last_audio_time > self.keep_alive_interval:
-                        # Send empty audio chunk as keep-alive
-                        try:
-                            keep_alive = speech_v2.StreamingRecognizeRequest(audio=b'')
-                            self.streaming_call.send(keep_alive)
-                            self.last_audio_time = current_time
-                            logger.debug("Sent keep-alive")
-                        except Exception as e:
-                            logger.error(f"Error sending keep-alive: {e}")
-                    continue
-                    
-                except Exception as e:
-                    logger.error(f"Error sending request: {e}")
+    def _generate_requests(self):
+        """Generate streaming recognition requests."""
+        # First request - configuration
+        config_request = speech_v2.StreamingRecognizeRequest(
+            recognizer=self.recognizer_path,
+            streaming_config=self._get_streaming_config(),
+        )
+        yield config_request
+        
+        # Subsequent requests - audio data
+        while not self._stop_event.is_set():
+            try:
+                # Get audio chunk with timeout
+                audio_chunk = self._stream_queue.get(timeout=1.0)
+                
+                if audio_chunk is None:  # Sentinel to stop
                     break
-            
-            # Close the send side
-            self.streaming_call.close()
-            logger.debug("Request sender finished")
-            
-        except Exception as e:
-            logger.error(f"Error in request sender: {e}")
+                
+                # Create audio request
+                audio_request = speech_v2.StreamingRecognizeRequest(audio=audio_chunk)
+                yield audio_request
+                
+                self._stream_queue.task_done()
+                
+            except queue.Empty:
+                # No audio available, continue
+                continue
+            except Exception as e:
+                logger.error(f"Error generating request: {e}")
+                break
     
-    def _response_processor(self):
-        """Process streaming responses in a separate thread."""
+    def _stream_recognition(self):
+        """Run streaming recognition in a separate thread."""
         try:
-            for response in self.streaming_call:
+            # Create streaming recognition call
+            self._streaming_responses = self.client.streaming_recognize(
+                self._generate_requests()
+            )
+            
+            # Process responses
+            for response in self._streaming_responses:
+                if self._stop_event.is_set():
+                    break
+                
                 # Process each result in the response
                 for result in response.results:
                     if result.alternatives:
@@ -265,7 +247,7 @@ class GoogleCloudStreamingSTT:
                         self.last_result = transcription_result
                         
                         # Put in result queue
-                        self.result_queue.put(transcription_result)
+                        self._result_queue.put(transcription_result)
                         
                         # Log results
                         if result.is_final:
@@ -273,72 +255,47 @@ class GoogleCloudStreamingSTT:
                             logger.info(f"Final transcription: '{alternative.transcript}' (confidence: {alternative.confidence:.2f})")
                         else:
                             logger.debug(f"Interim: '{alternative.transcript}'")
-                        
-                        # Call callback if provided
-                        if self.callback_function and result.is_final:
-                            try:
-                                # Run callback in event loop if available
-                                loop = asyncio.get_event_loop()
-                                if loop.is_running():
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.callback_function(transcription_result),
-                                        loop
-                                    )
-                            except Exception as e:
-                                logger.error(f"Error in callback: {e}")
-                
+                            
         except grpc.RpcError as e:
-            logger.error(f"gRPC error in response processor: {e}")
+            logger.error(f"gRPC error in streaming recognition: {e}")
         except Exception as e:
-            logger.error(f"Error processing responses: {e}")
+            logger.error(f"Error in streaming recognition: {e}")
         finally:
-            logger.debug("Response processor finished")
+            logger.debug("Streaming recognition thread finished")
     
     async def start_streaming(self) -> None:
-        """Start a new streaming session with proper v2 implementation."""
+        """Start a new streaming session."""
         if self.is_streaming:
             await self.stop_streaming()
         
         try:
-            # Clear any existing state
-            while not self.request_queue.empty():
+            # Clear queues
+            while not self._stream_queue.empty():
                 try:
-                    self.request_queue.get_nowait()
-                    self.request_queue.task_done()
+                    self._stream_queue.get_nowait()
+                    self._stream_queue.task_done()
                 except queue.Empty:
                     break
             
-            while not self.result_queue.empty():
+            while not self._result_queue.empty():
                 try:
-                    self.result_queue.get_nowait()
-                    self.result_queue.task_done()
+                    self._result_queue.get_nowait()
+                    self._result_queue.task_done()
                 except queue.Empty:
                     break
             
-            # Start streaming
+            # Reset state
             self.is_streaming = True
-            self.last_audio_time = time.time()
+            self._stop_event.clear()
             
-            # Create the streaming call
-            self.streaming_call = self.client.streaming_recognize(
-                iter([])  # We'll send requests manually
-            )
-            
-            # Start sender thread
-            self.sender_thread = threading.Thread(
-                target=self._request_sender,
+            # Start streaming thread
+            self._stream_thread = threading.Thread(
+                target=self._stream_recognition,
                 daemon=True
             )
-            self.sender_thread.start()
+            self._stream_thread.start()
             
-            # Start response processing thread
-            self.response_thread = threading.Thread(
-                target=self._response_processor,
-                daemon=True
-            )
-            self.response_thread.start()
-            
-            logger.info("Started v2 streaming session with separate sender and receiver threads")
+            logger.info("Started v2 streaming session")
             
         except Exception as e:
             logger.error(f"Error starting streaming: {e}")
@@ -350,14 +307,11 @@ class GoogleCloudStreamingSTT:
         audio_chunk: Union[bytes, np.ndarray],
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
-        """
-        Process audio chunk with optimized buffering for v2 API.
-        """
+        """Process audio chunk for streaming recognition."""
         if not self.is_streaming:
             await self.start_streaming()
         
         self.total_chunks += 1
-        self.callback_function = callback
         
         # Convert numpy array to bytes if needed
         if isinstance(audio_chunk, np.ndarray):
@@ -378,30 +332,35 @@ class GoogleCloudStreamingSTT:
         
         # Send to streaming API
         try:
-            self.request_queue.put(audio_bytes, block=False)
+            self._stream_queue.put(audio_bytes, block=False)
             logger.debug(f"Queued {len(audio_bytes)} bytes for streaming")
         except queue.Full:
-            logger.warning("Request queue is full, dropping audio chunk")
-            # Try to clear some old items
+            logger.warning("Stream queue is full, dropping audio chunk")
+            # Try to clear an old item
             try:
-                self.request_queue.get_nowait()
-                self.request_queue.task_done()
-                self.request_queue.put(audio_bytes, block=False)
+                self._stream_queue.get_nowait()
+                self._stream_queue.task_done()
+                self._stream_queue.put(audio_bytes, block=False)
             except:
                 pass
         
         # Check for any results
-        try:
-            # Non-blocking check for results
-            while not self.result_queue.empty():
-                result = self.result_queue.get_nowait()
-                self.result_queue.task_done()
+        final_result = None
+        while not self._result_queue.empty():
+            try:
+                result = self._result_queue.get_nowait()
+                self._result_queue.task_done()
+                
+                # Call callback if provided
+                if callback:
+                    await callback(result)
+                
                 if result.is_final:
-                    return result
-        except queue.Empty:
-            pass
+                    final_result = result
+            except queue.Empty:
+                break
         
-        return None
+        return final_result
     
     async def stop_streaming(self) -> tuple[str, float]:
         """Stop the streaming session and get final transcription."""
@@ -411,38 +370,36 @@ class GoogleCloudStreamingSTT:
         logger.info("Stopping v2 streaming session")
         
         try:
-            # Stop the streaming flag
-            self.is_streaming = False
+            # Signal stop
+            self._stop_event.set()
             
-            # Send sentinel to stop request sender
+            # Send sentinel to stop request generator
             try:
-                self.request_queue.put(None, block=False)
+                self._stream_queue.put(None, block=False)
             except queue.Full:
                 pass
             
-            # Wait for threads to finish
-            if self.sender_thread and self.sender_thread.is_alive():
-                self.sender_thread.join(timeout=2.0)
+            # Wait for streaming thread to finish
+            if self._stream_thread and self._stream_thread.is_alive():
+                self._stream_thread.join(timeout=2.0)
             
-            if self.response_thread and self.response_thread.is_alive():
-                self.response_thread.join(timeout=2.0)
-            
-            # Close streaming call
-            if self.streaming_call:
+            # Cancel streaming call
+            if self._streaming_responses:
                 try:
-                    self.streaming_call.cancel()
+                    self._streaming_responses.cancel()
                 except:
                     pass
+                self._streaming_responses = None
             
             # Collect any final results
             final_text = ""
             duration = 0.0
             
             # Process any remaining results
-            while not self.result_queue.empty():
+            while not self._result_queue.empty():
                 try:
-                    result = self.result_queue.get_nowait()
-                    self.result_queue.task_done()
+                    result = self._result_queue.get_nowait()
+                    self._result_queue.task_done()
                     if result.is_final and result.text:
                         final_text = result.text
                         duration = result.end_time - result.start_time
@@ -457,18 +414,21 @@ class GoogleCloudStreamingSTT:
             logger.info(f"Streaming session ended. Processed {self.total_chunks} chunks, "
                        f"{self.successful_transcriptions} successful transcriptions")
             
+            # Reset state
+            self.is_streaming = False
+            self._stream_thread = None
+            
             return final_text, duration
             
         except Exception as e:
             logger.error(f"Error stopping streaming: {e}")
             return "", 0.0
         finally:
-            # Reset state
-            self.streaming_call = None
-            self.response_thread = None
-            self.sender_thread = None
+            # Ensure state is reset
+            self.is_streaming = False
+            self._streaming_responses = None
+            self._stream_thread = None
             self.last_result = None
-            self.callback_function = None
     
     def get_stats(self) -> Dict[str, Any]:
         """Get processing statistics."""
@@ -486,7 +446,11 @@ class GoogleCloudStreamingSTT:
             "sample_rate": self.sample_rate,
             "project_id": self.project_id,
             "location": self.location,
-            "request_queue_size": self.request_queue.qsize(),
-            "result_queue_size": self.result_queue.qsize(),
-            "last_audio_time": self.last_audio_time
+            "stream_queue_size": self._stream_queue.qsize(),
+            "result_queue_size": self._result_queue.qsize(),
         }
+    
+    def __del__(self):
+        """Cleanup when object is destroyed."""
+        if self._executor:
+            self._executor.shutdown(wait=False)

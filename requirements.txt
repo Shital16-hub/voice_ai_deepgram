@@ -1,4 +1,4 @@
-# requirements.txt
+# requirements.txt - Updated for Google Cloud Speech-to-Text v2
 
 # Core dependencies
 aiohttp>=3.8.0
@@ -39,8 +39,8 @@ langdetect>=1.0.9
 # Twilio integration
 twilio>=8.8.0
 
-# Google Cloud Speech API v2 - Updated for v2 support
-google-cloud-speech>=2.25.0,<3.0.0
+# Google Cloud Speech API v2 - UPDATED FOR V2
+google-cloud-speech>=2.25.0
 google-auth>=2.23.0
 google-api-core>=2.11.0
 google-cloud-core>=2.3.2
