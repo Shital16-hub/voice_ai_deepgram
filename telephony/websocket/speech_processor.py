@@ -1,8 +1,7 @@
 # telephony/websocket/speech_processor.py
 
 """
-Enhanced speech processor with improved error handling and v2 integration.
-Uses latest_long model for better conversation handling.
+Speech processor with reduced failure threshold for faster session restarts.
 """
 import logging
 import re
@@ -11,29 +10,27 @@ import time
 import os
 import json
 from typing import Dict, Any, Optional, List, Callable, Awaitable
-import numpy as np
 
-# Import the updated Google Cloud STT v2
+# Import the fixed Google Cloud STT v2
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 
 logger = logging.getLogger(__name__)
 
 class SpeechProcessor:
     """
-    Enhanced speech processor with robust error handling and v2 integration.
-    Uses latest_long model for better conversation handling.
+    Speech processor with improved session management for Twilio.
     """
     
     def __init__(self, pipeline):
-        """Initialize enhanced speech processor for telephony."""
+        """Initialize speech processor."""
         self.pipeline = pipeline
         
-        logger.info("Initializing Enhanced SpeechProcessor with v2 API and latest_long model")
+        logger.info("Initializing Enhanced SpeechProcessor with v2 API and telephony_short model")
         
         # Get project ID with automatic extraction
         project_id = self._get_project_id()
         
-        # Use Google Cloud STT v2 with optimal settings for conversation
+        # Initialize Google Cloud STT v2 with optimal settings
         self.speech_client = GoogleCloudStreamingSTT(
             language="en-US",
             sample_rate=8000,     # Match Twilio's 8kHz
@@ -42,35 +39,35 @@ class SpeechProcessor:
             interim_results=False, # Keep disabled for accuracy
             project_id=project_id,
             enhanced_model=True,
-            location="global"      # Use global for better model access
+            location="global"
         )
         
-        # Minimal transcription cleaning - let v2 API handle most processing
+        # Minimal transcription cleaning
         self.cleanup_patterns = [
-            # Only remove obvious artifacts
             (re.compile(r'\[.*?\]'), ''),  # [inaudible]
             (re.compile(r'\<.*?\>'), ''),  # <music>
+            (re.compile(r'\s+'), ' '),     # Multiple spaces
         ]
         
-        # Advanced echo detection with temporal tracking
+        # Echo detection
         self.echo_history = []
         self.max_echo_history = 10
-        self.tts_output_timestamps = []  # Track when TTS outputs speech
-        self.echo_detection_window = 3.0  # 3 second window for echo detection
+        self.tts_output_timestamps = []
+        self.echo_detection_window = 3.0
         
-        # Performance statistics
+        # Performance tracking
         self.audio_chunks_received = 0
         self.successful_transcriptions = 0
         self.failed_transcriptions = 0
         self.echo_detections = 0
+        self.consecutive_failures = 0
         
-        # Add session management
+        # REDUCED FAILURE THRESHOLD for faster restarts
         self.session_restart_count = 0
-        self.max_session_restarts = 3
-        self.max_retries = 3
-        self.retry_delay = 0.5
+        self.max_consecutive_failures = 3  # Reduced from 5
+        self.max_session_restarts = 5      # Increased attempts
         
-        logger.info("Enhanced SpeechProcessor initialized with v2 API and latest_long model")
+        logger.info("Enhanced SpeechProcessor initialized with v2 API and telephony_short model")
     
     def _get_project_id(self) -> str:
         """Auto-extract project ID from environment or credentials."""
@@ -98,16 +95,24 @@ class SpeechProcessor:
         )
     
     async def restart_session_if_needed(self) -> None:
-        """Restart STT session if too many failures occur."""
-        if self.failed_transcriptions > 10 and self.session_restart_count < self.max_session_restarts:
-            logger.warning(f"Restarting STT session due to {self.failed_transcriptions} failures")
+        """Restart STT session if too many consecutive failures occur."""
+        if (self.consecutive_failures >= self.max_consecutive_failures and 
+            self.session_restart_count < self.max_session_restarts):
+            
+            logger.warning(f"Restarting STT session due to {self.consecutive_failures} consecutive failures")
             try:
+                # Stop current session
                 await self.speech_client.stop_streaming()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)  # Longer wait for cleanup
+                
+                # Create new session
                 await self.speech_client.start_streaming()
+                
+                # Reset counters
                 self.session_restart_count += 1
-                self.failed_transcriptions = 0
-                logger.info(f"STT session restarted (attempt {self.session_restart_count})")
+                self.consecutive_failures = 0
+                
+                logger.info(f"STT session restarted with new instance (attempt {self.session_restart_count})")
             except Exception as e:
                 logger.error(f"Error restarting STT session: {e}")
     
@@ -117,82 +122,68 @@ class SpeechProcessor:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Optional[str]:
         """
-        Process audio with enhanced error handling and retry logic.
+        Process audio with improved error handling.
+        Expects raw MULAW bytes from the audio manager.
         """
         self.audio_chunks_received += 1
         current_time = time.time()
         
-        # Retry loop for handling transient errors
-        for attempt in range(self.max_retries):
-            try:
-                logger.debug(f"Processing audio chunk #{self.audio_chunks_received}, "
-                            f"attempt {attempt + 1}/{self.max_retries}, "
-                            f"size: {len(audio_data)} bytes")
-                
-                # Process through Google Cloud STT v2
-                result = await self.speech_client.process_audio_chunk(
-                    audio_chunk=audio_data,
-                    callback=callback
-                )
-                
-                if result and result.text and result.is_final:
-                    self.successful_transcriptions += 1
-                    
-                    # Clean up transcription minimally
-                    cleaned_text = self.cleanup_transcription(result.text)
-                    
-                    if cleaned_text:
-                        # Advanced echo detection using temporal analysis
-                        if self._is_echo_temporal(cleaned_text, current_time):
-                            self.echo_detections += 1
-                            logger.info(f"ECHO DETECTED (temporal): '{cleaned_text}'")
-                            return None
-                        
-                        # Traditional echo detection as backup
-                        if self.is_echo_of_system_speech(cleaned_text):
-                            self.echo_detections += 1
-                            logger.info(f"ECHO DETECTED (content): '{cleaned_text}'")
-                            return None
-                        
-                        logger.info(f"Valid transcription: '{cleaned_text}' (confidence: {result.confidence:.2f})")
-                        return cleaned_text
-                    else:
-                        logger.debug("Transcription cleaned to empty string")
-                else:
-                    logger.debug("No final transcription result")
-                    self.failed_transcriptions += 1
-                
-                # If we got here, no need to retry
-                return None
-                
-            except Exception as e:
-                logger.error(f"Error processing audio (attempt {attempt + 1}): {e}")
-                
-                # If it's a cancellation error and we have retries left, try again
-                if "cancelled" in str(e).lower() and attempt < self.max_retries - 1:
-                    logger.info(f"Retrying after cancellation error (attempt {attempt + 1})")
-                    
-                    # Stop and restart streaming session for clean retry
-                    try:
-                        await self.speech_client.stop_streaming()
-                        await asyncio.sleep(self.retry_delay)
-                        await self.speech_client.start_streaming()
-                    except Exception as restart_error:
-                        logger.error(f"Error restarting streaming: {restart_error}")
-                    
-                    continue
-                else:
-                    # Final attempt failed or non-retryable error
-                    self.failed_transcriptions += 1
-                    logger.error(f"Final attempt failed for audio processing: {e}")
-                    return None
+        logger.debug(f"Processing audio chunk #{self.audio_chunks_received}, "
+                    f"size: {len(audio_data)} bytes (MULAW)")
         
-        return None
+        try:
+            # Process through Google Cloud STT v2
+            result = await self.speech_client.process_audio_chunk(
+                audio_chunk=audio_data,  # Pass raw MULAW bytes
+                callback=callback
+            )
+            
+            if result and result.text and result.is_final:
+                # Reset consecutive failures on success
+                self.consecutive_failures = 0
+                self.successful_transcriptions += 1
+                
+                # Clean up transcription minimally
+                cleaned_text = self.cleanup_transcription(result.text)
+                
+                if cleaned_text:
+                    # Advanced echo detection
+                    if self._is_echo_temporal(cleaned_text, current_time):
+                        self.echo_detections += 1
+                        logger.info(f"ECHO DETECTED (temporal): '{cleaned_text}'")
+                        return None
+                    
+                    # Traditional echo detection as backup
+                    if self.is_echo_of_system_speech(cleaned_text):
+                        self.echo_detections += 1
+                        logger.info(f"ECHO DETECTED (content): '{cleaned_text}'")
+                        return None
+                    
+                    logger.info(f"Valid transcription: '{cleaned_text}' (confidence: {result.confidence:.2f})")
+                    return cleaned_text
+                else:
+                    logger.debug("Transcription cleaned to empty string")
+            else:
+                logger.debug("No final transcription result")
+                self.consecutive_failures += 1
+                
+                # Check if we need to restart session
+                await self.restart_session_if_needed()
+                
+            return None
+                
+        except Exception as e:
+            logger.error(f"Error processing audio: {e}")
+            self.failed_transcriptions += 1
+            self.consecutive_failures += 1
+            
+            # Check if we need to restart session
+            await self.restart_session_if_needed()
+            
+            return None
     
     def cleanup_transcription(self, text: str) -> str:
-        """
-        Minimal cleanup - let v2 API handle most processing.
-        """
+        """Minimal cleanup of transcription."""
         if not text:
             return ""
         
@@ -216,9 +207,11 @@ class SpeechProcessor:
         return cleaned
     
     def is_valid_transcription(self, text: str) -> bool:
-        """
-        Validate transcription with minimal requirements.
-        """
+        """Validate transcription with minimal requirements."""
+        if not text:
+            return False
+        
+        # Clean first
         cleaned = self.cleanup_transcription(text)
         
         if not cleaned:
@@ -236,12 +229,7 @@ class SpeechProcessor:
         return True
     
     def register_tts_output(self, output_text: str) -> None:
-        """
-        Register when TTS outputs speech for temporal echo detection.
-        
-        Args:
-            output_text: The text that was converted to speech
-        """
+        """Register TTS output for temporal echo detection."""
         current_time = time.time()
         
         # Add to TTS output history with timestamp
@@ -251,7 +239,7 @@ class SpeechProcessor:
             'words': set(output_text.lower().split())
         })
         
-        # Clean old entries (older than echo detection window)
+        # Clean old entries
         cutoff_time = current_time - self.echo_detection_window
         self.tts_output_timestamps = [
             entry for entry in self.tts_output_timestamps 
@@ -261,16 +249,7 @@ class SpeechProcessor:
         logger.debug(f"Registered TTS output for echo detection: '{output_text[:30]}...'")
     
     def _is_echo_temporal(self, transcription: str, transcription_time: float) -> bool:
-        """
-        Advanced echo detection using temporal analysis.
-        
-        Args:
-            transcription: The transcribed text
-            transcription_time: When the transcription was received
-            
-        Returns:
-            True if this is likely an echo
-        """
+        """Advanced echo detection using temporal analysis."""
         if not self.tts_output_timestamps:
             return False
         
@@ -301,9 +280,7 @@ class SpeechProcessor:
         return False
     
     def is_echo_of_system_speech(self, transcription: str) -> bool:
-        """
-        Traditional echo detection using string matching.
-        """
+        """Traditional echo detection using string matching."""
         if not transcription or not self.echo_history:
             return False
         
@@ -341,7 +318,7 @@ class SpeechProcessor:
         return False
     
     def add_to_echo_history(self, response: str) -> None:
-        """Add response to traditional echo history."""
+        """Add response to echo history."""
         if response and len(response) > 5:
             self.echo_history.append(response)
             if len(self.echo_history) > self.max_echo_history:
@@ -362,6 +339,7 @@ class SpeechProcessor:
         # Log comprehensive statistics
         total_attempts = self.audio_chunks_received
         success_rate = (self.successful_transcriptions / max(total_attempts, 1)) * 100
+        failure_rate = (self.failed_transcriptions / max(total_attempts, 1)) * 100
         echo_rate = (self.echo_detections / max(self.successful_transcriptions + self.echo_detections, 1)) * 100
         
         logger.info("Speech session ended - Enhanced Statistics:")
@@ -369,11 +347,13 @@ class SpeechProcessor:
         logger.info(f"Successful transcriptions: {self.successful_transcriptions}")
         logger.info(f"Failed transcriptions: {self.failed_transcriptions}")
         logger.info(f"Echo detections: {self.echo_detections}")
+        logger.info(f"Session restarts: {self.session_restart_count}")
         logger.info(f"Success rate: {success_rate:.1f}%")
+        logger.info(f"Failure rate: {failure_rate:.1f}%")
         logger.info(f"Echo detection rate: {echo_rate:.1f}%")
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get comprehensive statistics including echo detection."""
+        """Get comprehensive statistics."""
         total_attempts = max(self.audio_chunks_received, 1)
         total_processed = self.successful_transcriptions + self.echo_detections
         
@@ -382,10 +362,12 @@ class SpeechProcessor:
             "successful_transcriptions": self.successful_transcriptions,
             "failed_transcriptions": self.failed_transcriptions,
             "echo_detections": self.echo_detections,
+            "consecutive_failures": self.consecutive_failures,
+            "session_restart_count": self.session_restart_count,
             "echo_history_size": len(self.echo_history),
             "tts_tracking_entries": len(self.tts_output_timestamps),
             "success_rate": round((self.successful_transcriptions / total_attempts) * 100, 2),
+            "failure_rate": round((self.failed_transcriptions / total_attempts) * 100, 2),
             "echo_detection_rate": round((self.echo_detections / max(total_processed, 1)) * 100, 2),
             "stt_stats": self.speech_client.get_stats(),
-            "session_restart_count": self.session_restart_count
         }

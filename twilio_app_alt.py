@@ -29,6 +29,10 @@ from voice_ai_agent import VoiceAIAgent
 from integration.pipeline import VoiceAIAgentPipeline
 from text_to_speech.google_cloud_tts import GoogleCloudTTS
 
+import logging
+logging.getLogger('speech_to_text').setLevel(logging.DEBUG)
+logging.getLogger('telephony.websocket.speech_processor').setLevel(logging.DEBUG)
+
 # Load environment variables
 load_dotenv()
 

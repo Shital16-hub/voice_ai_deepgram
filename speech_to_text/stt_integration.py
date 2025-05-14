@@ -139,20 +139,16 @@ class STTIntegration:
         start_time = time.time()
         
         try:
-            # Handle different input types for MULAW audio
-            # The audio should already be MULAW encoded by the telephony layer
+            
             if isinstance(audio_data, list):
-                # Convert list to numpy array first
-                audio_data = np.array(audio_data, dtype=np.uint8)
+                # Convert list to bytes (should already be MULAW)
+                audio_data = bytes(audio_data) 
             
             # For numpy arrays, ensure they're the right type for MULAW
             elif isinstance(audio_data, np.ndarray):
-                # If it's float32, it should have been converted to MULAW already
-                # by the telephony WebSocket handler
-                if audio_data.dtype == np.float32:
-                    # The float32 array should actually contain MULAW byte values
-                    # Convert to uint8 for proper handling
-                    audio_data = audio_data.astype(np.uint8)
+                audio_data = audio_data.tobytes()
+            
+                
             
             # bytes are passed through as-is (should be MULAW encoded)
             

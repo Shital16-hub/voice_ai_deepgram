@@ -120,6 +120,7 @@ class MessageRouter:
         """Process audio with comprehensive debugging and session management."""
         try:
             logger.info(f"Starting audio processing: {len(audio_data)} bytes")
+            transcription = await self.ws_handler.speech_processor.process_audio(audio_data)
             
             # Check for session restart if needed
             if hasattr(self.ws_handler.speech_processor, 'restart_session_if_needed'):

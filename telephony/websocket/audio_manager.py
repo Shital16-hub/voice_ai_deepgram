@@ -1,8 +1,7 @@
 # telephony/websocket/audio_manager.py
 
 """
-Optimized audio manager with minimal processing for better speech recognition.
-Following Google Cloud streaming best practices.
+Fixed audio manager that properly handles MULAW audio for Google Cloud STT v2.
 """
 import base64
 import asyncio
@@ -10,166 +9,123 @@ import logging
 import numpy as np
 from typing import Optional, Dict, Any
 import time
-import audioop
-
-from telephony.audio_processor import AudioProcessor, MulawBufferProcessor
 
 logger = logging.getLogger(__name__)
 
 class AudioManager:
     """
-    Optimized audio manager that preserves audio quality for better recognition.
-    Follows Google Cloud 25KB chunk limit recommendation.
+    Audio manager that properly handles MULAW audio without unnecessary conversions.
     """
     
     def __init__(self):
-        """Initialize audio manager with minimal processing."""
-        logger.info("Initializing AudioManager (telephony-optimized)")
+        """Initialize audio manager for MULAW processing."""
+        logger.info("Initializing AudioManager for MULAW processing")
         
-        self.audio_processor = AudioProcessor()
-        # Smaller buffer for lower latency
-        self.mulaw_processor = MulawBufferProcessor(min_chunk_size=3200)  # 400ms at 8kHz
         self.input_buffer = bytearray()
         self.is_speaking = False
         self.last_response_time = time.time()
         
-        # Optimized buffer settings for lower latency
-        self.min_processing_size = 3200      # 400ms at 8kHz (reduced from 6400)
-        self.max_buffer_size = 16000         # 2 seconds max (reduced from 40000)
-        self.chunk_accumulation_time = 0.4   # Accumulate for 400ms (reduced from 0.8)
-        self.last_processing_time = 0
+        # Optimized settings for 8kHz MULAW
+        self.min_chunk_size = 1600      # 200ms at 8kHz
+        self.max_buffer_size = 8000     # 1 second max
+        self.max_chunk_for_stt = 20480  # 20KB limit for Google Cloud STT
         
-        # Quality tracking
+        # Statistics
         self.media_events_received = 0
         self.audio_chunks_sent = 0
         self.total_audio_bytes = 0
         
-        # Speech detection (minimal)
-        self.speech_threshold = 100.0
+        # Processing control
+        self.last_processing_time = 0
+        self.min_processing_interval = 0.1  # 100ms minimum between chunks
         
-        logger.info(f"AudioManager initialized - min_size={self.min_processing_size}, max_size={self.max_buffer_size}")
+        logger.info(f"AudioManager initialized - min_chunk={self.min_chunk_size}, max={self.max_buffer_size}")
     
-    def _analyze_audio_quality(self, audio_data: bytes) -> Dict[str, float]:
+    def _analyze_mulaw_quality(self, mulaw_data: bytes) -> Dict[str, Any]:
         """
-        Basic audio quality analysis without heavy processing.
+        Analyze MULAW data quality without conversion.
         """
-        if len(audio_data) < 160:  # Need at least 20ms
-            return {}
+        if len(mulaw_data) < 160:  # Less than 20ms
+            return {"valid": False, "reason": "too_short"}
         
-        try:
-            # Simple energy calculation
-            # For mulaw, we can estimate energy without full conversion
-            sample_mean = np.mean(list(audio_data))
-            sample_std = np.std(list(audio_data))
-            
-            # Estimate if it's likely speech
-            # Mulaw has non-linear encoding, so speech typically has more variation
-            likely_speech = sample_std > 10 and 50 < sample_mean < 200
-            
-            return {
-                'mean_value': float(sample_mean),
-                'std_value': float(sample_std),
-                'likely_speech': likely_speech,
-                'size': len(audio_data)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error analyzing audio quality: {e}")
-            return {}
-    
-    def _should_process_buffer(self) -> bool:
-        """Determine if buffer should be processed - more aggressive for lower latency."""
-        current_time = time.time()
+        # Simple MULAW analysis
+        sample = list(mulaw_data[:min(1000, len(mulaw_data))])
         
-        # Check basic requirements - reduced minimum size
-        if len(self.input_buffer) < 1600:  # 200ms at 8kHz (reduced from previous)
-            return False
+        # Check for silence (all zeros or very low values)
+        non_zero_count = sum(1 for x in sample if x != 0)
+        if non_zero_count < len(sample) * 0.1:  # Less than 10% non-zero
+            return {"valid": False, "reason": "mostly_silence"}
         
-        # Don't process if system is speaking
-        if self.is_speaking:
-            return False
+        # Check for reasonable distribution
+        mean_val = np.mean(sample)
+        std_val = np.std(sample)
         
-        # More aggressive time-based processing
-        time_since_last = current_time - self.last_processing_time
-        if time_since_last < 0.2:  # Reduced from 0.8s to 0.2s
-            return False
+        # MULAW should have reasonable variation
+        is_valid = std_val > 5 and 20 < mean_val < 235
         
-        # Analyze recent audio for speech activity
-        recent_audio = bytes(self.input_buffer[-1600:])  # Last 200ms
-        metrics = self._analyze_audio_quality(recent_audio)
-        
-        # Process if likely speech or buffer is getting full
-        if metrics.get('likely_speech', False):
-            logger.debug("Processing due to speech detection")
-            return True
-        
-        if len(self.input_buffer) >= 8000:  # 1 second of audio
-            logger.debug("Processing due to buffer size")
-            return True
-        
-        # Force processing after shorter time for better responsiveness
-        if time_since_last >= 1.0 and len(self.input_buffer) >= 1600:
-            logger.debug("Processing due to timeout")
-            return True
-        
-        return False
+        return {
+            "valid": is_valid,
+            "mean": mean_val,
+            "std": std_val,
+            "size": len(mulaw_data),
+            "non_zero_ratio": non_zero_count / len(sample)
+        }
     
     async def process_media(self, data: Dict[str, Any]) -> Optional[bytes]:
-        """Process incoming Twilio media following Google Cloud streaming best practices."""
+        """Process Twilio media data - keep MULAW as raw bytes."""
         self.media_events_received += 1
         
         media = data.get('media', {})
         payload = media.get('payload')
         
         if not payload:
-            logger.warning(f"Media event #{self.media_events_received} has no payload")
+            logger.debug(f"Media event #{self.media_events_received}: No payload")
             return None
         
         try:
-            # Decode audio data
-            audio_data = base64.b64decode(payload)
-            audio_size = len(audio_data)
-            self.total_audio_bytes += audio_size
+            # Decode base64 to get raw MULAW bytes
+            mulaw_data = base64.b64decode(payload)
+            self.total_audio_bytes += len(mulaw_data)
             
             # Skip if system is speaking
             if self.is_speaking:
                 logger.debug("Skipping audio - system is speaking")
                 return None
             
-            # Process with buffer - use smaller chunks for better responsiveness
-            processed_data = self.mulaw_processor.process(audio_data)
-            
-            if processed_data is None:
+            # Check minimum time interval
+            current_time = time.time()
+            if current_time - self.last_processing_time < self.min_processing_interval:
+                # Add to buffer for later processing
+                self.input_buffer.extend(mulaw_data)
                 return None
             
-            # Add to input buffer
-            self.input_buffer.extend(processed_data)
+            # Add to buffer
+            self.input_buffer.extend(mulaw_data)
             
-            # Check if ready for processing - use smaller buffer size
-            if self._should_process_buffer():
-                # Respect Google Cloud's 25KB limit per request
-                MAX_CHUNK_SIZE = 20480  # 20KB to stay safe
+            # Check if we have enough data to process
+            if len(self.input_buffer) >= self.min_chunk_size:
+                # Respect Google Cloud STT 25KB limit
+                chunk_size = min(len(self.input_buffer), self.max_chunk_for_stt)
                 
-                # Get chunk size, respecting the limit
-                chunk_size = min(len(self.input_buffer), MAX_CHUNK_SIZE)
-                result = bytes(self.input_buffer[:chunk_size])
+                # Get chunk as raw MULAW bytes
+                audio_chunk = bytes(self.input_buffer[:chunk_size])
                 
                 # Remove processed data from buffer
                 self.input_buffer = self.input_buffer[chunk_size:]
-                self.last_processing_time = time.time()
-                self.audio_chunks_sent += 1
                 
-                logger.info(f"Sending audio chunk #{self.audio_chunks_sent}: {len(result)} bytes (mulaw)")
+                # Analyze quality
+                quality = self._analyze_mulaw_quality(audio_chunk)
                 
-                # Final quality check
-                final_metrics = self._analyze_audio_quality(result)
-                if final_metrics:
-                    logger.info(f"Chunk quality: std={final_metrics.get('std_value', 0):.1f}, "
-                               f"likely_speech={final_metrics.get('likely_speech', False)}")
-                
-                return result
-            else:
-                logger.debug(f"Buffer not ready: size={len(self.input_buffer)}/{self.min_processing_size}")
+                if quality["valid"]:
+                    self.last_processing_time = current_time
+                    self.audio_chunks_sent += 1
+                    
+                    logger.info(f"Sending MULAW chunk #{self.audio_chunks_sent}: {len(audio_chunk)} bytes "
+                               f"(std={quality['std']:.1f}, mean={quality['mean']:.1f})")
+                    
+                    return audio_chunk
+                else:
+                    logger.debug(f"Skipping invalid MULAW chunk: {quality['reason']}")
             
             return None
             
@@ -178,7 +134,7 @@ class AudioManager:
             return None
     
     def set_speaking_state(self, speaking: bool) -> None:
-        """Set speaking state with buffer management."""
+        """Set speaking state and manage buffer."""
         if self.is_speaking != speaking:
             logger.info(f"Speaking state changed: {self.is_speaking} -> {speaking}")
             self.is_speaking = speaking
@@ -186,33 +142,31 @@ class AudioManager:
             if speaking:
                 # Clear buffer when starting to speak
                 buffer_size = len(self.input_buffer)
-                self.clear_buffer()
+                self.input_buffer.clear()
                 logger.info(f"Cleared {buffer_size} bytes from buffer (started speaking)")
     
     def clear_buffer(self) -> None:
-        """Clear buffer with logging."""
-        if len(self.input_buffer) > 0:
-            logger.debug(f"Clearing audio buffer: {len(self.input_buffer)} bytes")
-        self.input_buffer.clear()
+        """Clear the audio buffer."""
+        buffer_size = len(self.input_buffer)
+        if buffer_size > 0:
+            logger.debug(f"Clearing audio buffer: {buffer_size} bytes")
+            self.input_buffer.clear()
     
     def update_response_time(self) -> None:
-        """Update response time."""
+        """Update the last response time."""
         self.last_response_time = time.time()
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get comprehensive audio statistics."""
+        """Get audio processing statistics."""
         current_time = time.time()
         success_rate = (self.audio_chunks_sent / max(self.media_events_received, 1)) * 100
-        avg_chunk_size = self.total_audio_bytes / max(self.media_events_received, 1)
         
         return {
             "media_events_received": self.media_events_received,
             "audio_chunks_sent": self.audio_chunks_sent,
             "total_audio_bytes": self.total_audio_bytes,
-            "avg_chunk_size_bytes": round(avg_chunk_size, 2),
             "current_buffer_size": len(self.input_buffer),
             "is_speaking": self.is_speaking,
-            "time_since_response": current_time - self.last_response_time,
             "success_rate": round(success_rate, 2),
-            "compression_ratio": round(self.audio_chunks_sent / max(self.media_events_received, 1), 3)
+            "time_since_response": current_time - self.last_response_time
         }
