@@ -2,6 +2,7 @@
 
 """
 Optimized audio manager with minimal processing for better speech recognition.
+Following Google Cloud streaming best practices.
 """
 import base64
 import asyncio
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 class AudioManager:
     """
     Optimized audio manager that preserves audio quality for better recognition.
+    Follows Google Cloud 25KB chunk limit recommendation.
     """
     
     def __init__(self):
@@ -25,16 +27,16 @@ class AudioManager:
         logger.info("Initializing AudioManager (telephony-optimized)")
         
         self.audio_processor = AudioProcessor()
-        # Larger buffer for better accumulation
-        self.mulaw_processor = MulawBufferProcessor(min_chunk_size=6400)  # 800ms at 8kHz
+        # Smaller buffer for lower latency
+        self.mulaw_processor = MulawBufferProcessor(min_chunk_size=3200)  # 400ms at 8kHz
         self.input_buffer = bytearray()
         self.is_speaking = False
         self.last_response_time = time.time()
         
-        # Optimized buffer settings
-        self.min_processing_size = 6400   # 800ms at 8kHz
-        self.max_buffer_size = 40000      # 5 seconds max
-        self.chunk_accumulation_time = 0.8  # Accumulate for 800ms
+        # Optimized buffer settings for lower latency
+        self.min_processing_size = 3200      # 400ms at 8kHz (reduced from 6400)
+        self.max_buffer_size = 16000         # 2 seconds max (reduced from 40000)
+        self.chunk_accumulation_time = 0.4   # Accumulate for 400ms (reduced from 0.8)
         self.last_processing_time = 0
         
         # Quality tracking
@@ -43,7 +45,7 @@ class AudioManager:
         self.total_audio_bytes = 0
         
         # Speech detection (minimal)
-        self.speech_threshold = 100.0  # Energy threshold
+        self.speech_threshold = 100.0
         
         logger.info(f"AudioManager initialized - min_size={self.min_processing_size}, max_size={self.max_buffer_size}")
     
@@ -76,26 +78,24 @@ class AudioManager:
             return {}
     
     def _should_process_buffer(self) -> bool:
-        """
-        Determine if buffer should be processed.
-        """
+        """Determine if buffer should be processed - more aggressive for lower latency."""
         current_time = time.time()
         
-        # Check basic requirements
-        if len(self.input_buffer) < self.min_processing_size:
+        # Check basic requirements - reduced minimum size
+        if len(self.input_buffer) < 1600:  # 200ms at 8kHz (reduced from previous)
             return False
         
         # Don't process if system is speaking
         if self.is_speaking:
             return False
         
-        # Time-based processing
+        # More aggressive time-based processing
         time_since_last = current_time - self.last_processing_time
-        if time_since_last < self.chunk_accumulation_time:
+        if time_since_last < 0.2:  # Reduced from 0.8s to 0.2s
             return False
         
         # Analyze recent audio for speech activity
-        recent_audio = bytes(self.input_buffer[-3200:])  # Last 400ms
+        recent_audio = bytes(self.input_buffer[-1600:])  # Last 200ms
         metrics = self._analyze_audio_quality(recent_audio)
         
         # Process if likely speech or buffer is getting full
@@ -103,19 +103,19 @@ class AudioManager:
             logger.debug("Processing due to speech detection")
             return True
         
-        if len(self.input_buffer) >= self.max_buffer_size * 0.8:
+        if len(self.input_buffer) >= 8000:  # 1 second of audio
             logger.debug("Processing due to buffer size")
             return True
         
-        # Force processing after reasonable time
-        if time_since_last >= 2.0 and len(self.input_buffer) >= self.min_processing_size:
+        # Force processing after shorter time for better responsiveness
+        if time_since_last >= 1.0 and len(self.input_buffer) >= 1600:
             logger.debug("Processing due to timeout")
             return True
         
         return False
     
     async def process_media(self, data: Dict[str, Any]) -> Optional[bytes]:
-        """Process incoming Twilio media with minimal modification."""
+        """Process incoming Twilio media following Google Cloud streaming best practices."""
         self.media_events_received += 1
         
         media = data.get('media', {})
@@ -126,61 +126,40 @@ class AudioManager:
             return None
         
         try:
-            # Decode audio data (keep as mulaw)
+            # Decode audio data
             audio_data = base64.b64decode(payload)
             audio_size = len(audio_data)
             self.total_audio_bytes += audio_size
-            
-            logger.debug(f"Media event #{self.media_events_received}: {audio_size} bytes")
-            
-            # Validate audio data
-            if audio_size < 160:  # Less than 20ms
-                logger.debug("Skipping tiny audio chunk")
-                return None
             
             # Skip if system is speaking
             if self.is_speaking:
                 logger.debug("Skipping audio - system is speaking")
                 return None
             
-            # Process with buffer
+            # Process with buffer - use smaller chunks for better responsiveness
             processed_data = self.mulaw_processor.process(audio_data)
             
             if processed_data is None:
-                logger.debug("Buffer not ready yet")
                 return None
             
-            # Add to input buffer (preserve original mulaw data)
-            old_buffer_size = len(self.input_buffer)
+            # Add to input buffer
             self.input_buffer.extend(processed_data)
             
-            logger.debug(f"Buffer size: {old_buffer_size} -> {len(self.input_buffer)} bytes")
-            
-            # Basic audio analysis
-            metrics = self._analyze_audio_quality(audio_data)
-            if metrics:
-                logger.debug(f"Audio quality: mean={metrics.get('mean_value', 0):.1f}, "
-                           f"std={metrics.get('std_value', 0):.1f}, "
-                           f"speech={metrics.get('likely_speech', False)}")
-            
-            # Trim buffer if too large
-            if len(self.input_buffer) > self.max_buffer_size:
-                excess = len(self.input_buffer) - int(self.max_buffer_size * 0.9)
-                self.input_buffer = self.input_buffer[excess:]
-                logger.debug(f"Trimmed buffer by {excess} bytes")
-            
-            # Check if ready for processing
+            # Check if ready for processing - use smaller buffer size
             if self._should_process_buffer():
-                # Return the accumulated MULAW audio
-                result = bytes(self.input_buffer)
-                buffer_size = len(result)
+                # Respect Google Cloud's 25KB limit per request
+                MAX_CHUNK_SIZE = 20480  # 20KB to stay safe
                 
-                # Clear buffer
-                self.clear_buffer()
+                # Get chunk size, respecting the limit
+                chunk_size = min(len(self.input_buffer), MAX_CHUNK_SIZE)
+                result = bytes(self.input_buffer[:chunk_size])
+                
+                # Remove processed data from buffer
+                self.input_buffer = self.input_buffer[chunk_size:]
                 self.last_processing_time = time.time()
                 self.audio_chunks_sent += 1
                 
-                logger.info(f"Sending audio chunk #{self.audio_chunks_sent}: {buffer_size} bytes (mulaw)")
+                logger.info(f"Sending audio chunk #{self.audio_chunks_sent}: {len(result)} bytes (mulaw)")
                 
                 # Final quality check
                 final_metrics = self._analyze_audio_quality(result)

@@ -1,5 +1,6 @@
 """
 Enhanced Speech-to-Text integration module optimized for telephony with v2 API.
+Uses latest_long model for better conversation handling.
 """
 import logging
 import time
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 class STTIntegration:
     """
     Enhanced Speech-to-Text integration optimized for telephony with minimal processing.
-    Uses Google Cloud Speech-to-Text v2 API.
+    Uses Google Cloud Speech-to-Text v2 API with latest_long model.
     """
     
     def __init__(
@@ -71,16 +72,17 @@ class STTIntegration:
             # Create a new Google Cloud v2 streaming client with optimal settings
             self.speech_recognizer = GoogleCloudStreamingSTT(
                 language=self.language,
-                sample_rate=8000,  # Match Twilio
-                encoding="MULAW",   # Match Twilio
+                sample_rate=8000,      # Match Twilio
+                encoding="MULAW",      # Keep MULAW for compatibility
                 channels=1,
-                interim_results=False,  # Disable for better accuracy
+                interim_results=False, # Disabled for better accuracy
                 project_id=final_project_id,
-                enhanced_model=True
+                enhanced_model=True,
+                location="global"      # Use global for better model access
             )
             
             self.initialized = True
-            logger.info(f"Initialized STT with Google Cloud v2 API (telephony-optimized)")
+            logger.info(f"Initialized STT with Google Cloud v2 API (conversation-optimized)")
         except Exception as e:
             logger.error(f"Error initializing STT: {e}")
             raise
@@ -195,7 +197,8 @@ class STTIntegration:
                 "processing_time": time.time() - start_time,
                 "is_final": True,
                 "is_valid": self.is_valid_transcription(cleaned_text),
-                "api_version": "v2"
+                "api_version": "v2",
+                "model": "latest_long"
             }
             
         except Exception as e:
@@ -254,5 +257,5 @@ class STTIntegration:
     
     def optimize_for_telephony(self):
         """Already optimized for telephony with v2 API - this is a no-op."""
-        logger.info("STT integration already optimized for telephony with v2 API")
+        logger.info("STT integration already optimized for telephony with v2 API and latest_long model")
         pass

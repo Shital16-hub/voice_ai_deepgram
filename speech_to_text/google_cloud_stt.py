@@ -2,7 +2,7 @@
 
 """
 Google Cloud Speech-to-Text v2 implementation following official documentation.
-Proper implementation for telephony streaming.
+Optimized implementation for telephony streaming with latest_long model.
 """
 import logging
 import asyncio
@@ -38,8 +38,8 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Google Cloud Speech-to-Text v2 client properly implemented for telephony.
-    Following official v2 documentation pattern.
+    Google Cloud Speech-to-Text v2 client optimized following official documentation.
+    Uses latest_long model for better conversation handling.
     """
     
     def __init__(
@@ -54,7 +54,7 @@ class GoogleCloudStreamingSTT:
         enhanced_model: bool = True,
         recognizer_id: str = "_"
     ):
-        """Initialize Google Cloud STT v2 for telephony."""
+        """Initialize Google Cloud STT v2 following documentation patterns."""
         self.language = language
         self.sample_rate = sample_rate
         self.encoding = encoding
@@ -129,41 +129,27 @@ class GoogleCloudStreamingSTT:
         logger.info(f"Initialized v2 client for location: {self.location}")
     
     def _get_recognition_config(self) -> speech_v2.RecognitionConfig:
-        """Get optimized recognition configuration for telephony."""
-        # Create explicit decoding config for the audio format
-        if self.encoding == "MULAW":
-            encoding_enum = speech_v2.ExplicitDecodingConfig.AudioEncoding.MULAW
-        elif self.encoding == "LINEAR16":
-            encoding_enum = speech_v2.ExplicitDecodingConfig.AudioEncoding.LINEAR16
-        else:
-            encoding_enum = speech_v2.ExplicitDecodingConfig.AudioEncoding.MULAW
+        """Get recognition configuration following Google Cloud documentation pattern."""
         
-        decoding_config = speech_v2.ExplicitDecodingConfig(
-            encoding=encoding_enum,
-            sample_rate_hertz=self.sample_rate,
-            audio_channel_count=self.channels,
-        )
+        # Use AutoDetectDecodingConfig as shown in the document
+        # This is more flexible than ExplicitDecodingConfig
+        auto_config = speech_v2.AutoDetectDecodingConfig()
         
         # Create advanced recognition features
         features = speech_v2.RecognitionFeatures(
             enable_automatic_punctuation=True,
             enable_word_time_offsets=True,
             enable_word_confidence=True,
-            enable_spoken_punctuation=False,
-            enable_spoken_emojis=False,
-            max_alternatives=1,
             profanity_filter=False,
+            max_alternatives=1,
         )
         
-        # Select optimal model for telephony
-        if self.enhanced_model:
-            model = "telephony_short"  # Best for short telephony utterances
-        else:
-            model = "latest_short"
+        # Use the latest_long model for better conversation handling
+        model = "latest_long"  # Better than telephony_short for conversations
         
         # Create recognition config
         config = speech_v2.RecognitionConfig(
-            explicit_decoding_config=decoding_config,
+            auto_decoding_config=auto_config,  # Use auto-detection like in document
             language_codes=[self.language],
             model=model,
             features=features,
@@ -172,12 +158,13 @@ class GoogleCloudStreamingSTT:
         return config
     
     def _get_streaming_config(self) -> speech_v2.StreamingRecognitionConfig:
-        """Get streaming configuration optimized for real-time telephony."""
+        """Get streaming configuration optimized per Google documentation."""
+        
+        # Create streaming config following the document pattern
         config = speech_v2.StreamingRecognitionConfig(
             config=self._get_recognition_config(),
             streaming_features=speech_v2.StreamingRecognitionFeatures(
                 interim_results=self.interim_results,
-                enable_voice_activity_events=True,
                 voice_activity_timeout=speech_v2.StreamingRecognitionFeatures.VoiceActivityTimeout(
                     speech_start_timeout=Duration(seconds=5),
                     speech_end_timeout=Duration(seconds=1),
@@ -187,15 +174,15 @@ class GoogleCloudStreamingSTT:
         return config
     
     def _generate_requests(self):
-        """Generate streaming recognition requests."""
-        # First request - configuration
+        """Generate streaming recognition requests based on Google Cloud documentation."""
+        # First request - configuration only
         config_request = speech_v2.StreamingRecognizeRequest(
             recognizer=self.recognizer_path,
             streaming_config=self._get_streaming_config(),
         )
         yield config_request
         
-        # Subsequent requests - audio data
+        # Subsequent requests - audio data only
         while not self._stop_event.is_set():
             try:
                 # Get audio chunk with timeout
@@ -204,14 +191,13 @@ class GoogleCloudStreamingSTT:
                 if audio_chunk is None:  # Sentinel to stop
                     break
                 
-                # Create audio request
+                # Create audio request - just the audio bytes
                 audio_request = speech_v2.StreamingRecognizeRequest(audio=audio_chunk)
                 yield audio_request
                 
                 self._stream_queue.task_done()
                 
             except queue.Empty:
-                # No audio available, continue
                 continue
             except Exception as e:
                 logger.error(f"Error generating request: {e}")
@@ -295,7 +281,7 @@ class GoogleCloudStreamingSTT:
             )
             self._stream_thread.start()
             
-            logger.info("Started v2 streaming session")
+            logger.info("Started v2 streaming session with latest_long model")
             
         except Exception as e:
             logger.error(f"Error starting streaming: {e}")
@@ -307,7 +293,7 @@ class GoogleCloudStreamingSTT:
         audio_chunk: Union[bytes, np.ndarray],
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
-        """Process audio chunk for streaming recognition."""
+        """Process audio chunk following Google Cloud best practices."""
         if not self.is_streaming:
             await self.start_streaming()
         
@@ -316,42 +302,45 @@ class GoogleCloudStreamingSTT:
         # Convert numpy array to bytes if needed
         if isinstance(audio_chunk, np.ndarray):
             if audio_chunk.dtype == np.float32:
-                # Convert float32 to MULAW for telephony
-                import audioop
-                # First convert to 16-bit PCM
+                # Convert to 16-bit PCM first, then to MULAW
                 pcm_data = (audio_chunk * 32767).astype(np.int16).tobytes()
+                # Convert PCM to MULAW for telephony compatibility
+                import audioop
                 audio_bytes = audioop.lin2ulaw(pcm_data, 2)
             else:
                 audio_bytes = audio_chunk.tobytes()
         else:
             audio_bytes = audio_chunk
         
-        # Skip tiny chunks
-        if len(audio_bytes) < 160:  # Less than 20ms at 8kHz
-            return None
+        # Follow the document's chunk size recommendation
+        # Document mentions 25KB limit - ensure we're well under that
+        MAX_CHUNK_SIZE = 20480  # 20KB to stay safe
         
-        # Send to streaming API
-        try:
-            self._stream_queue.put(audio_bytes, block=False)
-            logger.debug(f"Queued {len(audio_bytes)} bytes for streaming")
-        except queue.Full:
-            logger.warning("Stream queue is full, dropping audio chunk")
-            # Try to clear an old item
+        if len(audio_bytes) > MAX_CHUNK_SIZE:
+            logger.warning(f"Audio chunk too large: {len(audio_bytes)} bytes, splitting")
+            # Split large chunks
+            for i in range(0, len(audio_bytes), MAX_CHUNK_SIZE):
+                chunk = audio_bytes[i:i+MAX_CHUNK_SIZE]
+                if chunk:
+                    try:
+                        self._stream_queue.put(chunk, block=False)
+                    except queue.Full:
+                        logger.warning("Stream queue full, dropping chunk")
+        else:
+            # Send normal-sized chunk
             try:
-                self._stream_queue.get_nowait()
-                self._stream_queue.task_done()
                 self._stream_queue.put(audio_bytes, block=False)
-            except:
-                pass
+                logger.debug(f"Queued {len(audio_bytes)} bytes for streaming")
+            except queue.Full:
+                logger.warning("Stream queue is full, dropping audio chunk")
         
-        # Check for any results
+        # Process any results
         final_result = None
         while not self._result_queue.empty():
             try:
                 result = self._result_queue.get_nowait()
                 self._result_queue.task_done()
                 
-                # Call callback if provided
                 if callback:
                     await callback(result)
                 
@@ -440,7 +429,7 @@ class GoogleCloudStreamingSTT:
             "success_rate": round(success_rate, 2),
             "is_streaming": self.is_streaming,
             "language_code": self.language,
-            "model": "telephony_short" if self.enhanced_model else "latest_short",
+            "model": "latest_long",
             "api_version": "v2",
             "encoding": self.encoding,
             "sample_rate": self.sample_rate,

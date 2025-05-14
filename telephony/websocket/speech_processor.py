@@ -2,6 +2,7 @@
 
 """
 Enhanced speech processor with improved error handling and v2 integration.
+Uses latest_long model for better conversation handling.
 """
 import logging
 import re
@@ -12,7 +13,7 @@ import json
 from typing import Dict, Any, Optional, List, Callable, Awaitable
 import numpy as np
 
-# Import the fixed Google Cloud STT v2
+# Import the updated Google Cloud STT v2
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 
 logger = logging.getLogger(__name__)
@@ -20,27 +21,28 @@ logger = logging.getLogger(__name__)
 class SpeechProcessor:
     """
     Enhanced speech processor with robust error handling and v2 integration.
+    Uses latest_long model for better conversation handling.
     """
     
     def __init__(self, pipeline):
         """Initialize enhanced speech processor for telephony."""
         self.pipeline = pipeline
         
-        logger.info("Initializing Enhanced SpeechProcessor with v2 API")
+        logger.info("Initializing Enhanced SpeechProcessor with v2 API and latest_long model")
         
         # Get project ID with automatic extraction
         project_id = self._get_project_id()
         
-        # Use Google Cloud STT v2 with optimal telephony settings
+        # Use Google Cloud STT v2 with optimal settings for conversation
         self.speech_client = GoogleCloudStreamingSTT(
             language="en-US",
-            sample_rate=8000,  # Match Twilio's 8kHz
-            encoding="MULAW",   # Direct mulaw support
+            sample_rate=8000,     # Match Twilio's 8kHz
+            encoding="MULAW",     # Keep MULAW for Twilio compatibility
             channels=1,
-            interim_results=False,  # Disable for better accuracy
+            interim_results=False, # Keep disabled for accuracy
             project_id=project_id,
-            enhanced_model=True,    # Use enhanced telephony model
-            location="global"       # Can be changed to specific region
+            enhanced_model=True,
+            location="global"      # Use global for better model access
         )
         
         # Minimal transcription cleaning - let v2 API handle most processing
@@ -62,11 +64,13 @@ class SpeechProcessor:
         self.failed_transcriptions = 0
         self.echo_detections = 0
         
-        # Add retry mechanism for failed STT calls
+        # Add session management
+        self.session_restart_count = 0
+        self.max_session_restarts = 3
         self.max_retries = 3
         self.retry_delay = 0.5
         
-        logger.info("Enhanced SpeechProcessor initialized with v2 API and error handling")
+        logger.info("Enhanced SpeechProcessor initialized with v2 API and latest_long model")
     
     def _get_project_id(self) -> str:
         """Auto-extract project ID from environment or credentials."""
@@ -92,6 +96,20 @@ class SpeechProcessor:
             "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
             "or ensure your credentials file contains a project_id field."
         )
+    
+    async def restart_session_if_needed(self) -> None:
+        """Restart STT session if too many failures occur."""
+        if self.failed_transcriptions > 10 and self.session_restart_count < self.max_session_restarts:
+            logger.warning(f"Restarting STT session due to {self.failed_transcriptions} failures")
+            try:
+                await self.speech_client.stop_streaming()
+                await asyncio.sleep(0.5)
+                await self.speech_client.start_streaming()
+                self.session_restart_count += 1
+                self.failed_transcriptions = 0
+                logger.info(f"STT session restarted (attempt {self.session_restart_count})")
+            except Exception as e:
+                logger.error(f"Error restarting STT session: {e}")
     
     async def process_audio(
         self,
@@ -368,5 +386,6 @@ class SpeechProcessor:
             "tts_tracking_entries": len(self.tts_output_timestamps),
             "success_rate": round((self.successful_transcriptions / total_attempts) * 100, 2),
             "echo_detection_rate": round((self.echo_detections / max(total_processed, 1)) * 100, 2),
-            "stt_stats": self.speech_client.get_stats()
+            "stt_stats": self.speech_client.get_stats(),
+            "session_restart_count": self.session_restart_count
         }
