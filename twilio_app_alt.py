@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Updated Twilio application with Google Cloud TTS integration.
+Optimized Twilio application with enhanced barge-in detection.
 """
 import os
 import sys
@@ -27,7 +27,7 @@ from telephony.websocket_handler import WebSocketHandler
 from telephony.config import HOST, PORT, DEBUG, LOG_LEVEL, LOG_FORMAT
 from voice_ai_agent import VoiceAIAgent
 from integration.pipeline import VoiceAIAgentPipeline
-from text_to_speech import GoogleCloudTTS  # Updated import
+from text_to_speech.google_cloud_tts import GoogleCloudTTS
 
 # Load environment variables
 load_dotenv()
@@ -114,7 +114,7 @@ def detect_barge_in_during_speech(audio_data: np.ndarray, time_since_output: flo
             second_half = frame_energies[len(frame_energies)//2:]
             first_avg = np.mean(first_half)
             second_avg = np.mean(second_half)
-            has_energy_growth = second_avg > (first_half * 1.2)  # Reduced from 1.3/1.5
+            has_energy_growth = second_avg > (first_avg * 1.2)  # Reduced from 1.3/1.5
         
         # Variation check
         energy_std = np.std(frame_energies)
@@ -141,6 +141,61 @@ def detect_barge_in_during_speech(audio_data: np.ndarray, time_since_output: flo
     
     # Fallback for minimal data
     return energy > 0.15  # Simple energy threshold as fallback
+
+# Helper function to split audio with improved pausing
+def split_audio_into_chunks_with_silence_detection(audio_data: bytes) -> list:
+    """
+    Split audio into smaller chunks with silence detection for improved barge-in opportunities.
+    """
+    # Create an AudioProcessor instance
+    audio_processor = AudioProcessor()
+    
+    # Convert to PCM for analysis
+    pcm_data = audio_processor.mulaw_to_pcm(audio_data)
+    
+    # Check if we have enough data to process
+    if len(pcm_data) < 3200:  # Less than 200ms at 16kHz
+        return [audio_data]  # Return original if too short
+    
+    # Simple sentence boundary detection from audio (rough approximation)
+    # Looking for prolonged drops in energy that might represent pauses
+    frame_size = 1600  # 100ms at 16kHz
+    frames = [pcm_data[i:i+frame_size] for i in range(0, len(pcm_data), frame_size) if i+frame_size <= len(pcm_data)]
+    
+    if not frames:
+        return [audio_data]  # Return original if too short
+        
+    frame_energies = [np.mean(np.abs(frame)) for frame in frames]
+    
+    # Detect potential sentence boundaries as places where energy drops significantly
+    boundaries = []
+    for i in range(1, len(frame_energies)):
+        if frame_energies[i] < frame_energies[i-1] * 0.3:  # 70% drop in energy
+            boundaries.append(i * frame_size)
+    
+    # Now split the audio with extended silence at these boundaries
+    chunk_size = 400  # Reduced from 800 for more frequent checks
+    chunks = []
+    last_pos = 0
+    
+    for boundary in boundaries:
+        # Add chunks up to this boundary
+        for i in range(last_pos, min(boundary, len(audio_data)), chunk_size):
+            end = min(i + chunk_size, boundary, len(audio_data))
+            chunks.append(audio_data[i:end])
+        
+        # Add explicit silence at sentence boundaries (100ms)
+        silence_chunk = b'\x00' * 800  # 100ms of silence at 8kHz
+        chunks.append(silence_chunk)
+        
+        last_pos = min(boundary, len(audio_data))
+    
+    # Add any remaining chunks
+    for i in range(last_pos, len(audio_data), chunk_size):
+        end = min(i + chunk_size, len(audio_data))
+        chunks.append(audio_data[i:end])
+    
+    return chunks
 
 async def initialize_system():
     """Initialize all system components with Google Cloud TTS integration."""
@@ -170,9 +225,8 @@ async def initialize_system():
         storage_dir='./storage',
         model_name='mistral:7b-instruct-v0.2-q4_0',
         llm_temperature=0.7,
-        # Pass Google Cloud TTS parameters with latest voice types
-        tts_voice_type=os.getenv('TTS_VOICE_TYPE', 'NEURAL2'),
-        tts_voice_name=os.getenv('TTS_VOICE_NAME', None),  # Auto-select if not provided
+        # Pass Google Cloud TTS parameters
+        tts_voice_name=os.getenv('TTS_VOICE_NAME', 'en-US-Standard-J'),
         tts_voice_gender=os.getenv('TTS_VOICE_GENDER', 'NEUTRAL'),
         tts_language_code=os.getenv('TTS_LANGUAGE_CODE', 'en-US')
     )
@@ -181,10 +235,9 @@ async def initialize_system():
     # Initialize TTS integration with Google Cloud TTS
     from integration.tts_integration import TTSIntegration
     tts = TTSIntegration(
-        voice_name=agent.tts_voice_name,
+        voice_name=agent.tts_voice_name,  # Fixed: use tts_voice_name instead of tts_voice_type
         voice_gender=agent.tts_voice_gender,
         language_code=agent.tts_language_code,
-        voice_type=agent.tts_voice_type,  # Pass voice type
         enable_caching=True
     )
     await tts.init()
@@ -201,15 +254,12 @@ async def initialize_system():
     twilio_handler = TwilioHandler(voice_ai_pipeline, base_url)
     await twilio_handler.start()
     
-    # Log TTS configuration
-    tts_info = agent.get_tts_info()
-    logger.info(f"System initialized successfully with {tts_info['provider']}")
-    logger.info(f"Using voice: {tts_info['voice_name']} ({tts_info['voice_type']})")
+    logger.info("System initialized successfully with Google Cloud TTS integration")
 
 @app.route('/', methods=['GET'])
 def index():
     """Simple test endpoint."""
-    return "Voice AI Agent is running with Google Cloud TTS integration!"
+    return "Voice AI Agent is running with Google Cloud TTS integration and enhanced barge-in support!"
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
@@ -328,22 +378,58 @@ def handle_status_callback():
         logger.error(f"Error handling status callback: {e}")
         return Response('', status=204)
 
-@app.route('/tts/info', methods=['GET'])
-def get_tts_info():
-    """Get TTS configuration information."""
+@app.route('/test/barge-in', methods=['POST'])
+def test_barge_in_detection():
+    """Test barge-in detection with audio samples."""
     try:
-        if voice_ai_pipeline and hasattr(voice_ai_pipeline, 'tts_integration'):
-            tts_info = voice_ai_pipeline.tts_integration.get_available_voices()
-            return jsonify(tts_info), 200
-        else:
-            return jsonify({"error": "TTS not initialized"}), 500
+        # Get audio data
+        audio_data = request.data
+        if not audio_data:
+            return jsonify({"error": "No audio data provided"}), 400
+        
+        # Process with both original and new detection algorithms
+        audio_processor = AudioProcessor()
+        pcm_audio = audio_processor.mulaw_to_pcm(audio_data)
+        
+        # Create a speech detector
+        speech_detector = SpeechActivityDetector(
+            energy_threshold=0.04,
+            consecutive_frames=2,
+            frame_duration=0.02
+        )
+        
+        # Test both detection methods
+        speech_detected = speech_detector.detect(pcm_audio)
+        
+        # Original detection
+        original_detection = detect_barge_in_during_speech(pcm_audio, 0.5)
+        
+        # New detection parameters
+        energy = np.mean(np.abs(pcm_audio))
+        peak = np.max(np.abs(pcm_audio))
+        new_detection = energy > 0.06 and peak > 0.2
+        
+        # Emergency detection
+        emergency_detection = energy > 0.15 and peak > 0.5
+        
+        return jsonify({
+            "speech_detected": speech_detected,
+            "original_detection": original_detection,
+            "new_detection": new_detection,
+            "emergency_detection": emergency_detection,
+            "energy": float(energy),
+            "peak": float(peak),
+            "audio_size": len(audio_data),
+            "pcm_size": len(pcm_audio)
+        }), 200
     except Exception as e:
-        logger.error(f"Error getting TTS info: {e}")
+        logger.error(f"Error in barge-in test: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream with Google Cloud TTS integration."""
+    """Handle WebSocket media stream with enhanced barge-in detection."""
+    logger.info(f"WebSocket connection attempt for call {call_sid} - AT START OF HANDLER")
     logger.info(f"WebSocket connection attempt for call {call_sid}")
     
     if not twilio_handler or not voice_ai_pipeline:
@@ -362,24 +448,8 @@ def handle_media_stream(call_sid):
             frame_duration=0.02     # 20ms frames
         )
         
-        # Initialize WebSocketHandler with Google Cloud TTS
+        # Initialize WebSocketHandler with better barge-in handling
         ws_handler = WebSocketHandler(call_sid=call_sid, pipeline=voice_ai_pipeline)
-        
-        # Set speech detector
-        ws_handler.speech_detector = speech_detector
-        
-        # Conservative barge-in settings
-        ws_handler.barge_in_enabled = True
-        ws_handler.barge_in_energy_threshold = 0.12
-        ws_handler.post_speech_dead_zone = 0.5  # 500ms dead zone after speech
-        ws_handler.barge_in_min_duration = 0.6  # 600ms minimum speech duration
-        ws_handler.barge_in_debounce_time = 6.0  # 6s between barge-in attempts
-        
-        # Increase pause after system response
-        ws_handler.pause_after_response = 0.8  # Longer pause between turns
-        
-        # Set minimum words for a valid query
-        ws_handler.min_words_for_valid_query = 2  # Increased from 1 for more reliable detection
         
         # Create a new event loop for this WebSocket connection
         loop = asyncio.new_event_loop()
@@ -469,7 +539,7 @@ def init_system():
 
 # Starting point of the application
 if __name__ == '__main__':
-    print("Starting Voice AI Agent with Google Cloud TTS integration...")
+    print("Starting Voice AI Agent with Google Cloud TTS integration and enhanced barge-in support...")
     
     # Initialize the system before starting the Flask app
     init_system()
