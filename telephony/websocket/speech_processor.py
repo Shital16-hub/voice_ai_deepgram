@@ -7,6 +7,8 @@ import logging
 import re
 import asyncio
 import time
+import os
+import json
 from typing import Dict, Any, Optional, List, Callable, Awaitable
 import numpy as np
 
@@ -25,18 +27,39 @@ class SpeechProcessor:
         """Initialize optimized speech processor for telephony."""
         self.pipeline = pipeline
         
-        logger.info("Initializing SpeechProcessor for telephony")
+        logger.info("Initializing SpeechProcessor for telephony with v2 API")
         
-        # Use Google Cloud STT optimized for telephony
+        # Get project ID with automatic extraction
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        
+        # If not in environment, try to extract from credentials file
+        if not project_id:
+            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if credentials_file and os.path.exists(credentials_file):
+                try:
+                    with open(credentials_file, 'r') as f:
+                        creds_data = json.load(f)
+                        project_id = creds_data.get('project_id')
+                        logger.info(f"SpeechProcessor: Auto-extracted project ID from credentials: {project_id}")
+                except Exception as e:
+                    logger.error(f"Error reading credentials file: {e}")
+        
+        if not project_id:
+            raise ValueError(
+                "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
+                "or ensure your credentials file contains a project_id field."
+            )
+        
+        # Use Google Cloud STT v2 optimized for telephony
         self.speech_client = GoogleCloudStreamingSTT(
             language="en-US",
             sample_rate=8000,  # Match Twilio's 8kHz
             encoding="MULAW",   # Match Twilio's mulaw encoding
             channels=1,
             interim_results=False,  # Disable for better accuracy
+            project_id=project_id,
             enhanced_model=True,    # Use enhanced telephony model
-            # Don't use hardcoded speech contexts - let the model decide
-            speech_context_phrases=None
+            location="global"       # Can be changed to specific region if needed
         )
         
         # Minimal transcription cleaning patterns
@@ -56,7 +79,7 @@ class SpeechProcessor:
         self.successful_transcriptions = 0
         self.failed_transcriptions = 0
         
-        logger.info("SpeechProcessor initialized with telephony optimization")
+        logger.info("SpeechProcessor initialized with telephony optimization and v2 API")
     
     async def process_audio(
         self,
@@ -72,7 +95,7 @@ class SpeechProcessor:
             logger.debug(f"Processing audio chunk #{self.audio_chunks_received}, "
                         f"size: {len(audio_data)} bytes")
             
-            # Pass audio directly to Google Cloud STT
+            # Pass audio directly to Google Cloud STT v2
             result = await self.speech_client.process_audio_chunk(
                 audio_chunk=audio_data,
                 callback=callback

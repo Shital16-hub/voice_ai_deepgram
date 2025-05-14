@@ -1,17 +1,18 @@
-# speech_to_text/google_cloud_stt.py
-
 """
-Optimized Google Cloud Speech-to-Text implementation for Twilio telephony.
+Optimized Google Cloud Speech-to-Text v2 implementation for Twilio telephony.
 """
 import logging
 import asyncio
 import time
+import os
+import json
 from typing import Dict, Any, Optional, List, Callable, Awaitable, Union
 import numpy as np
 from dataclasses import dataclass
-import json
 
-from google.cloud import speech
+# Import Speech-to-Text v2 API
+from google.cloud import speech_v2
+from google.api_core.client_options import ClientOptions
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,8 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Optimized Google Cloud Speech-to-Text client for telephony with v2.32.0.
-    Uses telephony-specific models and minimal preprocessing for best accuracy.
+    Google Cloud Speech-to-Text v2 client optimized for telephony with Twilio.
+    Uses MULAW encoding at 8kHz for direct compatibility with Twilio.
     """
     
     def __init__(
@@ -39,7 +40,8 @@ class GoogleCloudStreamingSTT:
         encoding: str = "MULAW",
         channels: int = 1,
         interim_results: bool = False,
-        speech_context_phrases: Optional[List[str]] = None,
+        project_id: Optional[str] = None,
+        location: str = "global",
         enhanced_model: bool = True
     ):
         """
@@ -51,67 +53,88 @@ class GoogleCloudStreamingSTT:
         self.channels = channels
         self.interim_results = interim_results
         self.enhanced_model = enhanced_model
+        self.location = location
         
-        # Don't hardcode speech contexts - use Google's telephony model instead
-        self.speech_context_phrases = speech_context_phrases if speech_context_phrases else []
+        # Get project ID with automatic extraction
+        self.project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
         
-        # Initialize client
-        self.client = speech.SpeechClient()
+        # If not provided, try to extract from credentials file
+        if not self.project_id:
+            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if credentials_file and os.path.exists(credentials_file):
+                try:
+                    with open(credentials_file, 'r') as f:
+                        creds_data = json.load(f)
+                        self.project_id = creds_data.get('project_id')
+                        logger.info(f"Auto-extracted project ID from credentials: {self.project_id}")
+                except Exception as e:
+                    logger.error(f"Error reading credentials file: {e}")
+        
+        if not self.project_id:
+            raise ValueError(
+                "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
+                "or ensure your credentials file contains a project_id field."
+            )
+        
+        # Initialize v2 client with proper endpoint
+        endpoint = f"{location}-speech.googleapis.com" if location != "global" else None
+        client_options = ClientOptions(api_endpoint=endpoint) if endpoint else None
+        
+        self.client = speech_v2.SpeechClient(client_options=client_options)
+        
+        # Construct recognizer path
+        self.recognizer_path = self.client.recognizer_path(
+            project=self.project_id,
+            location=location,
+            recognizer="_"  # Use the default recognizer
+        )
         
         # State tracking
         self.is_streaming = False
         self.chunk_count = 0
         self.total_chunks = 0
         self.successful_transcriptions = 0
+        self.streaming_call = None
+        self.request_queue = asyncio.Queue()
         
-        logger.info(f"Initialized GoogleCloudStreamingSTT: {sample_rate}Hz, {encoding}, telephony-optimized")
+        logger.info(f"Initialized GoogleCloudStreamingSTT v2: {sample_rate}Hz, {encoding}, telephony-optimized")
+        logger.info(f"Using project: {self.project_id}, location: {location}")
     
-    def _get_recognition_config(self) -> speech.RecognitionConfig:
-        """Get optimized recognition configuration for telephony."""
-        # Map encoding string to enum
-        encoding_map = {
-            "LINEAR16": speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            "MULAW": speech.RecognitionConfig.AudioEncoding.MULAW,
-        }
+    def _get_recognition_config(self) -> speech_v2.RecognitionConfig:
+        """Get optimized v2 recognition configuration for telephony."""
         
-        encoding_enum = encoding_map.get(self.encoding, speech.RecognitionConfig.AudioEncoding.MULAW)
-        
-        # Optimal configuration for telephony
-        config = speech.RecognitionConfig(
-            encoding=encoding_enum,
+        # Create explicit decoding config for MULAW
+        decoding_config = speech_v2.ExplicitDecodingConfig(
+            encoding=speech_v2.ExplicitDecodingConfig.AudioEncoding.MULAW,
             sample_rate_hertz=self.sample_rate,
-            language_code=self.language,
             audio_channel_count=self.channels,
-            
-            # Key telephony optimizations
-            model="phone_call",  # Use telephony-optimized model
-            use_enhanced=self.enhanced_model,
-            
-            # Enable features that improve accuracy
+        )
+        
+        # Create recognition features
+        features = speech_v2.RecognitionFeatures(
             enable_automatic_punctuation=True,
             enable_word_time_offsets=True,
             enable_word_confidence=True,
-            max_alternatives=1,  # Focus on best result
-            
-            # Instead of hardcoded speech contexts, use adaptation if needed
-            # speech_contexts=[...] - Removed to avoid hardcoding
         )
         
-        # Only add speech contexts if specifically provided
-        if self.speech_context_phrases:
-            speech_context = speech.SpeechContext(
-                phrases=self.speech_context_phrases,
-                boost=15.0
-            )
-            config.speech_contexts.append(speech_context)
+        # Create recognition config optimized for telephony
+        config = speech_v2.RecognitionConfig(
+            explicit_decoding_config=decoding_config,
+            language_codes=[self.language],
+            model="telephony" if self.enhanced_model else "latest_short",
+            features=features,
+        )
         
         return config
     
     async def start_streaming(self) -> None:
         """Start a new streaming session."""
+        if self.is_streaming:
+            await self.stop_streaming()
+        
         self.is_streaming = True
         self.chunk_count = 0
-        logger.info("Started Google Cloud Speech streaming session")
+        logger.info("Started Google Cloud Speech v2 streaming session")
     
     async def stop_streaming(self) -> tuple[str, float]:
         """Stop the streaming session."""
@@ -119,6 +142,15 @@ class GoogleCloudStreamingSTT:
             return "", 0.0
         
         self.is_streaming = False
+        
+        # Close streaming call if active
+        if self.streaming_call:
+            try:
+                await self.streaming_call.close()
+            except Exception as e:
+                logger.error(f"Error closing streaming call: {e}")
+            self.streaming_call = None
+        
         logger.info(f"Stopped streaming session. Processed {self.chunk_count} chunks")
         return "", 0.0
     
@@ -128,7 +160,7 @@ class GoogleCloudStreamingSTT:
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
         """
-        Process audio chunk with minimal preprocessing for optimal accuracy.
+        Process audio chunk with v2 API - batch processing for better accuracy.
         """
         if not self.is_streaming:
             await self.start_streaming()
@@ -136,19 +168,14 @@ class GoogleCloudStreamingSTT:
         self.total_chunks += 1
         
         try:
-            # Convert numpy array to bytes if needed - NO preprocessing
+            # Convert numpy array to bytes if needed
             if isinstance(audio_chunk, np.ndarray):
-                # Don't modify the audio - just convert format
+                # For MULAW, convert float32 to mulaw bytes
                 if audio_chunk.dtype == np.float32:
-                    if self.encoding == "MULAW":
-                        # Convert to mulaw directly
-                        import audioop
-                        # Convert float32 to 16-bit PCM first
-                        pcm_data = (audio_chunk * 32767).astype(np.int16).tobytes()
-                        audio_bytes = audioop.lin2ulaw(pcm_data, 2)
-                    else:
-                        # For LINEAR16, keep as PCM
-                        audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+                    import audioop
+                    # Convert to 16-bit PCM first
+                    pcm_data = (audio_chunk * 32767).astype(np.int16).tobytes()
+                    audio_bytes = audioop.lin2ulaw(pcm_data, 2)
                 else:
                     audio_bytes = audio_chunk.tobytes()
             else:
@@ -161,16 +188,20 @@ class GoogleCloudStreamingSTT:
                 logger.debug("Skipping tiny audio chunk")
                 return None
             
-            # Get recognition config
+            # Use batch recognition for better accuracy
             config = self._get_recognition_config()
             
-            # Create audio object
-            audio = speech.RecognitionAudio(content=audio_bytes)
+            # Create recognition request
+            request = speech_v2.RecognizeRequest(
+                recognizer=self.recognizer_path,
+                config=config,
+                content=audio_bytes,
+            )
             
-            # Perform recognition
+            # Perform synchronous recognition
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.client.recognize(config=config, audio=audio)
+                lambda: self.client.recognize(request=request)
             )
             
             # Process results
@@ -183,7 +214,7 @@ class GoogleCloudStreamingSTT:
                         self.chunk_count += 1
                         transcription_result = StreamingTranscriptionResult(
                             text=alternative.transcript,
-                            is_final=True,
+                            is_final=True,  # Batch results are always final
                             confidence=getattr(alternative, 'confidence', 0.9),
                             chunk_id=self.chunk_count
                         )
@@ -197,7 +228,7 @@ class GoogleCloudStreamingSTT:
                         
                         return transcription_result
             
-            logger.debug("No transcription results from Google Cloud Speech")
+            logger.debug("No transcription results from Google Cloud Speech v2")
             return None
             
         except Exception as e:
@@ -214,7 +245,9 @@ class GoogleCloudStreamingSTT:
             "success_rate": round(success_rate, 2),
             "is_streaming": self.is_streaming,
             "language_code": self.language,
-            "model": "phone_call",
-            "enhanced": self.enhanced_model,
-            "encoding": self.encoding
+            "model": "telephony" if self.enhanced_model else "latest_short",
+            "api_version": "v2",
+            "encoding": self.encoding,
+            "sample_rate": self.sample_rate,
+            "project_id": self.project_id
         }

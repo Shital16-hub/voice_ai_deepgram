@@ -1,11 +1,13 @@
 """
-Enhanced Speech-to-Text integration module optimized for telephony.
+Enhanced Speech-to-Text integration module optimized for telephony with v2 API.
 """
 import logging
 import time
 import asyncio
 import re
 import numpy as np
+import os
+import json
 from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union, AsyncIterator
 
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
@@ -15,12 +17,13 @@ logger = logging.getLogger(__name__)
 class STTIntegration:
     """
     Enhanced Speech-to-Text integration optimized for telephony with minimal processing.
+    Uses Google Cloud Speech-to-Text v2 API.
     """
     
     def __init__(
         self,
         speech_recognizer: Optional[GoogleCloudStreamingSTT] = None,
-        language: str = "en"
+        language: str = "en-US"
     ):
         """
         Initialize the STT integration.
@@ -29,39 +32,62 @@ class STTIntegration:
         self.language = language
         self.initialized = True if speech_recognizer else False
         
-        # Keep minimal cleanup patterns - let Google handle most of it
+        # Keep minimal cleanup patterns - let Google v2 handle most of it
         self.cleanup_patterns = [
             # Only remove obvious technical artifacts
             (re.compile(r'\[.*?\]'), ''),  # [inaudible]
             (re.compile(r'\<.*?\>'), ''),  # <music>
-            # Keep filler words - they're part of natural speech
+            # Remove excessive whitespace
+            (re.compile(r'\s+'), ' '),
         ]
     
-    async def init(self, api_key: Optional[str] = None) -> None:
+    async def init(self, project_id: Optional[str] = None) -> None:
         """Initialize the STT component if not already initialized."""
         if self.initialized:
             return
+        
+        # Get project ID with automatic extraction
+        final_project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        
+        # If not provided, try to extract from credentials file
+        if not final_project_id:
+            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if credentials_file and os.path.exists(credentials_file):
+                try:
+                    with open(credentials_file, 'r') as f:
+                        creds_data = json.load(f)
+                        final_project_id = creds_data.get('project_id')
+                        logger.info(f"STTIntegration: Auto-extracted project ID from credentials: {final_project_id}")
+                except Exception as e:
+                    logger.error(f"Error reading credentials file: {e}")
+        
+        if not final_project_id:
+            raise ValueError(
+                "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
+                "or ensure your credentials file contains a project_id field."
+            )
             
         try:
-            # Create a new Google Cloud streaming client with optimal settings
+            # Create a new Google Cloud v2 streaming client with optimal settings
             self.speech_recognizer = GoogleCloudStreamingSTT(
                 language=self.language,
                 sample_rate=8000,  # Match Twilio
                 encoding="MULAW",   # Match Twilio
                 channels=1,
                 interim_results=False,  # Disable for better accuracy
+                project_id=final_project_id,
                 enhanced_model=True
             )
             
             self.initialized = True
-            logger.info(f"Initialized STT with Google Cloud API (telephony-optimized)")
+            logger.info(f"Initialized STT with Google Cloud v2 API (telephony-optimized)")
         except Exception as e:
             logger.error(f"Error initializing STT: {e}")
             raise
     
     def cleanup_transcription(self, text: str) -> str:
         """
-        Minimal cleanup - let Google's telephony model handle most of it.
+        Minimal cleanup - let Google's v2 telephony model handle most of it.
         """
         if not text:
             return ""
@@ -73,6 +99,10 @@ class STTIntegration:
         
         # Basic normalization
         cleaned = cleaned.strip()
+        
+        # Ensure proper capitalization
+        if cleaned and len(cleaned) > 0:
+            cleaned = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
         
         return cleaned
     
@@ -96,7 +126,7 @@ class STTIntegration:
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        Transcribe audio data with minimal processing.
+        Transcribe audio data with minimal processing using v2 API.
         """
         if not self.initialized:
             logger.error("STT integration not properly initialized")
@@ -106,7 +136,7 @@ class STTIntegration:
         start_time = time.time()
         
         try:
-            # Convert to numpy array if needed - no preprocessing
+            # Convert to numpy array if needed - minimal preprocessing
             if isinstance(audio_data, bytes):
                 # Keep as bytes for direct processing
                 pass
@@ -114,7 +144,7 @@ class STTIntegration:
                 audio_data = np.array(audio_data, dtype=np.float32)
             # For numpy arrays, let the STT handle conversion
             
-            # Get results directly from STT
+            # Get results directly from STT v2
             final_results = []
             
             # Define a callback to collect results
@@ -164,14 +194,16 @@ class STTIntegration:
                 "duration": duration if duration > 0 else 0.0,
                 "processing_time": time.time() - start_time,
                 "is_final": True,
-                "is_valid": self.is_valid_transcription(cleaned_text)
+                "is_valid": self.is_valid_transcription(cleaned_text),
+                "api_version": "v2"
             }
             
         except Exception as e:
             logger.error(f"Error transcribing audio data: {e}")
             return {
                 "error": str(e),
-                "processing_time": time.time() - start_time
+                "processing_time": time.time() - start_time,
+                "api_version": "v2"
             }
     
     async def start_streaming(self) -> None:
@@ -195,7 +227,7 @@ class STTIntegration:
             logger.error("STT integration not properly initialized")
             return None
         
-        # Don't preprocess - pass directly to STT
+        # Don't preprocess - pass directly to STT v2
         return await self.speech_recognizer.process_audio_chunk(
             audio_chunk=audio_chunk,
             callback=callback
@@ -221,6 +253,6 @@ class STTIntegration:
         return cleaned_text, duration
     
     def optimize_for_telephony(self):
-        """Already optimized - this is a no-op."""
-        logger.info("STT integration already optimized for telephony")
+        """Already optimized for telephony with v2 API - this is a no-op."""
+        logger.info("STT integration already optimized for telephony with v2 API")
         pass

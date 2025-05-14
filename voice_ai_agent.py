@@ -8,6 +8,7 @@ import os
 import logging
 import asyncio
 import time
+import json
 from typing import Optional, Dict, Any, Union, Callable, Awaitable
 import numpy as np
 from scipy import signal
@@ -59,6 +60,27 @@ class VoiceAIAgent:
         self.tts_voice_name = kwargs.get('tts_voice_name', os.getenv('TTS_VOICE_NAME', 'en-US-Standard-J'))
         self.tts_voice_gender = kwargs.get('tts_voice_gender', os.getenv('TTS_VOICE_GENDER', 'NEUTRAL'))
         self.tts_language_code = kwargs.get('tts_language_code', os.getenv('TTS_LANGUAGE_CODE', 'en-US'))
+        
+        # Get project ID from environment or credentials file
+        self.project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        
+        # If not in environment, try to extract from credentials file
+        if not self.project_id:
+            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if credentials_file and os.path.exists(credentials_file):
+                try:
+                    with open(credentials_file, 'r') as f:
+                        creds_data = json.load(f)
+                        self.project_id = creds_data.get('project_id')
+                        logger.info(f"Extracted project ID from credentials: {self.project_id}")
+                except Exception as e:
+                    logger.error(f"Error reading credentials file: {e}")
+        
+        if not self.project_id:
+            raise ValueError(
+                "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
+                "or ensure your credentials file contains a project_id field."
+            )
         
         # Component placeholders
         self.speech_recognizer = None
@@ -145,14 +167,14 @@ class VoiceAIAgent:
         """Initialize all components with Google Cloud STT and TTS."""
         logger.info("Initializing Voice AI Agent components with Google Cloud STT and TTS...")
         
-        # Initialize speech recognizer with Google Cloud
+        # Initialize speech recognizer with Google Cloud v2
         self.speech_recognizer = GoogleCloudStreamingSTT(
             language=self.stt_language,
-            sample_rate=16000,
-            encoding="LINEAR16",
+            sample_rate=8000,  # Keep at 8kHz for Twilio compatibility
+            encoding="MULAW",  # Use MULAW for direct Twilio compatibility
             channels=1,
-            interim_results=True,
-            speech_context_phrases=self.stt_keywords,
+            interim_results=False,  # Disable for better accuracy
+            project_id=self.project_id,  # Use the extracted project ID
             enhanced_model=self.enhanced_model
         )
         
@@ -161,6 +183,8 @@ class VoiceAIAgent:
             speech_recognizer=self.speech_recognizer,
             language=self.stt_language
         )
+        # Initialize the STT integration
+        await self.stt_integration.init(project_id=self.project_id)
         
         # Initialize document store and index manager
         doc_store = DocumentStore()
