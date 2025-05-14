@@ -1,6 +1,5 @@
 """
 Enhanced message router with comprehensive debugging and error handling.
-Improved for better session management and lower latency.
 """
 import json
 import logging
@@ -10,7 +9,7 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 class MessageRouter:
-    """Message router with enhanced debugging capabilities and session management."""
+    """Message router with enhanced debugging capabilities."""
     
     def __init__(self, ws_handler):
         """Initialize message router."""
@@ -84,7 +83,7 @@ class MessageRouter:
         
         # Send welcome message
         await asyncio.sleep(0.5)
-        await self.ws_handler.send_text_response("Hello! How can I help you today?", ws)
+        await self.ws_handler.send_text_response("I'm listening. How can I help you today?", ws)
         logger.info("Sent welcome message")
     
     async def _handle_media(self, data: Dict[str, Any], ws) -> None:
@@ -117,14 +116,9 @@ class MessageRouter:
                 logger.debug("No audio data to process")
     
     async def _process_audio_with_debugging(self, audio_data: bytes, ws) -> None:
-        """Process audio with comprehensive debugging and session management."""
+        """Process audio with comprehensive debugging."""
         try:
             logger.info(f"Starting audio processing: {len(audio_data)} bytes")
-            transcription = await self.ws_handler.speech_processor.process_audio(audio_data)
-            
-            # Check for session restart if needed
-            if hasattr(self.ws_handler.speech_processor, 'restart_session_if_needed'):
-                await self.ws_handler.speech_processor.restart_session_if_needed()
             
             # Process through speech recognition
             transcription = await self.ws_handler.speech_processor.process_audio(audio_data)
@@ -171,19 +165,6 @@ class MessageRouter:
                 await self.ws_handler.response_generator.send_text_response(response, ws)
                 self.responses_sent += 1
                 logger.info(f"Sent response #{self.responses_sent}")
-                
-                # Important: Ensure STT session is ready for next input
-                await asyncio.sleep(0.5)  # Brief pause to let TTS settle
-                
-                # Restart STT session for next input
-                if hasattr(self.ws_handler.speech_processor.speech_client, 'start_streaming'):
-                    try:
-                        # Don't stop if still streaming - just ensure it's ready
-                        if not self.ws_handler.speech_processor.speech_client.is_streaming:
-                            await self.ws_handler.speech_processor.speech_client.start_streaming()
-                            logger.debug("Restarted STT session for next input")
-                    except Exception as e:
-                        logger.warning(f"Error restarting STT session: {e}")
                 
                 # Update state
                 self.ws_handler.audio_manager.set_speaking_state(False)

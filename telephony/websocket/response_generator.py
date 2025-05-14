@@ -1,5 +1,5 @@
 """
-Enhanced response generation with temporal echo tracking integration.
+Response generation and TTS handling for telephony with Google Cloud TTS integration.
 """
 import logging
 import asyncio
@@ -13,10 +13,10 @@ from telephony.audio_processor import AudioProcessor
 logger = logging.getLogger(__name__)
 
 class ResponseGenerator:
-    """Enhanced response generator with temporal echo tracking integration."""
+    """Handles response generation and text-to-speech conversion using Google Cloud TTS."""
     
     def __init__(self, pipeline, ws_handler):
-        """Initialize response generator with echo tracking."""
+        """Initialize response generator."""
         self.pipeline = pipeline
         self.ws_handler = ws_handler
         self.audio_processor = AudioProcessor()
@@ -102,20 +102,13 @@ class ResponseGenerator:
     
     async def send_text_response(self, text: str, ws) -> None:
         """
-        Send text response with echo tracking integration.
+        Send text response by converting to speech and sending to WebSocket.
         
         Args:
             text: Text to send
             ws: WebSocket connection
         """
         try:
-            # IMPORTANT: Register TTS output for echo detection BEFORE sending
-            if hasattr(self.ws_handler, 'speech_processor'):
-                # Register the text that will be spoken for temporal echo detection
-                self.ws_handler.speech_processor.register_tts_output(text)
-                # Also add to traditional echo history
-                self.ws_handler.speech_processor.add_to_echo_history(text)
-            
             # Set speaking state
             self.ws_handler.audio_manager.set_speaking_state(True)
             
@@ -125,7 +118,7 @@ class ResponseGenerator:
             # Send audio
             await self._send_audio(mulaw_audio, ws)
             
-            logger.info(f"Sent response with echo tracking: '{text}'")
+            logger.info(f"Sent text response using Google Cloud TTS: '{text}'")
             
             # Update state
             self.ws_handler.audio_manager.set_speaking_state(False)
@@ -137,7 +130,7 @@ class ResponseGenerator:
             self.ws_handler.audio_manager.set_speaking_state(False)
     
     async def _send_audio(self, audio_data: bytes, ws) -> None:
-        """Send audio data to WebSocket with optimized chunking."""
+        """Send audio data to WebSocket."""
         try:
             stream_sid = self.ws_handler.stream_sid
             
@@ -145,10 +138,10 @@ class ResponseGenerator:
                 logger.error("No stream_sid available for sending audio")
                 return
             
-            # Split into optimal chunks for streaming
+            # Split into chunks for better streaming
             chunks = self._split_audio_into_chunks(audio_data)
             
-            logger.debug(f"Sending {len(chunks)} audio chunks")
+            logger.debug(f"Sending {len(chunks)} audio chunks (Google Cloud TTS)")
             
             for i, chunk in enumerate(chunks):
                 audio_base64 = base64.b64encode(chunk).decode('utf-8')
@@ -163,7 +156,7 @@ class ResponseGenerator:
                 
                 try:
                     ws.send(json.dumps(message))
-                    # Optimal delay between chunks for smooth playback
+                    # Small delay between chunks for smooth playback
                     if i < len(chunks) - 1:
                         await asyncio.sleep(0.02)
                 except Exception as e:
@@ -172,15 +165,14 @@ class ResponseGenerator:
                         logger.warning("WebSocket connection closed during audio send")
                         return
             
-            logger.debug(f"Successfully sent {len(chunks)} audio chunks")
+            logger.debug(f"Successfully sent {len(chunks)} audio chunks (Google Cloud TTS)")
             
         except Exception as e:
             logger.error(f"Error sending audio: {e}")
     
     def _split_audio_into_chunks(self, audio_data: bytes) -> list:
-        """Split audio into optimal chunks for Twilio streaming."""
-        # Optimal chunk size for 8kHz mulaw (100ms)
-        chunk_size = 800
+        """Split audio into smaller chunks for streaming."""
+        chunk_size = 800  # 100ms at 8kHz
         chunks = []
         
         for i in range(0, len(audio_data), chunk_size):
