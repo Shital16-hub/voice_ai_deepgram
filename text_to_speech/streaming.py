@@ -1,7 +1,5 @@
-# text_to_speech/streaming.py
-
 """
-Streaming functionality for text-to-speech processing with ElevenLabs.
+Streaming functionality for text-to-speech processing with Google Cloud TTS.
 
 This module provides utilities for handling streaming text input
 and audio output for real-time voice applications.
@@ -12,7 +10,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Any, Callable, Awaitabl
 import queue
 import threading
 
-from .elevenlabs_tts import ElevenLabsTTS
+from .google_cloud_tts import GoogleCloudTTS
 from .config import config
 from .exceptions import TTSStreamingError
 
@@ -20,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class TTSStreamer:
     """
-    Manages real-time streaming of text to speech using ElevenLabs.
+    Manages real-time streaming of text to speech using Google Cloud TTS.
     
     Optimized for low-latency voice applications, this class manages the streaming
     of text from a knowledge base to speech output in real-time.
@@ -28,17 +26,22 @@ class TTSStreamer:
 
     def __init__(
         self,
-        tts_client: Optional[ElevenLabsTTS] = None,
+        tts_client: Optional[GoogleCloudTTS] = None,
         **tts_kwargs
     ):
         """
         Initialize the TTS streamer.
         
         Args:
-            tts_client: Existing ElevenLabsTTS client, or one will be created
-            **tts_kwargs: Arguments to pass to ElevenLabsTTS if creating a new client
+            tts_client: Existing GoogleCloudTTS client, or one will be created
+            **tts_kwargs: Arguments to pass to GoogleCloudTTS if creating a new client
         """
-        self.tts_client = tts_client or ElevenLabsTTS(**tts_kwargs)
+        # Set defaults for Twilio compatibility if not provided
+        tts_kwargs.setdefault('container_format', 'mulaw')
+        tts_kwargs.setdefault('sample_rate', 8000)
+        tts_kwargs.setdefault('voice_type', 'NEURAL2')
+        
+        self.tts_client = tts_client or GoogleCloudTTS(**tts_kwargs)
         self.text_queue = asyncio.Queue()
         self.running = False
     
@@ -65,7 +68,7 @@ class TTSStreamer:
                 else:
                     break
             except Exception as e:
-                logger.error(f"Error in text generator: {str(e)}")
+                logger.error(f"Error in text generator: {e}")
                 if self.running:  # Only raise if we're still supposed to be running
                     raise TTSStreamingError(f"Text streaming error: {str(e)}")
     
@@ -91,8 +94,8 @@ class TTSStreamer:
         text_stream = self._text_generator()
         
         try:
-            # Use the TTS client to synthesize streaming audio from the text generator
-            async for audio_chunk in self.tts_client.synthesize_with_streaming(text_stream):
+            # Use the Google Cloud TTS client to synthesize streaming audio
+            async for audio_chunk in self.tts_client.synthesize_streaming(text_stream):
                 yield audio_chunk
         finally:
             self.running = False
@@ -111,7 +114,7 @@ class TTSStreamer:
 
 class RealTimeResponseHandler:
     """
-    Handles real-time response text from the knowledge base to speech output using ElevenLabs.
+    Handles real-time response text from the knowledge base to speech output using Google Cloud TTS.
     
     This class is designed to receive word-by-word output from the knowledge base
     and efficiently stream it to the TTS system.
@@ -119,7 +122,7 @@ class RealTimeResponseHandler:
     
     def __init__(
         self,
-        tts_client: Optional[ElevenLabsTTS] = None,
+        tts_client: Optional[GoogleCloudTTS] = None,
         tts_streamer: Optional[TTSStreamer] = None,
         **tts_kwargs
     ):
@@ -127,10 +130,15 @@ class RealTimeResponseHandler:
         Initialize the real-time response handler.
         
         Args:
-            tts_client: Existing ElevenLabsTTS client
+            tts_client: Existing GoogleCloudTTS client
             tts_streamer: Existing TTSStreamer or one will be created
-            **tts_kwargs: Arguments to pass to TTSStreamer/ElevenLabsTTS if creating new ones
+            **tts_kwargs: Arguments to pass to TTSStreamer/GoogleCloudTTS if creating new ones
         """
+        # Set defaults for Twilio compatibility
+        tts_kwargs.setdefault('container_format', 'mulaw')
+        tts_kwargs.setdefault('sample_rate', 8000)
+        tts_kwargs.setdefault('voice_type', 'NEURAL2')
+        
         # Initialize TTS client if provided
         self.tts_client = tts_client
         
