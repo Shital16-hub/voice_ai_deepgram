@@ -1,6 +1,6 @@
 """
-Voice AI Agent main class optimized for telephony with Google Cloud STT v2 and TTS.
-Removed all audio preprocessing - let Google handle it optimally.
+Voice AI Agent main class updated to pass credentials file to STT component.
+This ensures both STT and TTS use the same credentials handling approach.
 """
 import os
 import logging
@@ -27,22 +27,38 @@ if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """Main Voice AI Agent class optimized for telephony with zero audio preprocessing."""
+    """Main Voice AI Agent class optimized for telephony with consistent credentials handling."""
     
     def __init__(
         self,
         storage_dir: str = './storage',
         model_name: str = 'mistral:7b-instruct-v0.2-q4_0',
         llm_temperature: float = 0.7,
+        credentials_file: Optional[str] = None,  # Added credentials_file parameter
         **kwargs
     ):
         """
         Initialize the Voice AI Agent with Google Cloud STT v2 and TTS.
-        Optimized for telephony with no audio preprocessing.
+        Both components now use the same credentials handling approach.
         """
         self.storage_dir = storage_dir
         self.model_name = model_name
         self.llm_temperature = llm_temperature
+        
+        # Credentials handling - find the file if not provided
+        self.credentials_file = credentials_file
+        if not self.credentials_file:
+            # Try common locations
+            possible_paths = [
+                os.getenv('GOOGLE_APPLICATION_CREDENTIALS'),
+                '/workspace/credentials/my-tts-project-458404-8ab56bac7265.json',
+                './credentials/my-tts-project-458404-8ab56bac7265.json',
+            ]
+            for path in possible_paths:
+                if path and os.path.exists(path):
+                    self.credentials_file = path
+                    logger.info(f"Found credentials file: {path}")
+                    break
         
         # STT Parameters
         self.stt_language = kwargs.get('language', 'en-US')
@@ -56,22 +72,28 @@ class VoiceAIAgent:
         self.project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
         
         # If not in environment, try to extract from credentials file
-        if not self.project_id:
-            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-            if credentials_file and os.path.exists(credentials_file):
-                try:
-                    with open(credentials_file, 'r') as f:
-                        creds_data = json.load(f)
-                        self.project_id = creds_data.get('project_id')
-                        logger.info(f"Extracted project ID from credentials: {self.project_id}")
-                except Exception as e:
-                    logger.error(f"Error reading credentials file: {e}")
+        if not self.project_id and self.credentials_file and os.path.exists(self.credentials_file):
+            try:
+                with open(self.credentials_file, 'r') as f:
+                    creds_data = json.load(f)
+                    self.project_id = creds_data.get('project_id')
+                    # Set environment variable for consistency
+                    if self.project_id:
+                        os.environ["GOOGLE_CLOUD_PROJECT"] = self.project_id
+                        logger.info(f"Extracted and set project ID: {self.project_id}")
+            except Exception as e:
+                logger.error(f"Error reading credentials file: {e}")
         
         if not self.project_id:
             raise ValueError(
                 "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
                 "or ensure your credentials file contains a project_id field."
             )
+        
+        # Set the environment variable for Google Cloud clients
+        if self.credentials_file:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_file
+            logger.info(f"Set GOOGLE_APPLICATION_CREDENTIALS to: {self.credentials_file}")
         
         # Component placeholders
         self.speech_recognizer = None
@@ -80,13 +102,13 @@ class VoiceAIAgent:
         self.query_engine = None
         self.tts_client = None
         
-        logger.info("VoiceAIAgent initialized for telephony (no audio preprocessing)")
+        logger.info("VoiceAIAgent initialized for telephony with consistent credentials handling")
         
     async def init(self):
-        """Initialize all components with optimal telephony settings."""
+        """Initialize all components with optimal telephony settings and consistent credentials."""
         logger.info("Initializing Voice AI Agent components with Google Cloud STT v2 and TTS...")
         
-        # Initialize speech recognizer with Google Cloud v2 (telephony optimized)
+        # Initialize speech recognizer with Google Cloud v2 and explicit credentials
         self.speech_recognizer = GoogleCloudStreamingSTT(
             language=self.stt_language,
             sample_rate=8000,  # Match Twilio exactly
@@ -94,8 +116,8 @@ class VoiceAIAgent:
             channels=1,
             interim_results=False,  # Only final results for better accuracy
             project_id=self.project_id,
-            enhanced_model=True,    # Use telephony-enhanced model
-            location="global"
+            location="global",
+            credentials_file=self.credentials_file  # Pass credentials file explicitly
         )
         
         # Initialize STT integration with zero preprocessing
@@ -127,15 +149,11 @@ class VoiceAIAgent:
         )
         await self.conversation_manager.init()
         
-        # Initialize Google Cloud TTS with telephony optimization
+        # Initialize Google Cloud TTS with telephony optimization and explicit credentials
         try:
-            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-            if not credentials_file:
-                logger.warning("GOOGLE_APPLICATION_CREDENTIALS not set. Using default credentials.")
-                
-            # Initialize with telephony-optimized settings
+            # Initialize with telephony-optimized settings and explicit credentials
             self.tts_client = GoogleCloudTTS(
-                credentials_file=credentials_file,
+                credentials_file=self.credentials_file,  # Pass credentials file explicitly
                 voice_name=self.tts_voice_name,
                 voice_gender=self.tts_voice_gender,
                 language_code=self.tts_language_code,

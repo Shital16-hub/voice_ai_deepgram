@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Twilio application optimized for continuous conversation with proper session management.
+Updated Twilio application with fixed continuous conversation support.
+Handles proper STT session management and WebSocket lifecycle.
 """
 import os
 import sys
@@ -73,6 +74,7 @@ async def initialize_system():
         storage_dir='./storage',
         model_name='mistral:7b-instruct-v0.2-q4_0',
         llm_temperature=0.7,
+        credentials_file=google_creds  # Pass credentials explicitly
     )
     await agent.init()
     
@@ -173,9 +175,6 @@ def handle_incoming_call():
         # Create TwiML response optimized for continuous conversation
         response = VoiceResponse()
         
-        # Brief greeting to establish connection
-        response.say("Hello! I'm your AI assistant. How can I help you today?", voice="alice")
-        
         # Create WebSocket URL
         ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
         logger.info(f"WebSocket URL: {ws_url}")
@@ -189,10 +188,6 @@ def handle_incoming_call():
         
         connect.append(stream)
         response.append(connect)
-        
-        # Keep the call alive after streaming ends
-        response.say("Thank you for calling. Have a great day!", voice="alice")
-        response.hangup()
         
         logger.info(f"Generated TwiML for continuous conversation - Call {call_sid}")
         return Response(str(response), mimetype='text/xml')
@@ -312,16 +307,11 @@ def handle_media_stream(call_sid):
                         logger.info(f"Stream started: {stream_sid}")
                         handler.stream_sid = stream_sid
                         
-                        # Start STT streaming immediately for continuous conversation
-                        # Run async code in a new event loop since we're in sync context
+                        # Start the conversation properly
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
-                            if not handler.stt_client.is_streaming:
-                                loop.run_until_complete(handler.stt_client.start_streaming())
-                            
-                            # Send welcome message
-                            loop.run_until_complete(handler._send_response("I'm ready to help. What would you like to know?", ws))
+                            loop.run_until_complete(handler.start_conversation(ws))
                         finally:
                             loop.close()
                         

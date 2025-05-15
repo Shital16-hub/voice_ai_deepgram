@@ -1,6 +1,6 @@
 """
-Fixed WebSocket handler with proper continuous conversation support.
-Handles session persistence and automatic reconnection for multi-turn conversations.
+Fixed WebSocket handler with proper STT session management for continuous conversation.
+This handles automatic STT reconnection and maintains conversation state properly.
 """
 import json
 import asyncio
@@ -10,7 +10,7 @@ import time
 import os
 from typing import Dict, Any, Optional
 
-# Use the updated STT implementation
+# Use the fixed STT implementation
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 
 # Use the fixed TTS implementation
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class SimpleWebSocketHandler:
     """
     WebSocket handler optimized for continuous conversation with proper session management.
-    Maintains STT session across multiple utterances for seamless multi-turn interactions.
+    Automatically handles STT reconnection for seamless multi-turn interactions.
     """
     
     def __init__(self, call_sid: str, pipeline):
@@ -68,15 +68,14 @@ class SimpleWebSocketHandler:
         self.chunk_size = 800  # 100ms at 8kHz
         self.min_chunk_size = 160  # 20ms minimum
         
-        # Silence detection for better conversation flow
-        self.silence_threshold = 0.01
-        self.max_silence_chunks = 30  # ~3 seconds of silence before processing
-        self.silence_count = 0
-        
-        # Session management
+        # Session management for continuous conversation
         self.session_start_time = time.time()
         self.last_transcription_time = time.time()
-        self.consecutive_silence = 0
+        self.last_audio_time = time.time()
+        
+        # Track conversation state
+        self.waiting_for_response = False
+        self.last_response_time = time.time()
         
         # Stats
         self.audio_received = 0
@@ -112,8 +111,9 @@ class SimpleWebSocketHandler:
     
     async def _handle_audio(self, data: Dict[str, Any], ws):
         """Handle incoming audio data with continuous conversation support."""
-        if self.is_speaking:
-            return  # Skip audio while speaking to avoid feedback
+        # Don't skip audio while speaking - we want to be ready for interruptions
+        if self.waiting_for_response:
+            return  # But skip if we're still processing a response
         
         media = data.get('media', {})
         payload = media.get('payload')
@@ -125,73 +125,35 @@ class SimpleWebSocketHandler:
         try:
             audio_data = base64.b64decode(payload)
             self.audio_received += 1
+            self.last_audio_time = time.time()
         except Exception as e:
             logger.error(f"Error decoding audio: {e}")
             return
         
-        # Start STT if not already started
+        # Start STT if not already started (for the initial welcome message)
         if not self.stt_client.is_streaming:
             logger.info("Starting STT streaming for continuous conversation")
             await self.stt_client.start_streaming()
         
-        # Add to buffer
-        self.audio_buffer.extend(audio_data)
-        
-        # Process chunks when buffer is large enough
-        while len(self.audio_buffer) >= self.chunk_size:
-            chunk = bytes(self.audio_buffer[:self.chunk_size])
-            self.audio_buffer = self.audio_buffer[self.chunk_size:]
-            
-            # Check for silence to optimize processing
-            if self._is_silence(chunk):
-                self.silence_count += 1
-                if self.silence_count < self.max_silence_chunks:
-                    continue  # Skip processing until we have enough silence
-            else:
-                self.silence_count = 0  # Reset silence counter
-            
-            # Process chunk with STT
-            try:
-                result = await self.stt_client.process_audio_chunk(
-                    chunk, 
-                    callback=self._handle_transcription_result
-                )
-                
-                # Handle final results immediately
-                if result and result.is_final and result.text.strip():
-                    await self._process_final_transcription(result.text, ws)
-                    
-            except Exception as e:
-                logger.error(f"Error processing audio chunk: {e}")
-    
-    def _is_silence(self, audio_chunk: bytes) -> bool:
-        """Simple silence detection based on audio amplitude."""
-        if len(audio_chunk) == 0:
-            return True
-        
-        # Calculate RMS amplitude for μ-law audio
-        import audioop
+        # Process audio chunks immediately for real-time response
         try:
-            # Convert μ-law to linear PCM for analysis
-            linear_audio = audioop.ulaw2lin(audio_chunk, 2)
-            rms = audioop.rms(linear_audio, 2)
-            # Normalize RMS (32767 is max for 16-bit)
-            normalized_rms = rms / 32767.0
-            return normalized_rms < self.silence_threshold
-        except Exception:
-            # Fallback to simple byte analysis
-            avg_amplitude = sum(audio_chunk) / len(audio_chunk)
-            return avg_amplitude < (self.silence_threshold * 255)
+            await self.stt_client.process_audio_chunk(
+                audio_data, 
+                callback=self._handle_transcription_result
+            )
+        except Exception as e:
+            logger.error(f"Error processing audio chunk: {e}")
     
     async def _handle_transcription_result(self, result: StreamingTranscriptionResult):
         """Handle streaming transcription results with session tracking."""
         if result.is_final and result.text.strip():
             logger.info(f"Final transcription (session {result.session_id}): '{result.text}' (confidence: {result.confidence:.2f})")
             self.last_transcription_time = time.time()
-        elif result.text.strip():
-            logger.debug(f"Interim: '{result.text}'")
+            
+            # Process the transcription immediately for continuous conversation
+            await self._process_final_transcription(result.text, None)
     
-    async def _process_final_transcription(self, transcription: str, ws):
+    async def _process_final_transcription(self, transcription: str, ws=None):
         """Process final transcription and generate response."""
         # Clean up transcription
         cleaned_text = transcription.strip()
@@ -201,13 +163,25 @@ class SimpleWebSocketHandler:
             logger.debug(f"Skipping short transcription: '{cleaned_text}'")
             return
         
-        # Skip common non-speech sounds
-        skip_words = {'um', 'uh', 'mmm', 'hmm', 'ah', 'er'}
-        if cleaned_text.lower() in skip_words:
-            logger.debug(f"Skipping filler word: '{cleaned_text}'")
+        # Skip common non-speech sounds and responses that echo our output
+        skip_words = {'um', 'uh', 'mmm', 'hmm', 'ah', 'er', 'hello', 'hi', 'ready', 'help'}
+        words = cleaned_text.lower().split()
+        
+        # Skip if it's just filler words or echoes our greeting
+        if len(words) <= 3 and all(word in skip_words for word in words):
+            logger.debug(f"Skipping filler/echo: '{cleaned_text}'")
             return
         
+        # Check if this seems like an echo of our previous response
+        if self.responses_sent > 0:
+            # Simple check for common echo patterns
+            echo_phrases = ["ready to help", "what would you like", "how can i help"]
+            if any(phrase in cleaned_text.lower() for phrase in echo_phrases):
+                logger.debug(f"Skipping potential echo: '{cleaned_text}'")
+                return
+        
         self.transcriptions += 1
+        self.waiting_for_response = True
         logger.info(f"Processing transcription: '{cleaned_text}'")
         
         try:
@@ -217,26 +191,36 @@ class SimpleWebSocketHandler:
                 response_text = result.get("response", "")
                 
                 if response_text:
-                    await self._send_response(response_text, ws)
+                    await self._send_response(response_text)
                 else:
                     logger.warning("No response generated from knowledge base")
-                    await self._send_response("I'm sorry, I couldn't find an answer to that question.", ws)
+                    await self._send_response("I'm sorry, I couldn't find an answer to that question.")
             else:
                 logger.error("Pipeline or query engine not available")
-                await self._send_response("I'm sorry, there's an issue with my knowledge base.", ws)
+                await self._send_response("I'm sorry, there's an issue with my knowledge base.")
                 
         except Exception as e:
             logger.error(f"Error processing transcription: {e}", exc_info=True)
-            await self._send_response("I'm sorry, I encountered an error processing your request.", ws)
+            await self._send_response("I'm sorry, I encountered an error processing your request.")
+        finally:
+            self.waiting_for_response = False
     
-    async def _send_response(self, text: str, ws):
+    async def _send_response(self, text: str, ws=None):
         """Send TTS response with proper conversation flow."""
         if not text.strip():
             return
         
+        # Use the stored WebSocket if not provided
+        if ws is None:
+            ws = getattr(self, '_ws', None)
+            if ws is None:
+                logger.error("No WebSocket available for sending response")
+                return
+        
         try:
-            # Set speaking flag to pause audio processing
+            # Set speaking flag to indicate we're responding
             self.is_speaking = True
+            self.last_response_time = time.time()
             logger.info(f"Sending response: '{text}'")
             
             # Convert to speech
@@ -255,12 +239,14 @@ class SimpleWebSocketHandler:
         finally:
             # Clear speaking flag and resume listening
             self.is_speaking = False
+            
             # Small delay to ensure audio playback completes
             await asyncio.sleep(0.5)
             
-            # Reset buffers for next utterance
-            self.audio_buffer.clear()
-            self.silence_count = 0
+            # Make sure STT is still running for continuous conversation
+            if not self.stt_client.is_streaming and self.conversation_active:
+                logger.info("Restarting STT for continuous conversation")
+                await self.stt_client.start_streaming()
             
             logger.debug("Ready for next utterance")
     
@@ -293,12 +279,25 @@ class SimpleWebSocketHandler:
                 logger.error(f"Error sending audio chunk {i}: {e}")
                 break
     
+    async def start_conversation(self, ws):
+        """Start the conversation with proper STT initialization."""
+        # Store WebSocket reference for later use
+        self._ws = ws
+        
+        # Start STT streaming
+        if not self.stt_client.is_streaming:
+            logger.info("Starting STT streaming for conversation")
+            await self.stt_client.start_streaming()
+        
+        # Send welcome message
+        await self._send_response("I'm ready to help. What would you like to know?", ws)
+    
     async def _cleanup(self):
-        """Clean up resources while maintaining session if possible."""
+        """Clean up resources while maintaining session if needed."""
         try:
             self.conversation_active = False
             
-            # Only stop STT if we're truly done (not just between utterances)
+            # Check if we should keep the session alive for potential continuation
             session_duration = time.time() - self.session_start_time
             time_since_last_transcription = time.time() - self.last_transcription_time
             
@@ -338,7 +337,8 @@ class SimpleWebSocketHandler:
             "expecting_speech": self.expecting_speech,
             "project_id": self.project_id,
             "session_start_time": self.session_start_time,
-            "last_transcription_time": self.last_transcription_time
+            "last_transcription_time": self.last_transcription_time,
+            "waiting_for_response": self.waiting_for_response
         }
         
         # Add STT stats if available
