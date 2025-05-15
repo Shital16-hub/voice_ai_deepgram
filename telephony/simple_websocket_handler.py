@@ -1,5 +1,6 @@
 """
-Fixed WebSocket handler with synchronous processing and proper call flow.
+Fixed WebSocket handler with proper continuous conversation support.
+Handles session persistence and automatic reconnection for multi-turn conversations.
 """
 import json
 import asyncio
@@ -9,7 +10,7 @@ import time
 import os
 from typing import Dict, Any, Optional
 
-# Use the simplified STT implementation
+# Use the updated STT implementation
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 
 # Use the fixed TTS implementation
@@ -19,27 +20,27 @@ logger = logging.getLogger(__name__)
 
 class SimpleWebSocketHandler:
     """
-    Fixed WebSocket handler with proper Google Cloud STT v2 streaming and TTS.
-    Handles call flow synchronously to prevent race conditions.
+    WebSocket handler optimized for continuous conversation with proper session management.
+    Maintains STT session across multiple utterances for seamless multi-turn interactions.
     """
     
     def __init__(self, call_sid: str, pipeline):
-        """Initialize with proper configuration."""
+        """Initialize with continuous conversation support."""
         self.call_sid = call_sid
         self.stream_sid = None
         self.pipeline = pipeline
         
-        # Get project ID dynamically (no hardcoding)
+        # Get project ID dynamically
         self.project_id = self._get_project_id()
         
-        # Initialize Google Cloud STT v2 with optimal telephony settings
+        # Initialize Google Cloud STT v2 with continuous streaming settings
         credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         self.stt_client = GoogleCloudStreamingSTT(
             language="en-US",
             sample_rate=8000,
             encoding="MULAW",
             channels=1,
-            interim_results=False,  # Only final results for better accuracy
+            interim_results=False,  # Final results only for better conversation flow
             project_id=self.project_id,
             location="global",
             credentials_file=credentials_file
@@ -48,8 +49,8 @@ class SimpleWebSocketHandler:
         # Initialize Google Cloud TTS with fixed configuration
         self.tts_client = GoogleCloudTTS(
             credentials_file=credentials_file,
-            voice_name="en-US-Neural2-C",  # Specific voice name
-            voice_gender=None,  # Let Google handle gender for Neural2 voices
+            voice_name="en-US-Neural2-C",
+            voice_gender=None,  # Don't set gender for Neural2 voices
             language_code="en-US",
             container_format="mulaw",
             sample_rate=8000,
@@ -57,22 +58,32 @@ class SimpleWebSocketHandler:
             voice_type="NEURAL2"
         )
         
-        # State
+        # Conversation state management
         self.conversation_active = True
         self.is_speaking = False
-        self.stt_started = False
+        self.expecting_speech = True  # Always expect speech for continuous conversation
         
         # Audio processing
         self.audio_buffer = bytearray()
         self.chunk_size = 800  # 100ms at 8kHz
+        self.min_chunk_size = 160  # 20ms minimum
+        
+        # Silence detection for better conversation flow
+        self.silence_threshold = 0.01
+        self.max_silence_chunks = 30  # ~3 seconds of silence before processing
+        self.silence_count = 0
+        
+        # Session management
+        self.session_start_time = time.time()
+        self.last_transcription_time = time.time()
+        self.consecutive_silence = 0
         
         # Stats
         self.audio_received = 0
         self.transcriptions = 0
         self.responses_sent = 0
-        self.start_time = time.time()
         
-        logger.info(f"SimpleWebSocketHandler initialized for call {call_sid}, project: {self.project_id}")
+        logger.info(f"WebSocket handler initialized for continuous conversation - Call: {call_sid}, Project: {self.project_id}")
     
     def _get_project_id(self) -> str:
         """Get project ID from environment or credentials file."""
@@ -100,7 +111,7 @@ class SimpleWebSocketHandler:
         return "my-tts-project-458404"
     
     async def _handle_audio(self, data: Dict[str, Any], ws):
-        """Handle incoming audio data with proper buffering."""
+        """Handle incoming audio data with continuous conversation support."""
         if self.is_speaking:
             return  # Skip audio while speaking to avoid feedback
         
@@ -119,10 +130,9 @@ class SimpleWebSocketHandler:
             return
         
         # Start STT if not already started
-        if not self.stt_started:
+        if not self.stt_client.is_streaming:
+            logger.info("Starting STT streaming for continuous conversation")
             await self.stt_client.start_streaming()
-            self.stt_started = True
-            logger.info("Started STT streaming")
         
         # Add to buffer
         self.audio_buffer.extend(audio_data)
@@ -131,6 +141,14 @@ class SimpleWebSocketHandler:
         while len(self.audio_buffer) >= self.chunk_size:
             chunk = bytes(self.audio_buffer[:self.chunk_size])
             self.audio_buffer = self.audio_buffer[self.chunk_size:]
+            
+            # Check for silence to optimize processing
+            if self._is_silence(chunk):
+                self.silence_count += 1
+                if self.silence_count < self.max_silence_chunks:
+                    continue  # Skip processing until we have enough silence
+            else:
+                self.silence_count = 0  # Reset silence counter
             
             # Process chunk with STT
             try:
@@ -146,30 +164,56 @@ class SimpleWebSocketHandler:
             except Exception as e:
                 logger.error(f"Error processing audio chunk: {e}")
     
+    def _is_silence(self, audio_chunk: bytes) -> bool:
+        """Simple silence detection based on audio amplitude."""
+        if len(audio_chunk) == 0:
+            return True
+        
+        # Calculate RMS amplitude for μ-law audio
+        import audioop
+        try:
+            # Convert μ-law to linear PCM for analysis
+            linear_audio = audioop.ulaw2lin(audio_chunk, 2)
+            rms = audioop.rms(linear_audio, 2)
+            # Normalize RMS (32767 is max for 16-bit)
+            normalized_rms = rms / 32767.0
+            return normalized_rms < self.silence_threshold
+        except Exception:
+            # Fallback to simple byte analysis
+            avg_amplitude = sum(audio_chunk) / len(audio_chunk)
+            return avg_amplitude < (self.silence_threshold * 255)
+    
     async def _handle_transcription_result(self, result: StreamingTranscriptionResult):
-        """Handle streaming transcription results."""
+        """Handle streaming transcription results with session tracking."""
         if result.is_final and result.text.strip():
-            logger.info(f"Final transcription: '{result.text}' (confidence: {result.confidence:.2f})")
+            logger.info(f"Final transcription (session {result.session_id}): '{result.text}' (confidence: {result.confidence:.2f})")
+            self.last_transcription_time = time.time()
         elif result.text.strip():
             logger.debug(f"Interim: '{result.text}'")
     
     async def _process_final_transcription(self, transcription: str, ws):
         """Process final transcription and generate response."""
-        # Skip very short transcriptions
-        if not transcription or len(transcription.strip()) < 2:
+        # Clean up transcription
+        cleaned_text = transcription.strip()
+        
+        # Skip very short or meaningless transcriptions
+        if not cleaned_text or len(cleaned_text) < 2:
+            logger.debug(f"Skipping short transcription: '{cleaned_text}'")
             return
         
         # Skip common non-speech sounds
-        if transcription.lower().strip() in ['um', 'uh', 'mmm', 'hmm']:
+        skip_words = {'um', 'uh', 'mmm', 'hmm', 'ah', 'er'}
+        if cleaned_text.lower() in skip_words:
+            logger.debug(f"Skipping filler word: '{cleaned_text}'")
             return
         
         self.transcriptions += 1
-        logger.info(f"Processing transcription: '{transcription}'")
+        logger.info(f"Processing transcription: '{cleaned_text}'")
         
         try:
             # Query knowledge base through pipeline
             if hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
-                result = await self.pipeline.query_engine.query(transcription)
+                result = await self.pipeline.query_engine.query(cleaned_text)
                 response_text = result.get("response", "")
                 
                 if response_text:
@@ -186,11 +230,12 @@ class SimpleWebSocketHandler:
             await self._send_response("I'm sorry, I encountered an error processing your request.", ws)
     
     async def _send_response(self, text: str, ws):
-        """Send TTS response with proper error handling."""
+        """Send TTS response with proper conversation flow."""
         if not text.strip():
             return
         
         try:
+            # Set speaking flag to pause audio processing
             self.is_speaking = True
             logger.info(f"Sending response: '{text}'")
             
@@ -208,9 +253,16 @@ class SimpleWebSocketHandler:
         except Exception as e:
             logger.error(f"Error sending response: {e}", exc_info=True)
         finally:
+            # Clear speaking flag and resume listening
             self.is_speaking = False
-            # Add a small delay after speaking to avoid cutting off audio
+            # Small delay to ensure audio playback completes
             await asyncio.sleep(0.5)
+            
+            # Reset buffers for next utterance
+            self.audio_buffer.clear()
+            self.silence_count = 0
+            
+            logger.debug("Ready for next utterance")
     
     async def _send_audio_chunks(self, audio_data: bytes, ws):
         """Send audio data as chunks to Twilio."""
@@ -242,17 +294,24 @@ class SimpleWebSocketHandler:
                 break
     
     async def _cleanup(self):
-        """Clean up resources."""
+        """Clean up resources while maintaining session if possible."""
         try:
             self.conversation_active = False
             
-            # Stop STT streaming
-            if self.stt_started:
-                await self.stt_client.stop_streaming()
-                await self.stt_client.cleanup()
-                self.stt_started = False
+            # Only stop STT if we're truly done (not just between utterances)
+            session_duration = time.time() - self.session_start_time
+            time_since_last_transcription = time.time() - self.last_transcription_time
             
-            duration = time.time() - self.start_time
+            # Keep session alive if it's recent and active
+            if session_duration < 300 and time_since_last_transcription < 60:  # 5 min total, 1 min idle
+                logger.info("Keeping STT session alive for potential continuation")
+            else:
+                logger.info("Stopping STT session due to inactivity")
+                if self.stt_client.is_streaming:
+                    await self.stt_client.stop_streaming()
+                    await self.stt_client.cleanup()
+            
+            duration = time.time() - self.session_start_time
             
             logger.info(f"Session cleanup completed. Stats: "
                        f"Duration: {duration:.2f}s, "
@@ -264,8 +323,8 @@ class SimpleWebSocketHandler:
             logger.error(f"Error during cleanup: {e}")
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get session statistics."""
-        duration = time.time() - self.start_time
+        """Get session statistics including STT session info."""
+        duration = time.time() - self.session_start_time
         
         stats = {
             "call_sid": self.call_sid,
@@ -276,8 +335,10 @@ class SimpleWebSocketHandler:
             "responses_sent": self.responses_sent,
             "is_speaking": self.is_speaking,
             "conversation_active": self.conversation_active,
-            "stt_started": self.stt_started,
-            "project_id": self.project_id
+            "expecting_speech": self.expecting_speech,
+            "project_id": self.project_id,
+            "session_start_time": self.session_start_time,
+            "last_transcription_time": self.last_transcription_time
         }
         
         # Add STT stats if available

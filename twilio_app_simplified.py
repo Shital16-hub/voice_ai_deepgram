@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed Twilio application with proper call handling and WebSocket setup.
+Twilio application optimized for continuous conversation with proper session management.
 """
 import os
 import sys
@@ -44,14 +44,15 @@ app = Flask(__name__)
 voice_ai_pipeline = None
 base_url = None
 
-# Track active calls
+# Track active calls with session management
 active_calls = {}
+call_sessions = {}  # Track call session metadata
 
 async def initialize_system():
-    """Initialize the Voice AI system with better error handling."""
+    """Initialize the Voice AI system with optimized conversation settings."""
     global voice_ai_pipeline, base_url
     
-    logger.info("Initializing Voice AI Agent with fixed architecture...")
+    logger.info("Initializing Voice AI Agent for continuous conversation...")
     
     # Validate required environment variables
     base_url = os.getenv('BASE_URL')
@@ -67,7 +68,7 @@ async def initialize_system():
     
     logger.info(f"Using BASE_URL: {base_url}")
     
-    # Initialize Voice AI Agent
+    # Initialize Voice AI Agent with conversation-optimized settings
     agent = VoiceAIAgent(
         storage_dir='./storage',
         model_name='mistral:7b-instruct-v0.2-q4_0',
@@ -85,7 +86,7 @@ async def initialize_system():
     )
     await tts.init()
     
-    # Create pipeline
+    # Create pipeline optimized for continuous conversation
     voice_ai_pipeline = VoiceAIAgentPipeline(
         speech_recognizer=agent.speech_recognizer,
         conversation_manager=agent.conversation_manager,
@@ -93,26 +94,28 @@ async def initialize_system():
         tts_integration=tts
     )
     
-    logger.info("System initialized successfully")
+    logger.info("System initialized successfully for continuous conversation")
 
 @app.route('/', methods=['GET'])
 def index():
     """Health check endpoint."""
     return {
         "status": "running",
-        "message": "Voice AI Agent is running with fixed architecture",
-        "version": "2.0.0"
+        "message": "Voice AI Agent running with continuous conversation support",
+        "version": "2.1.0",
+        "active_calls": len(active_calls)
     }
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Detailed health check."""
+    """Detailed health check with conversation metrics."""
     health_status = {
         "status": "healthy" if voice_ai_pipeline else "initializing",
         "timestamp": time.time(),
         "components": {
             "pipeline": voice_ai_pipeline is not None,
-            "active_calls": len(active_calls)
+            "active_calls": len(active_calls),
+            "active_sessions": len(call_sessions)
         }
     }
     
@@ -123,11 +126,20 @@ def health_check():
             "kb": hasattr(voice_ai_pipeline, 'query_engine')
         })
     
+    # Add session health info
+    if call_sessions:
+        session_ages = [time.time() - session['start_time'] for session in call_sessions.values()]
+        health_status["session_metrics"] = {
+            "oldest_session_age": max(session_ages),
+            "average_session_age": sum(session_ages) / len(session_ages),
+            "sessions_over_5min": len([age for age in session_ages if age > 300])
+        }
+    
     return jsonify(health_status)
 
 @app.route('/voice/incoming', methods=['POST'])
 def handle_incoming_call():
-    """Handle incoming voice calls with proper TwiML response."""
+    """Handle incoming voice calls with optimized TwiML for continuous conversation."""
     logger.info("Received incoming call request")
     
     if not voice_ai_pipeline:
@@ -145,43 +157,53 @@ def handle_incoming_call():
     
     logger.info(f"Incoming call - From: {from_number}, To: {to_number}, CallSid: {call_sid}")
     
+    # Track call session
+    call_sessions[call_sid] = {
+        "start_time": time.time(),
+        "from_number": from_number,
+        "to_number": to_number,
+        "status": "initiated"
+    }
+    
     try:
         # Validate base_url
         if not base_url:
             raise ValueError("BASE_URL not configured")
         
-        # Create TwiML response with proper call flow
+        # Create TwiML response optimized for continuous conversation
         response = VoiceResponse()
         
-        # Answer the call with a greeting
-        response.say("Hello! Please wait while I connect you to our AI assistant.", voice="alice")
-        
-        # Add a short pause to ensure the call is answered
-        response.pause(length=1)
+        # Brief greeting to establish connection
+        response.say("Hello! I'm your AI assistant. How can I help you today?", voice="alice")
         
         # Create WebSocket URL
         ws_url = f'{base_url.replace("https://", "wss://")}/ws/stream/{call_sid}'
         logger.info(f"WebSocket URL: {ws_url}")
         
-        # Create Connect with Stream
+        # Create Connect with Stream - optimized for bidirectional conversation
         connect = Connect()
         stream = Stream(
             url=ws_url,
-            track="inbound_track"  # Only capture inbound audio
+            track="inbound_track"  # Capture inbound audio for processing
         )
         
         connect.append(stream)
         response.append(connect)
         
         # Keep the call alive after streaming ends
-        response.say("Thank you for calling. Goodbye!", voice="alice")
+        response.say("Thank you for calling. Have a great day!", voice="alice")
         response.hangup()
         
-        logger.info(f"Generated TwiML for call {call_sid}")
+        logger.info(f"Generated TwiML for continuous conversation - Call {call_sid}")
         return Response(str(response), mimetype='text/xml')
         
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
+        # Update session status
+        if call_sid in call_sessions:
+            call_sessions[call_sid]["status"] = "error"
+            call_sessions[call_sid]["error"] = str(e)
+        
         return Response('''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">An error occurred. Please try again later.</Say>
@@ -190,30 +212,60 @@ def handle_incoming_call():
 
 @app.route('/voice/status', methods=['POST'])
 def handle_status_callback():
-    """Handle call status callbacks with logging."""
+    """Handle call status callbacks with session tracking."""
     call_sid = request.form.get('CallSid')
     call_status = request.form.get('CallStatus')
     call_duration = request.form.get('CallDuration', '0')
+    from_number = request.form.get('From')
+    to_number = request.form.get('To')
     
     logger.info(f"Call {call_sid} status: {call_status}, duration: {call_duration}s")
+    
+    # Update session info
+    if call_sid in call_sessions:
+        call_sessions[call_sid].update({
+            "status": call_status,
+            "duration": call_duration,
+            "end_time": time.time() if call_status in ['completed', 'failed', 'busy', 'no-answer'] else None
+        })
     
     # Clean up completed calls
     if call_status in ['completed', 'failed', 'busy', 'no-answer']:
         if call_sid in active_calls:
             handler = active_calls[call_sid]
-            # Trigger cleanup
+            # Trigger cleanup with session preservation logic
             try:
                 asyncio.create_task(handler._cleanup())
             except Exception as e:
                 logger.error(f"Error during cleanup: {e}")
             del active_calls[call_sid]
             logger.info(f"Cleaned up call {call_sid}")
+        
+        # Keep session info for a while for debugging
+        if call_sid in call_sessions:
+            call_sessions[call_sid]["status"] = "completed"
+            # Clean up old sessions (older than 1 hour)
+            cleanup_sessions()
     
     return Response('', status=204)
 
+def cleanup_sessions():
+    """Clean up old call sessions to prevent memory leaks."""
+    current_time = time.time()
+    sessions_to_remove = []
+    
+    for call_sid, session in call_sessions.items():
+        # Remove sessions older than 1 hour
+        if current_time - session['start_time'] > 3600:
+            sessions_to_remove.append(call_sid)
+    
+    for call_sid in sessions_to_remove:
+        del call_sessions[call_sid]
+        logger.debug(f"Cleaned up old session: {call_sid}")
+
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream with improved error handling."""
+    """Handle WebSocket media stream with continuous conversation support."""
     logger.info(f"WebSocket connection request for call {call_sid}")
     
     if not voice_ai_pipeline:
@@ -228,9 +280,14 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Create handler with improved architecture
+        # Create handler optimized for continuous conversation
         handler = SimpleWebSocketHandler(call_sid, voice_ai_pipeline)
         active_calls[call_sid] = handler
+        
+        # Update session status
+        if call_sid in call_sessions:
+            call_sessions[call_sid]["status"] = "connected"
+            call_sessions[call_sid]["ws_connected_time"] = time.time()
         
         # Process incoming messages
         while True:
@@ -255,22 +312,51 @@ def handle_media_stream(call_sid):
                         logger.info(f"Stream started: {stream_sid}")
                         handler.stream_sid = stream_sid
                         
-                        # Start STT streaming
-                        asyncio.run(handler.stt_client.start_streaming())
+                        # Start STT streaming immediately for continuous conversation
+                        # Run async code in a new event loop since we're in sync context
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            if not handler.stt_client.is_streaming:
+                                loop.run_until_complete(handler.stt_client.start_streaming())
+                            
+                            # Send welcome message
+                            loop.run_until_complete(handler._send_response("I'm ready to help. What would you like to know?", ws))
+                        finally:
+                            loop.close()
                         
-                        # Send welcome message
-                        asyncio.run(handler._send_response("Hello! How can I help you today?", ws))
+                        # Update session
+                        if call_sid in call_sessions:
+                            call_sessions[call_sid]["stream_started"] = True
+                            call_sessions[call_sid]["stream_sid"] = stream_sid
                         
                     elif event_type == 'media':
-                        # Handle audio data
-                        asyncio.run(handler._handle_audio(data, ws))
+                        # Handle audio data for continuous conversation
+                        # Run async code in a new event loop
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(handler._handle_audio(data, ws))
+                        finally:
+                            loop.close()
                         
                     elif event_type == 'stop':
                         logger.info(f"Stream stopped for call {call_sid}")
-                        asyncio.run(handler._cleanup())
+                        
+                        # Run cleanup in event loop
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(handler._cleanup())
+                        finally:
+                            loop.close()
+                        
+                        # Update session
+                        if call_sid in call_sessions:
+                            call_sessions[call_sid]["stream_stopped"] = True
                         break
                         
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
                     logger.error(f"Invalid JSON received: {message}")
                     continue
                 except Exception as e:
@@ -291,12 +377,22 @@ def handle_media_stream(call_sid):
         # Cleanup resources
         if handler:
             try:
-                asyncio.run(handler._cleanup())
+                # Run cleanup in event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(handler._cleanup())
+                finally:
+                    loop.close()
             except Exception as e:
                 logger.error(f"Error during handler cleanup: {e}")
         
         if call_sid in active_calls:
             del active_calls[call_sid]
+        
+        # Update session
+        if call_sid in call_sessions:
+            call_sessions[call_sid]["ws_disconnected_time"] = time.time()
         
         if ws:
             try:
@@ -309,15 +405,17 @@ def handle_media_stream(call_sid):
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
-    """Get comprehensive statistics for monitoring."""
+    """Get comprehensive statistics including conversation metrics."""
     stats = {
         "timestamp": time.time(),
         "system": {
             "initialized": voice_ai_pipeline is not None,
             "active_calls": len(active_calls),
+            "total_sessions": len(call_sessions),
             "base_url": base_url
         },
-        "calls": {}
+        "calls": {},
+        "sessions": {}
     }
     
     # Add individual call stats
@@ -327,6 +425,24 @@ def get_stats():
         except Exception as e:
             logger.error(f"Error getting stats for call {call_sid}: {e}")
             stats["calls"][call_sid] = {"error": str(e)}
+    
+    # Add session information
+    for call_sid, session in call_sessions.items():
+        stats["sessions"][call_sid] = {
+            **session,
+            "age": time.time() - session['start_time']
+        }
+    
+    # Add conversation metrics
+    if active_calls:
+        total_transcriptions = sum(handler.transcriptions for handler in active_calls.values())
+        total_responses = sum(handler.responses_sent for handler in active_calls.values())
+        stats["conversation_metrics"] = {
+            "total_transcriptions": total_transcriptions,
+            "total_responses": total_responses,
+            "average_transcriptions_per_call": total_transcriptions / len(active_calls),
+            "average_responses_per_call": total_responses / len(active_calls)
+        }
     
     return jsonify(stats)
 
@@ -339,7 +455,12 @@ def get_config():
         "debug": DEBUG,
         "base_url": base_url,
         "google_credentials": os.getenv('GOOGLE_APPLICATION_CREDENTIALS'),
-        "google_project": os.getenv('GOOGLE_CLOUD_PROJECT')
+        "google_project": os.getenv('GOOGLE_CLOUD_PROJECT'),
+        "conversation_features": {
+            "continuous_streaming": True,
+            "session_management": True,
+            "auto_reconnection": True
+        }
     }
     return jsonify(config)
 
@@ -370,7 +491,7 @@ def not_found(error):
     return jsonify({"error": "Not found"}), 404
 
 if __name__ == '__main__':
-    print("Starting Voice AI Agent with fixed architecture...")
+    print("Starting Voice AI Agent with continuous conversation support...")
     print(f"Base URL: {os.getenv('BASE_URL', 'Not set')}")
     print(f"Google Credentials: {os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'Not set')}")
     
