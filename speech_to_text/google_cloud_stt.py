@@ -1,18 +1,22 @@
 """
-Optimized Google Cloud Speech-to-Text v2 implementation for Twilio telephony.
+Google Cloud Speech-to-Text v2 implementation for Twilio telephony.
+Based on official Google Cloud examples with proper async implementation.
 """
 import logging
 import asyncio
 import time
 import os
 import json
-from typing import Dict, Any, Optional, List, Callable, Awaitable, Union
+import queue
+import threading
+from typing import Dict, Any, Optional, List, Callable, Awaitable, Union, Iterator
 import numpy as np
 from dataclasses import dataclass
 
 # Import Speech-to-Text v2 API
-from google.cloud import speech_v2
-from google.api_core.client_options import ClientOptions
+from google.cloud.speech_v2 import SpeechClient
+from google.cloud.speech_v2.types import cloud_speech
+from google.protobuf import duration_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +33,8 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Google Cloud Speech-to-Text v2 client optimized for telephony with Twilio.
-    Uses MULAW encoding at 8kHz for direct compatibility with Twilio.
+    Google Cloud Speech-to-Text v2 client optimized for telephony.
+    Uses proper async/sync boundary management for real-time streaming.
     """
     
     def __init__(
@@ -44,9 +48,7 @@ class GoogleCloudStreamingSTT:
         location: str = "global",
         enhanced_model: bool = True
     ):
-        """
-        Initialize with optimal settings for Twilio telephony.
-        """
+        """Initialize with optimal settings for Twilio telephony."""
         self.language = language
         self.sample_rate = sample_rate
         self.encoding = encoding
@@ -55,10 +57,8 @@ class GoogleCloudStreamingSTT:
         self.enhanced_model = enhanced_model
         self.location = location
         
-        # Get project ID with automatic extraction
+        # Get project ID
         self.project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
-        
-        # If not provided, try to extract from credentials file
         if not self.project_id:
             credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
             if credentials_file and os.path.exists(credentials_file):
@@ -66,92 +66,172 @@ class GoogleCloudStreamingSTT:
                     with open(credentials_file, 'r') as f:
                         creds_data = json.load(f)
                         self.project_id = creds_data.get('project_id')
-                        logger.info(f"Auto-extracted project ID from credentials: {self.project_id}")
+                        logger.info(f"Auto-extracted project ID: {self.project_id}")
                 except Exception as e:
-                    logger.error(f"Error reading credentials file: {e}")
+                    logger.error(f"Error reading credentials: {e}")
         
         if not self.project_id:
-            raise ValueError(
-                "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
-                "or ensure your credentials file contains a project_id field."
-            )
+            raise ValueError("Google Cloud project ID is required")
         
-        # Initialize v2 client with proper endpoint
-        endpoint = f"{location}-speech.googleapis.com" if location != "global" else None
-        client_options = ClientOptions(api_endpoint=endpoint) if endpoint else None
+        # Initialize client
+        self.client = SpeechClient()
         
-        self.client = speech_v2.SpeechClient(client_options=client_options)
-        
-        # Construct recognizer path
-        self.recognizer_path = self.client.recognizer_path(
-            project=self.project_id,
-            location=location,
-            recognizer="_"  # Use the default recognizer
-        )
+        # Setup recognizer
+        self._setup_recognizer()
         
         # State tracking
         self.is_streaming = False
-        self.chunk_count = 0
+        self.audio_queue = queue.Queue()
+        self.result_queue = asyncio.Queue()
+        self.stream_thread = None
+        self.stop_event = threading.Event()
+        
+        # Statistics
         self.total_chunks = 0
         self.successful_transcriptions = 0
-        self.streaming_call = None
-        self.request_queue = asyncio.Queue()
         
-        logger.info(f"Initialized GoogleCloudStreamingSTT v2: {sample_rate}Hz, {encoding}, telephony-optimized")
-        logger.info(f"Using project: {self.project_id}, location: {location}")
+        logger.info(f"Initialized Speech v2: {sample_rate}Hz, {encoding}, project: {self.project_id}")
     
-    def _get_recognition_config(self) -> speech_v2.RecognitionConfig:
-        """Get optimized v2 recognition configuration for telephony."""
+    def _setup_recognizer(self):
+        """Setup recognizer configuration based on official examples."""
+        # Recognizer path
+        self.recognizer_path = f"projects/{self.project_id}/locations/{self.location}/recognizers/_"
         
-        # Create explicit decoding config for MULAW
-        decoding_config = speech_v2.ExplicitDecodingConfig(
-            encoding=speech_v2.ExplicitDecodingConfig.AudioEncoding.MULAW,
-            sample_rate_hertz=self.sample_rate,
-            audio_channel_count=self.channels,
-        )
+        # Explicit decoding config
+        if self.encoding == "MULAW":
+            encoding_type = cloud_speech.ExplicitDecodingConfig.AudioEncoding.MULAW
+        else:
+            encoding_type = cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16
         
-        # Create recognition features
-        features = speech_v2.RecognitionFeatures(
-            enable_automatic_punctuation=True,
-            enable_word_time_offsets=True,
-            enable_word_confidence=True,
-        )
-        
-        # Create recognition config optimized for telephony
-        config = speech_v2.RecognitionConfig(
-            explicit_decoding_config=decoding_config,
+        # Recognition config (optimized for telephony)
+        self.recognition_config = cloud_speech.RecognitionConfig(
+            explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
+                sample_rate_hertz=self.sample_rate,
+                encoding=encoding_type,
+                audio_channel_count=self.channels,
+            ),
             language_codes=[self.language],
-            model="telephony" if self.enhanced_model else "latest_short",
-            features=features,
+            model="telephony",  # Best for phone calls
+            features=cloud_speech.RecognitionFeatures(
+                enable_automatic_punctuation=True,
+                enable_word_time_offsets=True,
+                enable_word_confidence=True,
+            ),
         )
         
-        return config
+        # Streaming config
+        self.streaming_config = cloud_speech.StreamingRecognitionConfig(
+            config=self.recognition_config,
+            streaming_features=cloud_speech.StreamingRecognitionFeatures(
+                interim_results=self.interim_results,
+                voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
+                    speech_start_timeout=duration_pb2.Duration(seconds=5),
+                    speech_end_timeout=duration_pb2.Duration(seconds=1),
+                ),
+            ),
+        )
+        
+        # Initial config request
+        self.config_request = cloud_speech.StreamingRecognizeRequest(
+            recognizer=self.recognizer_path,
+            streaming_config=self.streaming_config,
+        )
+    
+    def _requests_generator(self) -> Iterator[cloud_speech.StreamingRecognizeRequest]:
+        """Generate streaming requests following official examples."""
+        # Yield initial config
+        yield self.config_request
+        
+        # Yield audio chunks
+        while not self.stop_event.is_set():
+            try:
+                # Get audio chunk with timeout
+                chunk = self.audio_queue.get(timeout=0.1)
+                if chunk is None:  # End marker
+                    break
+                yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
+                self.audio_queue.task_done()
+            except queue.Empty:
+                continue
+    
+    def _run_streaming(self):
+        """Run streaming recognition in separate thread."""
+        try:
+            logger.info("Starting streaming recognition thread")
+            
+            # Create the streaming recognition call
+            responses = self.client.streaming_recognize(
+                requests=self._requests_generator()
+            )
+            
+            # Process responses
+            for response in responses:
+                if self.stop_event.is_set():
+                    break
+                
+                # Process results
+                for result in response.results:
+                    if result.alternatives:
+                        alternative = result.alternatives[0]
+                        
+                        # Create result object
+                        transcription_result = StreamingTranscriptionResult(
+                            text=alternative.transcript,
+                            is_final=result.is_final,
+                            confidence=alternative.confidence if result.is_final else 0.0,
+                        )
+                        
+                        # Put result in async queue
+                        try:
+                            self.result_queue.put_nowait(transcription_result)
+                        except asyncio.QueueFull:
+                            logger.warning("Result queue full, dropping result")
+                        
+                        # Log final results
+                        if result.is_final:
+                            self.successful_transcriptions += 1
+                            logger.info(f"Final: '{alternative.transcript}' ({alternative.confidence:.2f})")
+                            
+        except Exception as e:
+            logger.error(f"Streaming error: {e}", exc_info=True)
+        finally:
+            logger.info("Streaming recognition thread ended")
     
     async def start_streaming(self) -> None:
-        """Start a new streaming session."""
+        """Start streaming session."""
         if self.is_streaming:
             await self.stop_streaming()
         
         self.is_streaming = True
-        self.chunk_count = 0
-        logger.info("Started Google Cloud Speech v2 streaming session")
+        self.stop_event.clear()
+        self.audio_queue = queue.Queue()
+        self.result_queue = asyncio.Queue()
+        
+        # Start streaming thread
+        self.stream_thread = threading.Thread(target=self._run_streaming, daemon=True)
+        self.stream_thread.start()
+        
+        logger.info("Started streaming session")
     
     async def stop_streaming(self) -> tuple[str, float]:
-        """Stop the streaming session."""
+        """Stop streaming session."""
         if not self.is_streaming:
             return "", 0.0
         
         self.is_streaming = False
+        self.stop_event.set()
         
-        # Close streaming call if active
-        if self.streaming_call:
-            try:
-                await self.streaming_call.close()
-            except Exception as e:
-                logger.error(f"Error closing streaming call: {e}")
-            self.streaming_call = None
+        # Signal end of audio
+        try:
+            self.audio_queue.put(None, timeout=1.0)
+        except queue.Full:
+            pass
         
-        logger.info(f"Stopped streaming session. Processed {self.chunk_count} chunks")
+        # Wait for thread to finish
+        if self.stream_thread and self.stream_thread.is_alive():
+            self.stream_thread.join(timeout=2.0)
+        
+        logger.info("Stopped streaming session")
         return "", 0.0
     
     async def process_audio_chunk(
@@ -159,21 +239,17 @@ class GoogleCloudStreamingSTT:
         audio_chunk: Union[bytes, np.ndarray],
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
-        """
-        Process audio chunk with v2 API - batch processing for better accuracy.
-        """
+        """Process audio chunk."""
         if not self.is_streaming:
             await self.start_streaming()
         
         self.total_chunks += 1
         
         try:
-            # Convert numpy array to bytes if needed
+            # Convert numpy to bytes if needed
             if isinstance(audio_chunk, np.ndarray):
-                # For MULAW, convert float32 to mulaw bytes
                 if audio_chunk.dtype == np.float32:
                     import audioop
-                    # Convert to 16-bit PCM first
                     pcm_data = (audio_chunk * 32767).astype(np.int16).tobytes()
                     audio_bytes = audioop.lin2ulaw(pcm_data, 2)
                 else:
@@ -181,73 +257,47 @@ class GoogleCloudStreamingSTT:
             else:
                 audio_bytes = audio_chunk
             
-            logger.debug(f"Processing audio chunk #{self.total_chunks}: {len(audio_bytes)} bytes")
-            
             # Skip tiny chunks
-            if len(audio_bytes) < 160:  # Less than 20ms at 8kHz
-                logger.debug("Skipping tiny audio chunk")
+            if len(audio_bytes) < 40:
                 return None
             
-            # Use batch recognition for better accuracy
-            config = self._get_recognition_config()
+            # Add to queue
+            try:
+                self.audio_queue.put(audio_bytes, timeout=0.1)
+            except queue.Full:
+                logger.warning("Audio queue full, dropping chunk")
+                return None
             
-            # Create recognition request
-            request = speech_v2.RecognizeRequest(
-                recognizer=self.recognizer_path,
-                config=config,
-                content=audio_bytes,
-            )
+            # Check for results
+            while not self.result_queue.empty():
+                try:
+                    result = self.result_queue.get_nowait()
+                    if callback:
+                        await callback(result)
+                    if result.is_final:
+                        return result
+                except asyncio.QueueEmpty:
+                    break
             
-            # Perform synchronous recognition
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.client.recognize(request=request)
-            )
-            
-            # Process results
-            if response.results:
-                for result in response.results:
-                    if result.alternatives:
-                        alternative = result.alternatives[0]
-                        
-                        # Create result object
-                        self.chunk_count += 1
-                        transcription_result = StreamingTranscriptionResult(
-                            text=alternative.transcript,
-                            is_final=True,  # Batch results are always final
-                            confidence=getattr(alternative, 'confidence', 0.9),
-                            chunk_id=self.chunk_count
-                        )
-                        
-                        self.successful_transcriptions += 1
-                        logger.info(f"Transcription: '{alternative.transcript}' (confidence: {transcription_result.confidence:.2f})")
-                        
-                        # Call callback if provided
-                        if callback:
-                            await callback(transcription_result)
-                        
-                        return transcription_result
-            
-            logger.debug("No transcription results from Google Cloud Speech v2")
             return None
             
         except Exception as e:
-            logger.error(f"Error processing audio chunk: {e}", exc_info=True)
+            logger.error(f"Error processing chunk: {e}")
             return None
     
     def get_stats(self) -> Dict[str, Any]:
         """Get processing statistics."""
         success_rate = (self.successful_transcriptions / max(self.total_chunks, 1)) * 100
-        
         return {
-            "total_chunks": self.total_chunks,
-            "successful_transcriptions": self.successful_transcriptions,
-            "success_rate": round(success_rate, 2),
             "is_streaming": self.is_streaming,
             "language_code": self.language,
-            "model": "telephony" if self.enhanced_model else "latest_short",
+            "model": "telephony",
             "api_version": "v2",
             "encoding": self.encoding,
             "sample_rate": self.sample_rate,
-            "project_id": self.project_id
+            "project_id": self.project_id,
+            "location": self.location,
+            "total_chunks": self.total_chunks,
+            "successful_transcriptions": self.successful_transcriptions,
+            "success_rate": round(success_rate, 2)
         }

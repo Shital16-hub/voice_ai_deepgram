@@ -1,14 +1,11 @@
 """
-Enhanced Speech-to-Text integration module optimized for telephony with v2 API.
+Enhanced Speech-to-Text integration module optimized for telephony with minimal processing.
 """
 import logging
 import time
-import asyncio
-import re
-import numpy as np
 import os
 import json
-from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union, AsyncIterator
+from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple, Union
 
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 
@@ -16,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 class STTIntegration:
     """
-    Enhanced Speech-to-Text integration optimized for telephony with minimal processing.
-    Uses Google Cloud Speech-to-Text v2 API.
+    Speech-to-Text integration optimized for telephony with zero preprocessing.
+    Uses Google Cloud Speech-to-Text v2 API optimally for telephony.
     """
     
     def __init__(
@@ -32,14 +29,7 @@ class STTIntegration:
         self.language = language
         self.initialized = True if speech_recognizer else False
         
-        # Keep minimal cleanup patterns - let Google v2 handle most of it
-        self.cleanup_patterns = [
-            # Only remove obvious technical artifacts
-            (re.compile(r'\[.*?\]'), ''),  # [inaudible]
-            (re.compile(r'\<.*?\>'), ''),  # <music>
-            # Remove excessive whitespace
-            (re.compile(r'\s+'), ' '),
-        ]
+        logger.info("STTIntegration initialized for telephony with minimal processing")
     
     async def init(self, project_id: Optional[str] = None) -> None:
         """Initialize the STT component if not already initialized."""
@@ -68,15 +58,16 @@ class STTIntegration:
             )
             
         try:
-            # Create a new Google Cloud v2 streaming client with optimal settings
+            # Create Google Cloud v2 streaming client with optimal telephony settings
             self.speech_recognizer = GoogleCloudStreamingSTT(
                 language=self.language,
-                sample_rate=8000,  # Match Twilio
-                encoding="MULAW",   # Match Twilio
+                sample_rate=8000,  # Match Twilio exactly
+                encoding="MULAW",   # Match Twilio exactly
                 channels=1,
-                interim_results=False,  # Disable for better accuracy
+                interim_results=False,  # Only final results for accuracy
                 project_id=final_project_id,
-                enhanced_model=True
+                enhanced_model=True,    # Use telephony-enhanced model
+                location="global"
             )
             
             self.initialized = True
@@ -87,22 +78,17 @@ class STTIntegration:
     
     def cleanup_transcription(self, text: str) -> str:
         """
-        Minimal cleanup - let Google's v2 telephony model handle most of it.
+        Absolutely minimal cleanup - trust Google's telephony model.
         """
         if not text:
             return ""
         
-        # Apply minimal cleanup patterns
-        cleaned = text
-        for pattern, replacement in self.cleanup_patterns:
-            cleaned = pattern.sub(replacement, cleaned)
+        # Only strip whitespace and ensure proper capitalization
+        cleaned = text.strip()
         
-        # Basic normalization
-        cleaned = cleaned.strip()
-        
-        # Ensure proper capitalization
-        if cleaned and len(cleaned) > 0:
-            cleaned = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
+        # Capitalize first letter if needed
+        if cleaned and cleaned[0].islower():
+            cleaned = cleaned[0].upper() + cleaned[1:]
         
         return cleaned
     
@@ -117,16 +103,23 @@ class STTIntegration:
         
         # Must have at least one word
         words = cleaned.split()
-        return len(words) >= min_words
+        if len(words) < min_words:
+            return False
+        
+        # Must have at least one alphabetic character
+        if not any(c.isalpha() for c in cleaned):
+            return False
+        
+        return True
     
     async def transcribe_audio_data(
         self,
-        audio_data: Union[bytes, np.ndarray, List[float]],
+        audio_data: Union[bytes, List[float]],
         is_short_audio: bool = False,
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        Transcribe audio data with minimal processing using v2 API.
+        Transcribe audio data with zero preprocessing using v2 API.
         """
         if not self.initialized:
             logger.error("STT integration not properly initialized")
@@ -136,15 +129,12 @@ class STTIntegration:
         start_time = time.time()
         
         try:
-            # Convert to numpy array if needed - minimal preprocessing
-            if isinstance(audio_data, bytes):
-                # Keep as bytes for direct processing
-                pass
-            elif isinstance(audio_data, list):
-                audio_data = np.array(audio_data, dtype=np.float32)
-            # For numpy arrays, let the STT handle conversion
+            # Convert list to bytes if needed (no other processing)
+            if isinstance(audio_data, list):
+                # Convert list of numbers to bytes (assume they're already MULAW samples)
+                audio_data = bytes(audio_data)
             
-            # Get results directly from STT v2
+            # Get results directly from STT v2 - no preprocessing
             final_results = []
             
             # Define a callback to collect results
@@ -159,7 +149,7 @@ class STTIntegration:
             # Start streaming session
             await self.speech_recognizer.start_streaming()
             
-            # Process the audio
+            # Process the audio directly
             await self.speech_recognizer.process_audio_chunk(audio_data, store_result)
             
             # Stop streaming to get final results
@@ -168,13 +158,13 @@ class STTIntegration:
             # Get the best result
             if final_text:
                 transcription = final_text
-                confidence = 0.9
+                confidence = 0.9  # Default confidence for final results
             elif final_results:
                 best_result = max(final_results, key=lambda r: r.confidence)
                 transcription = best_result.text
                 confidence = best_result.confidence
             else:
-                logger.warning("No transcription results obtained")
+                logger.info("No transcription results obtained")
                 return {
                     "transcription": "",
                     "confidence": 0.0,
@@ -217,17 +207,21 @@ class STTIntegration:
     
     async def process_stream_chunk(
         self,
-        audio_chunk: Union[bytes, np.ndarray, List[float]],
+        audio_chunk: Union[bytes, List[float]],
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
         """
-        Process a chunk of streaming audio with minimal processing.
+        Process a chunk of streaming audio with zero modifications.
         """
         if not self.initialized:
             logger.error("STT integration not properly initialized")
             return None
         
-        # Don't preprocess - pass directly to STT v2
+        # Convert list to bytes if needed
+        if isinstance(audio_chunk, list):
+            audio_chunk = bytes(audio_chunk)
+        
+        # Pass directly to STT v2 without any processing
         return await self.speech_recognizer.process_audio_chunk(
             audio_chunk=audio_chunk,
             callback=callback
@@ -251,8 +245,3 @@ class STTIntegration:
             logger.debug(f"Cleaned final transcription: '{final_text}' -> '{cleaned_text}'")
         
         return cleaned_text, duration
-    
-    def optimize_for_telephony(self):
-        """Already optimized for telephony with v2 API - this is a no-op."""
-        logger.info("STT integration already optimized for telephony with v2 API")
-        pass

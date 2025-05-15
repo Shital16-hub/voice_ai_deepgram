@@ -1,7 +1,5 @@
-# telephony/audio_processor.py
-
 """
-Optimized audio processing utilities for telephony integration.
+Simplified audio processing utilities for telephony integration.
 Minimal processing to preserve speech recognition quality.
 """
 import audioop
@@ -9,22 +7,20 @@ import numpy as np
 import logging
 from typing import Optional, Dict, Any, List, Tuple, Union
 
-from telephony.config import SAMPLE_RATE_TWILIO, SAMPLE_RATE_AI
-
 logger = logging.getLogger(__name__)
 
 class AudioProcessor:
     """
-    Optimized audio converter that preserves quality for speech recognition.
+    Simplified audio converter - only handles format conversion, no processing.
     """
     
     def mulaw_to_pcm(self, mulaw_data: bytes) -> np.ndarray:
         """
-        Convert mulaw to PCM with quality preservation.
+        Convert mulaw to PCM with no additional processing.
         """
         try:
             # Skip very small chunks
-            if len(mulaw_data) < 160:  # Less than 20ms at 8kHz
+            if len(mulaw_data) < 40:  # Less than 5ms at 8kHz
                 return np.array([], dtype=np.float32)
             
             # Convert mulaw to 16-bit PCM directly (no processing)
@@ -106,7 +102,7 @@ class AudioProcessor:
                 std_val > 5  # Some variation
                 and min_val < 100  # Not all high values
                 and max_val > 150  # Not all low values
-                and len(audio_data) >= 160  # At least 20ms
+                and len(audio_data) >= 40  # At least 5ms
             )
             
             return {
@@ -124,23 +120,23 @@ class AudioProcessor:
 
 class MulawBufferProcessor:
     """
-    Optimized buffer processor with better accumulation strategy.
+    Simplified buffer processor - minimal buffering, fast processing.
     """
     
-    def __init__(self, min_chunk_size=6400):  # 800ms at 8kHz
+    def __init__(self, min_chunk_size=320):  # 40ms at 8kHz
         """
-        Initialize buffer processor.
+        Initialize buffer processor with minimal buffering.
         """
         self.buffer = bytearray()
         self.min_chunk_size = min_chunk_size
         self.last_flush_time = 0
-        self.max_buffer_age = 2.0  # Maximum buffer age in seconds
+        self.max_buffer_age = 1.0  # Maximum buffer age in seconds
         
         logger.info(f"MulawBufferProcessor initialized with min_chunk_size={min_chunk_size}")
     
     def process(self, data: bytes) -> Optional[bytes]:
         """
-        Process incoming mulaw data with time-based flushing.
+        Process incoming mulaw data with minimal buffering.
         """
         if not data:
             return None
@@ -154,7 +150,7 @@ class MulawBufferProcessor:
         # Check if we should process based on size OR time
         should_process = (
             len(self.buffer) >= self.min_chunk_size
-            or (len(self.buffer) > 1600 and current_time - self.last_flush_time > self.max_buffer_age)
+            or (len(self.buffer) > 40 and current_time - self.last_flush_time > self.max_buffer_age)
         )
         
         if should_process:

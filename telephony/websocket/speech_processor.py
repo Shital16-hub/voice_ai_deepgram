@@ -1,16 +1,12 @@
-# telephony/websocket/speech_processor.py
-
 """
-Optimized speech processor using Google Cloud STT v2.32.0+ for telephony.
+Speech processor using Google Cloud STT v2 with proper async handling.
 """
 import logging
-import re
 import asyncio
 import time
 import os
 import json
 from typing import Dict, Any, Optional, List, Callable, Awaitable
-import numpy as np
 
 # Import the updated Google Cloud STT
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
@@ -19,20 +15,19 @@ logger = logging.getLogger(__name__)
 
 class SpeechProcessor:
     """
-    Speech processor optimized for telephony using Google Cloud STT v2.32.0+.
-    Minimal preprocessing, optimal configuration.
+    Speech processor optimized for telephony using Google Cloud STT v2.
+    Zero preprocessing - trust the telephony-optimized API.
     """
     
     def __init__(self, pipeline):
-        """Initialize optimized speech processor for telephony."""
+        """Initialize speech processor."""
         self.pipeline = pipeline
         
-        logger.info("Initializing SpeechProcessor for telephony with v2 API")
+        logger.info("Initializing SpeechProcessor with v2 API")
         
-        # Get project ID with automatic extraction
+        # Get project ID
         project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
         
-        # If not in environment, try to extract from credentials file
         if not project_id:
             credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
             if credentials_file and os.path.exists(credentials_file):
@@ -40,46 +35,35 @@ class SpeechProcessor:
                     with open(credentials_file, 'r') as f:
                         creds_data = json.load(f)
                         project_id = creds_data.get('project_id')
-                        logger.info(f"SpeechProcessor: Auto-extracted project ID from credentials: {project_id}")
+                        logger.info(f"Extracted project ID: {project_id}")
                 except Exception as e:
-                    logger.error(f"Error reading credentials file: {e}")
+                    logger.error(f"Error reading credentials: {e}")
         
         if not project_id:
-            raise ValueError(
-                "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
-                "or ensure your credentials file contains a project_id field."
-            )
+            raise ValueError("Google Cloud project ID is required")
         
-        # Use Google Cloud STT v2 optimized for telephony
+        # Initialize Speech STT v2 with telephony optimization
         self.speech_client = GoogleCloudStreamingSTT(
             language="en-US",
-            sample_rate=8000,  # Match Twilio's 8kHz
-            encoding="MULAW",   # Match Twilio's mulaw encoding
+            sample_rate=8000,  # Match Twilio
+            encoding="MULAW",   # Match Twilio
             channels=1,
-            interim_results=False,  # Disable for better accuracy
+            interim_results=False,  # Only final results
             project_id=project_id,
-            enhanced_model=True,    # Use enhanced telephony model
-            location="global"       # Can be changed to specific region if needed
+            enhanced_model=True,    # Use telephony model
+            location="global"
         )
-        
-        # Minimal transcription cleaning patterns
-        self.cleanup_patterns = [
-            # Remove only obvious technical artifacts
-            (re.compile(r'\[.*?\]'), ''),  # [inaudible], [music]
-            (re.compile(r'\<.*?\>'), ''),  # <noise>
-            # Don't remove filler words - they're natural speech
-        ]
         
         # Echo detection
         self.echo_history = []
-        self.max_echo_history = 5
+        self.max_echo_history = 3
         
         # Statistics
         self.audio_chunks_received = 0
         self.successful_transcriptions = 0
         self.failed_transcriptions = 0
         
-        logger.info("SpeechProcessor initialized with telephony optimization and v2 API")
+        logger.info("SpeechProcessor initialized with Google Cloud v2 telephony")
     
     async def process_audio(
         self,
@@ -87,7 +71,7 @@ class SpeechProcessor:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Optional[str]:
         """
-        Process audio with minimal intervention for best accuracy.
+        Process audio with zero modification - let Google handle everything.
         """
         self.audio_chunks_received += 1
         
@@ -95,25 +79,31 @@ class SpeechProcessor:
             logger.debug(f"Processing audio chunk #{self.audio_chunks_received}, "
                         f"size: {len(audio_data)} bytes")
             
+            # Collect results
+            final_result = None
+            
+            async def collect_result(result):
+                nonlocal final_result
+                if result.is_final:
+                    final_result = result
+                if callback:
+                    await callback(result)
+            
             # Pass audio directly to Google Cloud STT v2
             result = await self.speech_client.process_audio_chunk(
                 audio_chunk=audio_data,
-                callback=callback
+                callback=collect_result
             )
             
-            if result and result.text:
+            # Check for final result
+            if final_result and final_result.text:
                 self.successful_transcriptions += 1
-                
-                # Apply minimal cleanup
-                cleaned_text = self.cleanup_transcription(result.text)
+                cleaned_text = final_result.text.strip()
                 
                 if cleaned_text:
-                    logger.info(f"Transcription successful: '{cleaned_text}' (confidence: {result.confidence:.2f})")
+                    logger.info(f"Transcription: '{cleaned_text}' (confidence: {final_result.confidence:.2f})")
                     return cleaned_text
-                else:
-                    logger.debug("Transcription cleaned to empty string")
             else:
-                logger.debug("No transcription result")
                 self.failed_transcriptions += 1
             
             return None
@@ -124,89 +114,60 @@ class SpeechProcessor:
             return None
     
     def cleanup_transcription(self, text: str) -> str:
-        """
-        Apply minimal cleanup to preserve natural speech.
-        """
+        """Minimal cleanup - trust Google's telephony model."""
         if not text:
             return ""
         
-        original_text = text
-        cleaned = text
-        
-        # Apply minimal cleanup patterns
-        for pattern, replacement in self.cleanup_patterns:
-            cleaned = pattern.sub(replacement, cleaned)
-        
-        # Basic normalization
-        cleaned = cleaned.strip()
+        # Only basic normalization
+        cleaned = text.strip()
         
         # Ensure first letter is capitalized
-        if cleaned:
+        if cleaned and cleaned[0].islower():
             cleaned = cleaned[0].upper() + cleaned[1:]
-        
-        if original_text != cleaned:
-            logger.debug(f"Cleaned transcription: '{original_text}' -> '{cleaned}'")
         
         return cleaned
     
     def is_valid_transcription(self, text: str) -> bool:
-        """
-        Validate transcription with minimal requirements.
-        """
-        cleaned = self.cleanup_transcription(text)
+        """Validate transcription with minimal requirements."""
+        cleaned = text.strip() if text else ""
         
         if not cleaned:
             return False
         
-        # Must have at least one word
-        words = cleaned.split()
-        if len(words) < 1:
+        # Must have at least one character
+        if len(cleaned) < 1:
             return False
         
-        # Must be longer than 1 character
-        if len(cleaned) < 2:
+        # Must have at least one letter
+        if not any(c.isalpha() for c in cleaned):
             return False
         
         return True
     
     def is_echo_of_system_speech(self, transcription: str) -> bool:
-        """
-        Detect echo using simple string matching.
-        """
+        """Simple echo detection."""
         if not transcription or not self.echo_history:
             return False
         
         normalized_trans = transcription.lower().strip()
         
-        # Check against recent responses
         for recent_response in self.echo_history:
             normalized_response = recent_response.lower().strip()
             
-            # Check for various echo patterns
-            if self._is_echo_match(normalized_trans, normalized_response):
-                logger.info(f"Detected echo: '{transcription}'")
+            # Exact match
+            if normalized_trans == normalized_response:
+                logger.info(f"Echo detected: '{transcription}'")
                 return True
-        
-        return False
-    
-    def _is_echo_match(self, transcription: str, response: str) -> bool:
-        """Check if transcription matches response (echo detection)."""
-        # Exact match
-        if transcription == response:
-            return True
-        
-        # Substring match for longer texts
-        if len(response) > 15:
-            if transcription in response or response in transcription:
-                return True
-        
-        # Word overlap detection
-        trans_words = set(transcription.split())
-        response_words = set(response.split())
-        
-        if trans_words and response_words:
-            overlap_ratio = len(trans_words & response_words) / max(len(trans_words), len(response_words))
-            return overlap_ratio > 0.7  # 70% word overlap
+            
+            # Word overlap check
+            trans_words = set(normalized_trans.split())
+            response_words = set(normalized_response.split())
+            
+            if trans_words and response_words:
+                overlap_ratio = len(trans_words & response_words) / len(trans_words)
+                if overlap_ratio > 0.8:
+                    logger.info(f"Echo detected (overlap): '{transcription}'")
+                    return True
         
         return False
     
@@ -223,13 +184,8 @@ class SpeechProcessor:
         await self.speech_client.stop_streaming()
         
         # Log statistics
-        logger.info("Speech session ended")
-        logger.info(f"Total chunks: {self.audio_chunks_received}")
-        logger.info(f"Successful: {self.successful_transcriptions}")
-        logger.info(f"Failed: {self.failed_transcriptions}")
-        
         success_rate = (self.successful_transcriptions / max(self.audio_chunks_received, 1)) * 100
-        logger.info(f"Success rate: {success_rate:.1f}%")
+        logger.info(f"Speech session ended - Success rate: {success_rate:.1f}%")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive statistics."""
