@@ -39,17 +39,18 @@ langdetect>=1.0.9
 # Twilio integration
 twilio>=8.8.0
 
-# Google Cloud Speech API - CORRECT VERSION FOR v2.25.0+
-google-cloud-speech>=2.25.0,<3.0.0
+# Google Cloud Speech API - UPDATED for v2 API
+google-cloud-speech>=2.27.0
 google-auth>=2.23.0
 google-api-core>=2.11.0
 google-cloud-core>=2.3.2
 grpcio>=1.56.0
-protobuf>=4.23.0
+protobuf>=4.25.0
 
+# Google Cloud TTS
 google-cloud-texttospeech>=2.16.0 
 
-# ElevenLabs TTS
+# ElevenLabs TTS (deprecated in favor of Google Cloud TTS)
 elevenlabs==0.2.27
 
 # Document processing

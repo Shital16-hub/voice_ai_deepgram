@@ -1,5 +1,6 @@
 """
-Enhanced Speech-to-Text integration module optimized for telephony with minimal processing.
+Speech-to-Text integration module optimized for telephony with minimal processing.
+Uses Google Cloud Speech-to-Text v2 API optimally for telephony.
 """
 import logging
 import time
@@ -22,9 +23,7 @@ class STTIntegration:
         speech_recognizer: Optional[GoogleCloudStreamingSTT] = None,
         language: str = "en-US"
     ):
-        """
-        Initialize the STT integration.
-        """
+        """Initialize the STT integration."""
         self.speech_recognizer = speech_recognizer
         self.language = language
         self.initialized = True if speech_recognizer else False
@@ -77,9 +76,7 @@ class STTIntegration:
             raise
     
     def cleanup_transcription(self, text: str) -> str:
-        """
-        Absolutely minimal cleanup - trust Google's telephony model.
-        """
+        """Absolutely minimal cleanup - trust Google's telephony model."""
         if not text:
             return ""
         
@@ -93,9 +90,7 @@ class STTIntegration:
         return cleaned
     
     def is_valid_transcription(self, text: str, min_words: int = 1) -> bool:
-        """
-        Validate transcription with minimal requirements.
-        """
+        """Validate transcription with minimal requirements."""
         cleaned = self.cleanup_transcription(text)
         
         if not cleaned:
@@ -118,9 +113,7 @@ class STTIntegration:
         is_short_audio: bool = False,
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
-        """
-        Transcribe audio data with zero preprocessing using v2 API.
-        """
+        """Transcribe audio data with zero preprocessing using v2 API."""
         if not self.initialized:
             logger.error("STT integration not properly initialized")
             return {"error": "STT integration not initialized"}
@@ -210,9 +203,7 @@ class STTIntegration:
         audio_chunk: Union[bytes, List[float]],
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
-        """
-        Process a chunk of streaming audio with zero modifications.
-        """
+        """Process a chunk of streaming audio with zero modifications."""
         if not self.initialized:
             logger.error("STT integration not properly initialized")
             return None
@@ -228,9 +219,7 @@ class STTIntegration:
         )
     
     async def end_streaming(self) -> Tuple[str, float]:
-        """
-        End the streaming session and get final transcription.
-        """
+        """End the streaming session and get final transcription."""
         if not self.initialized:
             logger.error("STT integration not properly initialized")
             return "", 0.0

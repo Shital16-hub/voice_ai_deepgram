@@ -1,18 +1,12 @@
 """
-Telephony integration package for Voice AI Agent.
+Simplified telephony integration package for Voice AI Agent.
 
-This package provides integration with Twilio for voice call handling,
-audio streaming, and telephony services.
+This package provides simplified integration with Twilio for voice call handling
+using direct Google Cloud STT v2 streaming.
 """
 
-from telephony.twilio_handler import TwilioHandler
-from telephony.audio_processor import AudioProcessor
-from telephony.websocket_handler import WebSocketHandler
-from telephony.call_manager import CallManager
+from telephony.simple_websocket_handler import SimpleWebSocketHandler
 
 __all__ = [
-    'TwilioHandler',
-    'AudioProcessor',
-    'WebSocketHandler',
-    'CallManager'
+    'SimpleWebSocketHandler'
 ]

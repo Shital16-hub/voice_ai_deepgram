@@ -1,5 +1,5 @@
 """
-Google Cloud Speech-to-Text v2 implementation for Twilio telephony.
+Google Cloud Speech-to-Text v2 implementation optimized for telephony.
 Based on official Google Cloud examples with proper async implementation.
 """
 import logging
@@ -119,15 +119,19 @@ class GoogleCloudStreamingSTT:
             ),
         )
         
-        # Streaming config
+        # Voice activity configuration - FIXED
+        voice_activity_timeout = cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
+            speech_start_timeout=duration_pb2.Duration(seconds=5),
+            speech_end_timeout=duration_pb2.Duration(seconds=1),
+        )
+        
+        # Streaming config with proper voice activity settings
         self.streaming_config = cloud_speech.StreamingRecognitionConfig(
             config=self.recognition_config,
             streaming_features=cloud_speech.StreamingRecognitionFeatures(
                 interim_results=self.interim_results,
-                voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
-                    speech_start_timeout=duration_pb2.Duration(seconds=5),
-                    speech_end_timeout=duration_pb2.Duration(seconds=1),
-                ),
+                voice_activity_timeout=voice_activity_timeout,
+                enable_voice_activity_events=True,  # REQUIRED for voice activity timeouts
             ),
         )
         

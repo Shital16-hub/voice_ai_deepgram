@@ -20,8 +20,8 @@ from knowledge_base.llama_index.query_engine import QueryEngine
 # Google Cloud TTS imports
 from text_to_speech.google_cloud_tts import GoogleCloudTTS
 
+# Ensure project ID is set
 if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
-    
     os.environ["GOOGLE_CLOUD_PROJECT"] = "my-tts-project-458404"
 
 logger = logging.getLogger(__name__)
@@ -206,98 +206,6 @@ class VoiceAIAgent:
                 "status": "invalid_transcription",
                 "transcription": result.get("transcription", ""),
                 "error": "No valid speech detected"
-            }
-    
-    async def process_streaming_audio(
-        self,
-        audio_stream,
-        result_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
-    ) -> Dict[str, Any]:
-        """
-        Process streaming audio with real-time response (no preprocessing).
-        """
-        if not self.initialized:
-            raise RuntimeError("Voice AI Agent not initialized")
-            
-        # Track stats
-        start_time = time.time()
-        chunks_processed = 0
-        results_count = 0
-        
-        # Start streaming session
-        await self.speech_recognizer.start_streaming()
-        
-        try:
-            # Process each audio chunk without modification
-            async for chunk in audio_stream:
-                chunks_processed += 1
-                
-                # Process through Google Cloud STT v2 directly
-                async def process_result(result):
-                    # Only handle final results
-                    if result.is_final:
-                        # Minimal cleanup
-                        transcription = self.stt_integration.cleanup_transcription(result.text)
-                        
-                        # Process if valid
-                        if transcription and self.stt_integration.is_valid_transcription(transcription):
-                            # Get response from conversation manager
-                            response = await self.conversation_manager.handle_user_input(transcription)
-                            
-                            # Generate speech with Google Cloud TTS
-                            speech_audio = None
-                            tts_error = None
-                            
-                            if response and response.get("response"):
-                                try:
-                                    speech_audio = await self.tts_client.synthesize(response["response"])
-                                except Exception as e:
-                                    logger.error(f"Error synthesizing speech with Google Cloud TTS: {e}")
-                                    tts_error = str(e)
-                            
-                            # Format result
-                            result_data = {
-                                "transcription": transcription,
-                                "response": response.get("response", ""),
-                                "speech_audio": speech_audio,
-                                "tts_error": tts_error,
-                                "confidence": result.confidence,
-                                "is_final": True
-                            }
-                            
-                            nonlocal results_count
-                            results_count += 1
-                            
-                            # Call callback if provided
-                            if result_callback:
-                                await result_callback(result_data)
-                
-                # Process chunk directly (no modifications)
-                await self.speech_recognizer.process_audio_chunk(chunk, process_result)
-                
-            # Stop streaming session
-            await self.speech_recognizer.stop_streaming()
-            
-            # Return stats
-            return {
-                "status": "complete",
-                "chunks_processed": chunks_processed,
-                "results_count": results_count,
-                "total_time": time.time() - start_time
-            }
-            
-        except Exception as e:
-            logger.error(f"Error processing streaming audio: {e}")
-            
-            # Stop streaming session
-            await self.speech_recognizer.stop_streaming()
-            
-            return {
-                "status": "error",
-                "error": str(e),
-                "chunks_processed": chunks_processed,
-                "results_count": results_count,
-                "total_time": time.time() - start_time
             }
     
     @property
