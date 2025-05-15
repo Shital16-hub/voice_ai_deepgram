@@ -1,5 +1,5 @@
 """
-Simplified TTS integration using Google Cloud TTS.
+Updated TTS integration using the fixed Google Cloud TTS.
 """
 import logging
 import asyncio
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class TTSIntegration:
     """
-    Simplified Text-to-Speech integration using Google Cloud TTS.
+    Updated Text-to-Speech integration using the fixed Google Cloud TTS.
     """
     
     def __init__(
@@ -19,25 +19,32 @@ class TTSIntegration:
         voice_name: Optional[str] = None,
         voice_gender: Optional[str] = None,
         language_code: Optional[str] = "en-US",
-        enable_caching: bool = True
+        enable_caching: bool = True,
+        credentials_file: Optional[str] = None
     ):
         """
-        Initialize the TTS integration with Google Cloud TTS.
+        Initialize the TTS integration with fixed Google Cloud TTS.
         
         Args:
-            voice_name: Voice name to use
-            voice_gender: Voice gender (MALE, FEMALE, NEUTRAL)
+            voice_name: Voice name to use (e.g., "en-US-Neural2-C")
+            voice_gender: Voice gender (MALE, FEMALE, or None for Neural2 voices)
             language_code: Language code (defaults to en-US)
             enable_caching: Whether to enable TTS caching
+            credentials_file: Path to Google Cloud credentials file
         """
         # Set default voice name if not provided
         if not voice_name:
             voice_name = "en-US-Neural2-C"  # Default Neural2 voice
+        
+        # Don't set gender for Neural2 voices
+        if voice_name and "Neural2" in voice_name:
+            voice_gender = None
             
         self.voice_name = voice_name
-        self.voice_gender = voice_gender or "NEUTRAL"
+        self.voice_gender = voice_gender
         self.language_code = language_code or "en-US"
         self.enable_caching = enable_caching
+        self.credentials_file = credentials_file
         self.tts_client = None
         self.initialized = False
         
@@ -51,6 +58,7 @@ class TTSIntegration:
         try:
             # Initialize Google Cloud TTS with telephony optimization
             self.tts_client = GoogleCloudTTS(
+                credentials_file=self.credentials_file,
                 voice_name=self.voice_name,
                 voice_gender=self.voice_gender,
                 language_code=self.language_code,
@@ -88,7 +96,7 @@ class TTSIntegration:
     
     def get_info(self) -> Dict[str, Any]:
         """Get information about the TTS configuration."""
-        return {
+        info = {
             "provider": "Google Cloud TTS",
             "voice_name": self.voice_name,
             "voice_gender": self.voice_gender,
@@ -97,3 +105,9 @@ class TTSIntegration:
             "format": "mulaw",
             "initialized": self.initialized
         }
+        
+        # Add stats from TTS client if available
+        if self.tts_client and hasattr(self.tts_client, 'get_stats'):
+            info["stats"] = self.tts_client.get_stats()
+        
+        return info
