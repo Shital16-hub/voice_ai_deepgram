@@ -190,7 +190,7 @@ def handle_incoming_call():
 
 @app.route('/voice/status', methods=['POST'])
 def handle_status_callback():
-    """Handle call status callbacks with proper cleanup."""
+    """Handle call status callbacks with logging."""
     call_sid = request.form.get('CallSid')
     call_status = request.form.get('CallStatus')
     call_duration = request.form.get('CallDuration', '0')
@@ -201,8 +201,11 @@ def handle_status_callback():
     if call_status in ['completed', 'failed', 'busy', 'no-answer']:
         if call_sid in active_calls:
             handler = active_calls[call_sid]
-            # Use synchronous cleanup to avoid event loop issues
-            handler.cleanup_sync()
+            # Trigger cleanup
+            try:
+                asyncio.create_task(handler._cleanup())
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}")
             del active_calls[call_sid]
             logger.info(f"Cleaned up call {call_sid}")
     
@@ -210,7 +213,7 @@ def handle_status_callback():
 
 @app.route('/ws/stream/<call_sid>', websocket=True)
 def handle_media_stream(call_sid):
-    """Handle WebSocket media stream with proper event handling."""
+    """Handle WebSocket media stream with improved error handling."""
     logger.info(f"WebSocket connection request for call {call_sid}")
     
     if not voice_ai_pipeline:
@@ -225,7 +228,7 @@ def handle_media_stream(call_sid):
         ws = Server.accept(request.environ)
         logger.info(f"WebSocket connection established for call {call_sid}")
         
-        # Create handler
+        # Create handler with improved architecture
         handler = SimpleWebSocketHandler(call_sid, voice_ai_pipeline)
         active_calls[call_sid] = handler
         
@@ -244,8 +247,28 @@ def handle_media_stream(call_sid):
                     data = json.loads(message)
                     event_type = data.get('event')
                     
-                    # Use the handler's event processing
-                    asyncio.run(handler.handle_event(event_type, data, ws))
+                    if event_type == 'connected':
+                        logger.info(f"WebSocket connected for call {call_sid}")
+                        
+                    elif event_type == 'start':
+                        stream_sid = data.get('streamSid')
+                        logger.info(f"Stream started: {stream_sid}")
+                        handler.stream_sid = stream_sid
+                        
+                        # Start STT streaming
+                        asyncio.run(handler.stt_client.start_streaming())
+                        
+                        # Send welcome message
+                        asyncio.run(handler._send_response("Hello! How can I help you today?", ws))
+                        
+                    elif event_type == 'media':
+                        # Handle audio data
+                        asyncio.run(handler._handle_audio(data, ws))
+                        
+                    elif event_type == 'stop':
+                        logger.info(f"Stream stopped for call {call_sid}")
+                        asyncio.run(handler._cleanup())
+                        break
                         
                 except json.JSONDecodeError:
                     logger.error(f"Invalid JSON received: {message}")
@@ -268,8 +291,7 @@ def handle_media_stream(call_sid):
         # Cleanup resources
         if handler:
             try:
-                # Use synchronous cleanup
-                handler.cleanup_sync()
+                asyncio.run(handler._cleanup())
             except Exception as e:
                 logger.error(f"Error during handler cleanup: {e}")
         
