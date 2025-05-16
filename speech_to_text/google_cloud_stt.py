@@ -1,7 +1,5 @@
-"""
-Fixed Ultra Low Latency Google Cloud STT Configuration
-Corrected async callback handling for multi-threaded environment.
-"""
+# speech_to_text/google_cloud_stt.py - Fixed Configuration
+
 import logging
 import asyncio
 import time
@@ -33,8 +31,8 @@ class StreamingTranscriptionResult:
 
 class GoogleCloudStreamingSTT:
     """
-    Ultra Low Latency Google Cloud Speech-to-Text v2 client.
-    Fixed async callback handling for threading environment.
+    FIXED Ultra Low Latency Google Cloud Speech-to-Text v2 client.
+    Key changes for better speech detection.
     """
     
     # Ultra low latency constants
@@ -49,15 +47,15 @@ class GoogleCloudStreamingSTT:
         sample_rate: int = 8000,
         encoding: str = "MULAW",
         channels: int = 1,
-        interim_results: bool = False,
+        interim_results: bool = True,  # CHANGED: Enable interim results for debugging
         project_id: Optional[str] = None,
         location: str = "global",
         credentials_file: Optional[str] = None,
-        enable_vad: bool = True,
+        enable_vad: bool = True,  # CHANGED: Keep VAD enabled but configure it properly
         enable_echo_suppression: bool = False,
         **kwargs
     ):
-        """Initialize with ultra low latency settings."""
+        """Initialize with proper telephony settings."""
         self.language = language
         self.sample_rate = sample_rate
         self.encoding = encoding
@@ -77,7 +75,7 @@ class GoogleCloudStreamingSTT:
         # Create recognizer path
         self.recognizer_path = f"projects/{self.project_id}/locations/{self.location}/recognizers/_"
         
-        # Setup ultra low latency configuration
+        # Setup FIXED configuration for better speech detection
         self._setup_config()
         
         # State tracking (minimal)
@@ -96,7 +94,7 @@ class GoogleCloudStreamingSTT:
         self.total_chunks = 0
         self.successful_transcriptions = 0
         
-        logger.info(f"Ultra Low Latency STT initialized - Project: {self.project_id}")
+        logger.info(f"FIXED STT initialized - Project: {self.project_id}, Model: telephony_short")
     
     def _get_project_id(self, project_id: Optional[str]) -> str:
         """Get project ID with minimal overhead."""
@@ -138,14 +136,14 @@ class GoogleCloudStreamingSTT:
             raise
     
     def _setup_config(self):
-        """Setup configuration optimized for ultra low latency."""
-        # Audio encoding
+        """FIXED Setup configuration optimized for Twilio telephony speech detection."""
+        # Audio encoding - FIXED for MULAW
         if self.encoding == "MULAW":
             audio_encoding = cloud_speech.ExplicitDecodingConfig.AudioEncoding.MULAW
         else:
             audio_encoding = cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16
         
-        # Ultra fast recognition config
+        # FIXED Recognition config optimized for telephony
         self.recognition_config = cloud_speech.RecognitionConfig(
             explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
                 sample_rate_hertz=self.sample_rate,
@@ -153,28 +151,28 @@ class GoogleCloudStreamingSTT:
                 audio_channel_count=self.channels,
             ),
             language_codes=[self.language],
-            model="telephony_short",  # Optimized for short utterances and speed
+            model="telephony_short",  # BEST model for telephony
             features=cloud_speech.RecognitionFeatures(
                 enable_automatic_punctuation=False,  # Disabled for speed
                 enable_spoken_punctuation=False,
                 enable_spoken_emojis=False,
                 profanity_filter=False,
-                enable_word_confidence=False,        # Disabled for speed
+                enable_word_confidence=True,         # CHANGED: Enable for debugging
                 max_alternatives=1,                  # Only best result for speed
                 enable_word_time_offsets=False,      # Disabled for speed
             ),
         )
         
-        # Aggressive streaming config that meets Google Cloud requirements
+        # FIXED Streaming config with proper voice activity timeouts
         self.streaming_config = cloud_speech.StreamingRecognitionConfig(
             config=self.recognition_config,
             streaming_features=cloud_speech.StreamingRecognitionFeatures(
-                interim_results=self.interim_results,
-                enable_voice_activity_events=True,
+                interim_results=self.interim_results,  # Enable for debugging
+                enable_voice_activity_events=True,     # Keep voice activity events
                 voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
-                    # Meet Google Cloud's minimum requirements
-                    speech_start_timeout=Duration(seconds=1),      # Wait only 1s for speech
-                    speech_end_timeout=Duration(nanos=500000000)   # 500ms minimum
+                    # FIXED: More lenient timeouts for better speech detection
+                    speech_start_timeout=Duration(seconds=5),      # Increased to 5s
+                    speech_end_timeout=Duration(seconds=1, nanos=0)   # Increased to 1s
                 ),
             ),
         )
@@ -251,9 +249,12 @@ class GoogleCloudStreamingSTT:
                         if self._current_callback:
                             self._handle_callback_sync(streaming_result)
                         
+                        # Log all results for debugging
                         if result.is_final:
                             self.successful_transcriptions += 1
-                            logger.info(f"Transcription: '{alternative.transcript}' (confidence: {alternative.confidence:.2f})")
+                            logger.info(f"FINAL: '{alternative.transcript}' (confidence: {alternative.confidence:.2f})")
+                        else:
+                            logger.info(f"INTERIM: '{alternative.transcript}' (confidence: {alternative.confidence:.2f})")
         
         except Exception as e:
             logger.error(f"Error in streaming: {e}")
@@ -286,7 +287,7 @@ class GoogleCloudStreamingSTT:
         self.stream_thread = threading.Thread(target=self._run_streaming, daemon=True)
         self.stream_thread.start()
         
-        logger.info(f"Started ultra fast streaming: {self.session_id}")
+        logger.info(f"Started FIXED streaming: {self.session_id}")
     
     async def stop_streaming(self) -> tuple[str, float]:
         """Stop streaming with minimal cleanup."""
@@ -327,7 +328,7 @@ class GoogleCloudStreamingSTT:
         
         self.total_chunks += 1
         
-        # Add to queue immediately
+        # Add to queue immediately - NO PREPROCESSING
         try:
             audio_bytes = bytes(audio_chunk)
             self.audio_queue.put(audio_bytes, block=False)
@@ -350,7 +351,11 @@ class GoogleCloudStreamingSTT:
             "total_chunks": self.total_chunks,
             "successful_transcriptions": self.successful_transcriptions,
             "queue_size": self.audio_queue.qsize(),
-            "project_id": self.project_id
+            "project_id": self.project_id,
+            "model": "telephony_short",
+            "interim_results": self.interim_results,
+            "encoding": self.encoding,
+            "sample_rate": self.sample_rate
         }
     
     async def cleanup(self):
