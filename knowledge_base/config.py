@@ -1,20 +1,27 @@
 """
-Configuration settings for the knowledge base component.
+Configuration settings for OpenAI + Pinecone knowledge base.
+Optimized for ultra-low latency telephony applications.
+CLEAN VERSION - Fixed import issues
 """
 import os
 from typing import Dict, Any, List, Optional
 
-# Vector database settings
-VECTOR_DB_HOST = os.getenv("VECTOR_DB_HOST", "localhost")
-VECTOR_DB_PORT = int(os.getenv("VECTOR_DB_PORT", "6333"))
-VECTOR_DB_GRPC_PORT = int(os.getenv("VECTOR_DB_GRPC_PORT", "6334"))
-VECTOR_DB_COLLECTION = os.getenv("VECTOR_DB_COLLECTION", "company_knowledge")
-VECTOR_DIMENSION = 384  # For sentence-transformers/all-MiniLM-L6-v2
+# Load environment variables at module level
+from dotenv import load_dotenv
+load_dotenv()
 
-# Embedding model settings
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2")  # Smaller model
-EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")  # Set to "cuda" for GPU
-EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
+# OpenAI Configuration - Get from environment
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "150"))
+
+# Pinecone Configuration - Get from environment
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1-aws")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "voice-ai-knowledge")
+PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "default")
 
 # Document processing settings
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
@@ -23,50 +30,97 @@ MAX_DOCUMENT_SIZE_MB = int(os.getenv("MAX_DOCUMENT_SIZE_MB", "10"))
 
 # Retrieval settings
 DEFAULT_RETRIEVE_COUNT = int(os.getenv("DEFAULT_RETRIEVE_COUNT", "3"))
-MINIMUM_RELEVANCE_SCORE = float(os.getenv("MINIMUM_RELEVANCE_SCORE", "0.6"))
-RERANKING_ENABLED = os.getenv("RERANKING_ENABLED", "False").lower() == "true"
+MINIMUM_RELEVANCE_SCORE = float(os.getenv("MINIMUM_RELEVANCE_SCORE", "0.7"))
 
 # Conversation context settings
-MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "5"))
-CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "4096"))
-
-# LlamaIndex settings
-PERSIST_DIR = os.getenv("PERSIST_DIR", "./storage")
-USE_GPU = os.getenv("USE_GPU", "False").lower() == "true"
+MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "3"))
+CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "2048"))
 
 # Supported file types
 SUPPORTED_DOCUMENT_TYPES = [
-    # Text files
     ".txt", ".md", ".csv", ".json",
-    
-    # Office documents
     ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
-    
-    # Web content
     ".html", ".htm", ".xml",
 ]
 
-def get_llama_index_config() -> Dict[str, Any]:
-    """
-    Get LlamaIndex configuration.
+# Telephony-optimized prompts
+TELEPHONY_SYSTEM_PROMPT = """You are a helpful voice assistant for customer support calls. 
+
+CRITICAL INSTRUCTIONS:
+- Keep responses under 30 words when possible
+- Speak naturally and conversationally 
+- Use simple, clear language
+- Avoid lists, bullet points, or complex formatting
+- Sound human and friendly
+- If you don't know something, say so briefly and offer to help differently
+- Stay focused on the customer's question
+"""
+
+# OpenAI embedding dimensions
+EMBEDDING_DIMENSIONS = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+}
+
+def get_openai_config() -> Dict[str, Any]:
+    """Get OpenAI configuration optimized for telephony."""
+    # Re-load environment to get latest values
+    load_dotenv(override=True)
     
-    Returns:
-        Dictionary with LlamaIndex configuration
-    """
+    # Get API key from multiple sources
+    api_key = OPENAI_API_KEY or os.getenv("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    
+    # If still not found, try reading .env file directly
+    if not api_key:
+        try:
+            with open('.env', 'r') as f:
+                for line in f:
+                    if line.startswith('OPENAI_API_KEY='):
+                        api_key = line.split('=', 1)[1].strip()
+                        break
+        except FileNotFoundError:
+            pass
+    
     return {
-        "persist_dir": PERSIST_DIR,
-        "use_gpu": USE_GPU,
-        "embedding_model": EMBEDDING_MODEL,
-        "embedding_device": EMBEDDING_DEVICE
+        "api_key": api_key,
+        "model": OPENAI_MODEL,
+        "embedding_model": OPENAI_EMBEDDING_MODEL,
+        "temperature": OPENAI_TEMPERATURE,
+        "max_tokens": OPENAI_MAX_TOKENS,
+        "system_prompt": TELEPHONY_SYSTEM_PROMPT,
+        "embedding_dimensions": EMBEDDING_DIMENSIONS.get(OPENAI_EMBEDDING_MODEL, 1536)
+    }
+
+def get_pinecone_config() -> Dict[str, Any]:
+    """Get Pinecone configuration."""
+    # Re-load environment to get latest values
+    load_dotenv(override=True)
+    
+    # Get API key from multiple sources
+    api_key = PINECONE_API_KEY or os.getenv("PINECONE_API_KEY") or os.environ.get("PINECONE_API_KEY")
+    
+    # If still not found, try reading .env file directly
+    if not api_key:
+        try:
+            with open('.env', 'r') as f:
+                for line in f:
+                    if line.startswith('PINECONE_API_KEY='):
+                        api_key = line.split('=', 1)[1].strip()
+                        break
+        except FileNotFoundError:
+            pass
+    
+    return {
+        "api_key": api_key,
+        "environment": PINECONE_ENVIRONMENT,
+        "index_name": PINECONE_INDEX_NAME,
+        "namespace": PINECONE_NAMESPACE,
+        "embedding_dimensions": EMBEDDING_DIMENSIONS.get(OPENAI_EMBEDDING_MODEL, 1536)
     }
 
 def get_document_processor_config() -> Dict[str, Any]:
-    """
-    Get document processor configuration.
-    
-    Returns:
-        Dictionary with document processor configuration
-    """
+    """Get document processor configuration."""
     return {
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
@@ -74,44 +128,10 @@ def get_document_processor_config() -> Dict[str, Any]:
         "supported_types": SUPPORTED_DOCUMENT_TYPES
     }
 
-def get_embedding_config() -> Dict[str, Any]:
-    """
-    Get embedding generator configuration.
-    
-    Returns:
-        Dictionary with embedding configuration
-    """
-    return {
-        "model_name": EMBEDDING_MODEL,
-        "device": EMBEDDING_DEVICE,
-        "batch_size": EMBEDDING_BATCH_SIZE,
-        "dimension": VECTOR_DIMENSION
-    }
-
-def get_vector_db_config() -> Dict[str, Any]:
-    """
-    Get vector database configuration.
-    
-    Returns:
-        Dictionary with vector database configuration
-    """
-    return {
-        "host": VECTOR_DB_HOST,
-        "port": VECTOR_DB_PORT,
-        "grpc_port": VECTOR_DB_GRPC_PORT,
-        "collection_name": VECTOR_DB_COLLECTION,
-        "vector_size": VECTOR_DIMENSION
-    }
-
 def get_retriever_config() -> Dict[str, Any]:
-    """
-    Get retriever configuration.
-    
-    Returns:
-        Dictionary with retriever configuration
-    """
+    """Get retriever configuration."""
     return {
         "top_k": DEFAULT_RETRIEVE_COUNT,
         "min_score": MINIMUM_RELEVANCE_SCORE,
-        "reranking_enabled": RERANKING_ENABLED
+        "include_metadata": True
     }

@@ -1,3 +1,7 @@
+# Updated Requirements for OpenAI + Pinecone Integration
+# Replace the existing requirements.txt with this updated version
+
+# Core FastAPI and server
 fastapi
 uvicorn[standard]
 python-multipart
@@ -7,7 +11,7 @@ websockets
 aiohttp
 uvloop
 
-# Google Cloud APIs
+# Google Cloud APIs (STT and TTS)
 google-cloud-speech>=2.21.0,<3.0.0
 google-cloud-texttospeech>=2.14.0,<3.0.0
 google-auth
@@ -16,22 +20,11 @@ google-cloud-core
 grpcio
 grpcio-status
 protobuf
-
-# Google Cloud authentication
 google-auth-oauthlib
 
-# AI/ML Components - LlamaIndex ecosystem
-llama-index
-llama-index-core
-llama-index-embeddings-huggingface
-llama-index-vector-stores-chroma
-llama-index-llms-ollama
-llama-index-readers-file
-
-# Vector Database and Embeddings
-chromadb
-sentence-transformers
-transformers
+# OpenAI and Pinecone (replacing Ollama and Chroma)
+openai>=1.0.0
+pinecone[grpc]>=3.0.0
 
 # Audio Processing
 librosa
@@ -83,27 +76,16 @@ psutil
 cryptography
 pyjwt
 
-# CORS and Middleware
-python-multipart
-
 # Additional Utilities
 colorama
 tqdm
 click
-
-# Audio utilities
 pyaudio
-
-# Image processing
 Pillow
 
 # Optimizations
 ujson
 orjson
-
-# For better model loading
-accelerate
-safetensors
 
 # For memory optimization
 memory-profiler

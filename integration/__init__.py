@@ -4,6 +4,8 @@ Integration package for Voice AI Agent.
 This package provides integration between the various components 
 of the Voice AI Agent system including speech-to-text, 
 knowledge base, and text-to-speech.
+
+Updated to use OpenAI + Pinecone instead of LlamaIndex.
 """
 
 from integration.tts_integration import TTSIntegration

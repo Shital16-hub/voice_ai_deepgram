@@ -1,6 +1,5 @@
 """
-Ultra Low Latency WebSocket handler for Voice AI - Fixed Version
-Optimized for <2s latency on Runpod with proper async handling.
+Enhanced WebSocket handler with improved speech detection and debugging.
 """
 import json
 import asyncio
@@ -21,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SessionState:
-    """Simplified session state for ultra low latency."""
+    """Enhanced session state with debugging info."""
     call_sid: str
     stream_sid: Optional[str] = None
     start_time: float = field(default_factory=time.time)
@@ -29,48 +28,52 @@ class SessionState:
     is_speaking: bool = False
     call_ended: bool = False
     
-    # Essential metrics only
+    # Enhanced metrics with debugging
     audio_received: int = 0
     transcriptions: int = 0
     responses_sent: int = 0
     last_transcription_time: float = field(default_factory=time.time)
     last_tts_time: Optional[float] = None
+    
+    # Debug metrics
+    audio_bytes_total: int = 0
+    speech_detected: int = 0
+    speech_detected_but_invalid: int = 0
 
 class SimpleWebSocketHandler:
     """
-    Ultra Low Latency WebSocket handler optimized for <2s response time.
-    Removed all non-essential features that cause delays.
+    Enhanced WebSocket handler with improved speech detection and debugging.
     """
     
-    # Optimized configuration for ultra low latency
-    MIN_TRANSCRIPTION_LENGTH = 1  # Accept shorter transcriptions
-    RESPONSE_TIMEOUT = 1.5  # Reduced from 8s to 1.5s
-    SILENCE_TIMEOUT = 3.0   # Reduced from 10s to 3s
+    # Optimized configuration for better speech detection
+    MIN_TRANSCRIPTION_LENGTH = 1  # Accept even single words
+    RESPONSE_TIMEOUT = 3.0  # Increased timeout
+    SILENCE_TIMEOUT = 5.0   # Increased silence timeout
     
     def __init__(self, call_sid: str, pipeline):
-        """Initialize with minimal overhead for maximum speed."""
+        """Initialize with enhanced debugging and speech detection."""
         self.call_sid = call_sid
         self.pipeline = pipeline
         
         # Get project ID with minimal processing
         self.project_id = self._get_project_id()
         
-        # Initialize Google Cloud STT v2 with ultra low latency settings
+        # Initialize Google Cloud STT v2 with enhanced settings for speech detection
         credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         self.stt_client = GoogleCloudStreamingSTT(
             language="en-US",
             sample_rate=8000,
             encoding="MULAW",
             channels=1,
-            interim_results=False,  # Only final results for speed
+            interim_results=True,  # CHANGED: Enable interim results for debugging
             project_id=self.project_id,
             location="global",
             credentials_file=credentials_file,
-            enable_vad=True,  # Keep VAD enabled for better detection
-            enable_echo_suppression=False  # DISABLED for ultra low latency
+            enable_vad=False,  # CHANGED: Disable VAD if it's too aggressive
+            enable_echo_suppression=False
         )
         
-        # Initialize Google Cloud TTS with minimal latency settings
+        # Initialize Google Cloud TTS
         self.tts_client = GoogleCloudTTS(
             credentials_file=credentials_file,
             voice_name="en-US-Neural2-C",
@@ -78,24 +81,28 @@ class SimpleWebSocketHandler:
             language_code="en-US",
             container_format="mulaw",
             sample_rate=8000,
-            enable_caching=True,  # Keep caching for repeated responses
+            enable_caching=True,
             voice_type="NEURAL2"
-            # No echo suppression callback for minimal latency
         )
         
-        # Simplified state management
+        # Enhanced state management
         self.state = SessionState(call_sid=call_sid)
         
         # WebSocket reference for response sending
         self._ws = None
         
-        # Ultra simple response tracking
+        # Response tracking
         self.last_response_text = ""
         
-        # Minimal error tracking
+        # Error tracking
         self.error_count = 0
         
-        logger.info(f"Ultra Low Latency WebSocket handler initialized - Call: {call_sid}")
+        # Debug flags
+        self.enable_audio_debug = os.getenv('ENABLE_AUDIO_DEBUG', 'False').lower() == 'true'
+        self.stt_debug = os.getenv('STT_DEBUG', 'False').lower() == 'true'
+        
+        logger.info(f"Enhanced WebSocket handler initialized - Call: {call_sid}")
+        logger.info(f"VAD disabled, interim results enabled for better speech detection")
     
     def _get_project_id(self) -> str:
         """Get project ID with minimal overhead."""
@@ -108,14 +115,19 @@ class SimpleWebSocketHandler:
         return "my-tts-project-458404"
     
     async def _handle_audio(self, data: Dict[str, Any], ws):
-        """Ultra fast audio handling with minimal processing."""
+        """Enhanced audio handling with detailed debugging."""
         # Skip if call ended
         if self.state.call_ended:
             return
         
-        # Skip if speaking (simple echo prevention)
+        # Skip if speaking (simple echo prevention) but with shorter timeout
         if self.state.is_speaking:
-            return
+            # Allow audio processing sooner after TTS
+            if (self.state.last_tts_time and 
+                (time.time() - self.state.last_tts_time) > 1.0):  # Reduced from default
+                self.state.is_speaking = False
+            else:
+                return
         
         media = data.get('media', {})
         payload = media.get('payload')
@@ -123,73 +135,97 @@ class SimpleWebSocketHandler:
         if not payload:
             return
         
-        # Minimal audio processing
+        # Enhanced audio processing with debugging
         try:
             audio_data = base64.b64decode(payload)
             self.state.audio_received += 1
+            self.state.audio_bytes_total += len(audio_data)
+            
+            # Log audio stats every 100 packets for debugging
+            if self.enable_audio_debug and self.state.audio_received % 100 == 0:
+                logger.info(f"Audio debug - Packets: {self.state.audio_received}, "
+                          f"Total bytes: {self.state.audio_bytes_total}")
+                
         except Exception as e:
             logger.error(f"Error decoding audio: {e}")
             return
         
         # Start STT if not already started
         if not self.stt_client.is_streaming:
-            logger.info("Starting ultra low latency STT streaming")
+            logger.info("Starting enhanced STT streaming with better speech detection")
             await self.stt_client.start_streaming()
         
-        # Process audio with minimal error handling
+        # Process audio with enhanced error handling
         try:
             await self.stt_client.process_audio_chunk(
                 audio_data, 
-                callback=self._handle_transcription_result
+                callback=self._handle_transcription_result_enhanced
             )
         except Exception as e:
             logger.error(f"Error processing audio: {e}")
             self.error_count += 1
     
-    async def _handle_transcription_result(self, result: StreamingTranscriptionResult):
-        """Ultra fast transcription handling."""
+    async def _handle_transcription_result_enhanced(self, result: StreamingTranscriptionResult):
+        """Enhanced transcription handling with detailed logging."""
+        if self.stt_debug:
+            logger.debug(f"STT result - Text: '{result.text}', Final: {result.is_final}, "
+                        f"Confidence: {result.confidence}")
+        
+        # Handle interim results for debugging
+        if not result.is_final and result.text.strip():
+            self.state.speech_detected += 1
+            if self.stt_debug:
+                logger.info(f"Interim: '{result.text.strip()}' (confidence: {result.confidence:.2f})")
+        
+        # Process final results
         if result.is_final and result.text.strip():
             transcription = result.text.strip()
             confidence = result.confidence
             
-            logger.info(f"Transcription: '{transcription}' (confidence: {confidence:.2f})")
+            logger.info(f"Final transcription: '{transcription}' (confidence: {confidence:.2f})")
             
             self.state.last_transcription_time = time.time()
             
-            # Minimal validation for ultra low latency
-            if self._is_valid_transcription_fast(transcription, confidence):
+            # Enhanced validation for better speech detection
+            if self._is_valid_transcription_enhanced(transcription, confidence):
                 await self._process_final_transcription(transcription)
             else:
-                logger.debug(f"Invalid transcription: '{transcription}'")
+                self.state.speech_detected_but_invalid += 1
+                logger.debug(f"Invalid transcription: '{transcription}' (confidence: {confidence:.2f})")
     
-    def _is_valid_transcription_fast(self, transcription: str, confidence: float) -> bool:
-        """Ultra fast validation with minimal checks."""
-        # Basic length check
+    def _is_valid_transcription_enhanced(self, transcription: str, confidence: float) -> bool:
+        """Enhanced validation with more lenient criteria."""
+        # Basic length check - more lenient
         if len(transcription.split()) < self.MIN_TRANSCRIPTION_LENGTH:
             return False
         
-        # Reduced confidence threshold for speed
-        if confidence < 0.2:
+        # More lenient confidence threshold
+        if confidence < 0.1:  # Much lower threshold
             return False
         
-        # Minimal echo check - just timing
+        # Skip very recent echo check (reduced timeout)
         if (self.state.last_tts_time and 
-            (time.time() - self.state.last_tts_time) < 0.8):  # Reduced from 2.0s
-            # Very simple echo check - if response contains exactly same text
+            (time.time() - self.state.last_tts_time) < 0.5):  # Reduced from 0.8s
+            # Only reject if it's exactly the same
             if transcription.lower() == self.last_response_text.lower():
                 return False
+        
+        # Skip common noise patterns
+        noise_patterns = ['hmm', 'uh', 'um', 'ah']
+        if transcription.lower().strip() in noise_patterns:
+            return False
         
         return True
     
     async def _process_final_transcription(self, transcription: str):
-        """Ultra fast transcription processing with timeout fix."""
+        """Enhanced transcription processing with better timeout handling."""
         self.state.transcriptions += 1
         self.state.is_speaking = True  # Prevent echo during processing
         
         logger.info(f"Processing: '{transcription}'")
         
         try:
-            # FIXED: Use asyncio.wait_for instead of asyncio.timeout (Python 3.10 compatible)
+            # Use asyncio.wait_for with increased timeout
             response_task = self._get_knowledge_response(transcription)
             response = await asyncio.wait_for(response_task, timeout=self.RESPONSE_TIMEOUT)
             
@@ -210,7 +246,7 @@ class SimpleWebSocketHandler:
             self.state.is_speaking = False
     
     async def _get_knowledge_response(self, transcription: str) -> Optional[str]:
-        """Get response from knowledge base with minimal overhead."""
+        """Get response from knowledge base with enhanced error handling."""
         try:
             if hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
                 result = await self.pipeline.query_engine.query(transcription)
@@ -222,7 +258,7 @@ class SimpleWebSocketHandler:
             return None
     
     async def _send_response(self, text: str, ws=None):
-        """Ultra fast response sending with minimal processing."""
+        """Enhanced response sending with better timing."""
         if not text.strip() or self.state.call_ended:
             return
         
@@ -238,11 +274,11 @@ class SimpleWebSocketHandler:
             
             logger.info(f"Sending response: '{text}'")
             
-            # Ultra fast TTS synthesis
+            # TTS synthesis
             audio_data = await self.tts_client.synthesize(text)
             
             if audio_data:
-                # Send audio in large chunks for minimal latency
+                # Send audio
                 await self._send_audio_fast(audio_data, ws)
                 self.state.responses_sent += 1
                 self.state.last_tts_time = time.time()
@@ -254,24 +290,25 @@ class SimpleWebSocketHandler:
             logger.error(f"Error sending response: {e}")
             self.error_count += 1
         finally:
-            # Minimal delay
-            await asyncio.sleep(0.1)
+            # Minimal delay before allowing new speech
+            await asyncio.sleep(0.5)  # Reduced delay
             
-            # Ensure STT continues
+            # Ensure STT continues with better error handling
             if not self.stt_client.is_streaming and self.state.conversation_active:
                 try:
+                    logger.info("Restarting STT after response")
                     await self.stt_client.start_streaming()
                 except Exception as e:
                     logger.error(f"Error restarting STT: {e}")
     
     async def _send_audio_fast(self, audio_data: bytes, ws):
-        """Send audio with maximum speed - larger chunks, minimal delays."""
+        """Send audio with optimized chunking."""
         if not self.state.stream_sid or not ws:
             logger.warning("Cannot send audio: missing stream_sid or websocket")
             return
         
-        # Use larger chunks for minimal latency
-        chunk_size = 1600  # 200ms chunks (larger than before)
+        # Optimized chunk size for Twilio
+        chunk_size = 1600  # 200ms chunks
         
         for i in range(0, len(audio_data), chunk_size):
             chunk = audio_data[i:i+chunk_size]
@@ -285,10 +322,10 @@ class SimpleWebSocketHandler:
                     "media": {"payload": audio_base64}
                 }
                 
-                # Send immediately with no timeout
+                # Send immediately
                 await self._send_ws_message_fast(ws, message)
                 
-                # Minimal delay - process at 80% of realtime for stability
+                # Optimized delay
                 delay = chunk_size / 8000 * 0.8
                 await asyncio.sleep(delay)
                 
@@ -297,7 +334,7 @@ class SimpleWebSocketHandler:
                 break
     
     async def _send_ws_message_fast(self, ws, message):
-        """Send WebSocket message as fast as possible."""
+        """Send WebSocket message with error handling."""
         try:
             if hasattr(ws, 'send_text'):
                 # FastAPI WebSocket
@@ -310,22 +347,22 @@ class SimpleWebSocketHandler:
             raise
     
     async def start_conversation(self, ws):
-        """Ultra fast conversation startup."""
+        """Enhanced conversation startup with better speech detection."""
         # Store WebSocket reference
         self._ws = ws
         self.state.stream_sid = getattr(self, 'stream_sid', None)
         
-        # Start STT immediately
+        # Start STT immediately with enhanced settings
         if not self.stt_client.is_streaming:
-            logger.info("Starting STT for conversation")
+            logger.info("Starting STT for conversation with enhanced speech detection")
             await self.stt_client.start_streaming()
         
-        # Send welcome message with minimal delay
-        await asyncio.sleep(0.1)
+        # Send welcome message with slight delay for better audio setup
+        await asyncio.sleep(0.2)
         await self._send_response("Hello! How can I help you?", ws)
     
     async def _cleanup(self):
-        """Fast cleanup with minimal processing."""
+        """Enhanced cleanup with detailed statistics."""
         try:
             self.state.call_ended = True
             self.state.conversation_active = False
@@ -335,20 +372,23 @@ class SimpleWebSocketHandler:
                 await self.stt_client.stop_streaming()
                 await self.stt_client.cleanup()
             
-            # Calculate stats
+            # Calculate enhanced stats
             duration = time.time() - self.state.start_time
             
-            logger.info(f"Session cleanup - Duration: {duration:.2f}s, "
-                       f"Audio packets: {self.state.audio_received}, "
-                       f"Transcriptions: {self.state.transcriptions}, "
-                       f"Responses: {self.state.responses_sent}, "
+            logger.info(f"Enhanced session cleanup - Duration: {duration:.2f}s")
+            logger.info(f"Audio packets: {self.state.audio_received}, "
+                       f"Total bytes: {self.state.audio_bytes_total}")
+            logger.info(f"Speech detected: {self.state.speech_detected}, "
+                       f"Valid transcriptions: {self.state.transcriptions}, "
+                       f"Invalid: {self.state.speech_detected_but_invalid}")
+            logger.info(f"Responses: {self.state.responses_sent}, "
                        f"Errors: {self.error_count}")
                        
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get simple stats for monitoring."""
+        """Get enhanced stats with debugging information."""
         duration = time.time() - self.state.start_time
         
         return {
@@ -358,20 +398,30 @@ class SimpleWebSocketHandler:
             "conversation_active": self.state.conversation_active,
             "call_ended": self.state.call_ended,
             
-            # Core metrics
+            # Enhanced metrics
             "audio_received": self.state.audio_received,
+            "audio_bytes_total": self.state.audio_bytes_total,
+            "speech_detected": self.state.speech_detected,
             "transcriptions": self.state.transcriptions,
+            "speech_detected_but_invalid": self.state.speech_detected_but_invalid,
             "responses_sent": self.state.responses_sent,
             "error_count": self.error_count,
             
             # Performance metrics
-            "avg_response_time": round(
-                (self.state.last_transcription_time - self.state.start_time) / max(self.state.transcriptions, 1), 
-                2
+            "detection_rate": round(
+                (self.state.speech_detected / max(self.state.audio_received, 1)) * 100, 2
+            ),
+            "transcription_rate": round(
+                (self.state.transcriptions / max(self.state.speech_detected, 1)) * 100, 2
             ),
             
             # States
             "is_speaking": self.state.is_speaking,
             "project_id": self.project_id,
             "session_start": self.state.start_time,
+            
+            # Enhanced features
+            "vad_disabled": True,
+            "interim_results_enabled": True,
+            "enhanced_speech_detection": True
         }

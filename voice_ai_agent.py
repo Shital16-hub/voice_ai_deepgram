@@ -1,6 +1,6 @@
 """
-Voice AI Agent main class updated to pass credentials file to STT component.
-This ensures both STT and TTS use the same credentials handling approach.
+Voice AI Agent main class updated for OpenAI + Pinecone integration.
+Replaces Ollama + Chroma with OpenAI + Pinecone for better telephony performance.
 """
 import os
 import logging
@@ -12,10 +12,14 @@ from typing import Optional, Dict, Any, Union, Callable, Awaitable
 # Google Cloud STT imports
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 from speech_to_text.stt_integration import STTIntegration
+
+# OpenAI + Pinecone knowledge base imports
 from knowledge_base.conversation_manager import ConversationManager
-from knowledge_base.llama_index.document_store import DocumentStore
-from knowledge_base.llama_index.index_manager import IndexManager
-from knowledge_base.llama_index.query_engine import QueryEngine
+from knowledge_base.document_store import DocumentStore
+from knowledge_base.index_manager import IndexManager
+from knowledge_base.query_engine import QueryEngine
+from knowledge_base.openai_embeddings import OpenAIEmbeddings
+from knowledge_base.openai_llm import OpenAILLM
 
 # Google Cloud TTS imports
 from text_to_speech.google_cloud_tts import GoogleCloudTTS
@@ -27,25 +31,24 @@ if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """Main Voice AI Agent class optimized for telephony with consistent credentials handling."""
+    """Main Voice AI Agent class using OpenAI + Pinecone for ultra-low latency telephony."""
     
     def __init__(
         self,
         storage_dir: str = './storage',
-        model_name: str = 'mistral:7b-instruct-v0.2-q4_0',
-        llm_temperature: float = 0.7,
-        credentials_file: Optional[str] = None,  # Added credentials_file parameter
+        openai_model: str = 'gpt-4o-mini',  # Fast OpenAI model
+        llm_temperature: float = 0.3,  # Lower for faster, more consistent responses
+        credentials_file: Optional[str] = None,
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with Google Cloud STT v2 and TTS.
-        Both components now use the same credentials handling approach.
+        Initialize the Voice AI Agent with OpenAI + Pinecone.
         """
         self.storage_dir = storage_dir
-        self.model_name = model_name
+        self.openai_model = openai_model
         self.llm_temperature = llm_temperature
         
-        # Credentials handling - find the file if not provided
+        # Credentials handling
         self.credentials_file = credentials_file
         if not self.credentials_file:
             # Try common locations
@@ -59,6 +62,13 @@ class VoiceAIAgent:
                     self.credentials_file = path
                     logger.info(f"Found credentials file: {path}")
                     break
+        
+        # Verify required API keys
+        if not os.getenv("OPENAI_API_KEY"):
+            raise ValueError("OPENAI_API_KEY environment variable is required")
+        
+        if not os.getenv("PINECONE_API_KEY"):
+            raise ValueError("PINECONE_API_KEY environment variable is required")
         
         # STT Parameters
         self.stt_language = kwargs.get('language', 'en-US')
@@ -102,65 +112,78 @@ class VoiceAIAgent:
         self.query_engine = None
         self.tts_client = None
         
-        logger.info("VoiceAIAgent initialized for telephony with consistent credentials handling")
+        # OpenAI + Pinecone components
+        self.embeddings = None
+        self.index_manager = None
+        self.llm = None
+        
+        logger.info("VoiceAIAgent initialized for telephony with OpenAI + Pinecone")
         
     async def init(self):
-        """Initialize all components with optimal telephony settings and consistent credentials."""
-        logger.info("Initializing Voice AI Agent components with Google Cloud STT v2 and TTS...")
+        """Initialize all components with OpenAI + Pinecone integration."""
+        logger.info("Initializing Voice AI Agent with OpenAI + Pinecone...")
         
-        # Initialize speech recognizer with Google Cloud v2 and explicit credentials
+        # Initialize speech recognizer with Google Cloud v2
         self.speech_recognizer = GoogleCloudStreamingSTT(
             language=self.stt_language,
-            sample_rate=8000,  # Match Twilio exactly
-            encoding="MULAW",  # Match Twilio exactly
+            sample_rate=8000,
+            encoding="MULAW",
             channels=1,
-            interim_results=False,  # Only final results for better accuracy
+            interim_results=False,
             project_id=self.project_id,
             location="global",
-            credentials_file=self.credentials_file  # Pass credentials file explicitly
+            credentials_file=self.credentials_file
         )
         
-        # Initialize STT integration with zero preprocessing
+        # Initialize STT integration
         self.stt_integration = STTIntegration(
             speech_recognizer=self.speech_recognizer,
             language=self.stt_language
         )
         await self.stt_integration.init(project_id=self.project_id)
         
-        # Initialize document store and index manager
-        doc_store = DocumentStore()
-        index_manager = IndexManager(storage_dir=self.storage_dir)
-        await index_manager.init()
+        # Initialize OpenAI embeddings
+        self.embeddings = OpenAIEmbeddings()
         
-        # Initialize query engine
+        # Initialize Pinecone index manager
+        self.index_manager = IndexManager(embedding_model=self.embeddings)
+        await self.index_manager.init()
+        
+        # Initialize OpenAI LLM
+        from knowledge_base.config import get_openai_config
+        openai_config = get_openai_config()
+        openai_config["model"] = self.openai_model
+        openai_config["temperature"] = self.llm_temperature
+        
+        self.llm = OpenAILLM(config=openai_config)
+        
+        # Initialize query engine with OpenAI + Pinecone
         self.query_engine = QueryEngine(
-            index_manager=index_manager, 
-            llm_model_name=self.model_name,
-            llm_temperature=self.llm_temperature
+            index_manager=self.index_manager,
+            llm=self.llm
         )
         await self.query_engine.init()
         
         # Initialize conversation manager (skip greeting for telephony)
         self.conversation_manager = ConversationManager(
             query_engine=self.query_engine,
-            llm_model_name=self.model_name,
-            llm_temperature=self.llm_temperature,
-            skip_greeting=True  # Better for telephony
+            skip_greeting=True,  # Better for telephony
+            max_history_turns=4,  # Shorter for telephony
+            context_window_tokens=2048  # Optimized for telephony
         )
         await self.conversation_manager.init()
         
-        # Initialize Google Cloud TTS with telephony optimization and explicit credentials
+        # Initialize Google Cloud TTS
         try:
-            # Initialize with telephony-optimized settings and explicit credentials
             self.tts_client = GoogleCloudTTS(
-                credentials_file=self.credentials_file,  # Pass credentials file explicitly
+                credentials_file=self.credentials_file,
                 voice_name=self.tts_voice_name,
                 voice_gender=self.tts_voice_gender,
                 language_code=self.tts_language_code,
-                container_format="mulaw",  # For Twilio compatibility
-                sample_rate=8000,  # For Twilio compatibility
+                container_format="mulaw",
+                sample_rate=8000,
                 enable_caching=True,
-                voice_type="NEURAL2"  # Use Neural2 for best quality
+                voice_type="NEURAL2"
             )
             
             logger.info(f"Initialized Google Cloud TTS with voice: {self.tts_voice_name}")
@@ -170,7 +193,7 @@ class VoiceAIAgent:
         
         # Mark as initialized
         self._initialized = True
-        logger.info("Voice AI Agent initialization complete (optimized for telephony)")
+        logger.info("Voice AI Agent initialization complete with OpenAI + Pinecone")
         
     async def process_audio(
         self,
@@ -178,7 +201,7 @@ class VoiceAIAgent:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        Process audio data with ZERO preprocessing - pass directly to Google Cloud STT v2.
+        Process audio data with zero preprocessing - optimized for OpenAI + Pinecone.
         """
         if not self.initialized:
             raise RuntimeError("Voice AI Agent not initialized")
@@ -191,7 +214,7 @@ class VoiceAIAgent:
             transcription = result["transcription"]
             logger.info(f"Valid transcription: {transcription}")
             
-            # Process through conversation manager
+            # Process through conversation manager (uses OpenAI + Pinecone)
             response = await self.conversation_manager.handle_user_input(transcription)
             
             # Generate speech using Google Cloud TTS
@@ -202,29 +225,62 @@ class VoiceAIAgent:
                         "transcription": transcription,
                         "response": response.get("response", ""),
                         "speech_audio": speech_audio,
-                        "status": "success"
+                        "status": "success",
+                        "engine": "openai_pinecone"
                     }
                 except Exception as e:
-                    logger.error(f"Error synthesizing speech with Google Cloud TTS: {e}")
+                    logger.error(f"Error synthesizing speech: {e}")
                     return {
                         "transcription": transcription,
                         "response": response.get("response", ""),
                         "error": f"Speech synthesis error: {str(e)}",
-                        "status": "tts_error"
+                        "status": "tts_error",
+                        "engine": "openai_pinecone"
                     }
             else:
                 return {
                     "transcription": transcription,
                     "response": response.get("response", ""),
-                    "status": "success"
+                    "status": "success",
+                    "engine": "openai_pinecone"
                 }
         else:
             logger.info("Invalid or empty transcription")
             return {
                 "status": "invalid_transcription",
                 "transcription": result.get("transcription", ""),
-                "error": "No valid speech detected"
+                "error": "No valid speech detected",
+                "engine": "openai_pinecone"
             }
+    
+    async def add_documents(self, documents_directory: str):
+        """
+        Add documents to the knowledge base using OpenAI + Pinecone.
+        
+        Args:
+            documents_directory: Directory containing documents to index
+        """
+        if not self.initialized:
+            raise RuntimeError("Voice AI Agent not initialized")
+        
+        # Load documents
+        doc_store = DocumentStore()
+        documents = doc_store.load_documents_from_directory(documents_directory)
+        
+        # Add to Pinecone index
+        doc_ids = await self.index_manager.add_documents(documents)
+        
+        logger.info(f"Added {len(doc_ids)} documents to OpenAI + Pinecone knowledge base")
+        return doc_ids
+    
+    async def get_knowledge_base_stats(self) -> Dict[str, Any]:
+        """Get knowledge base statistics."""
+        if not self.initialized:
+            return {"error": "Not initialized"}
+        
+        stats = await self.query_engine.get_stats()
+        stats["engine_type"] = "openai_pinecone"
+        return stats
     
     @property
     def initialized(self) -> bool:
@@ -245,3 +301,5 @@ class VoiceAIAgent:
         
         # Mark as not initialized
         self._initialized = False
+        
+        logger.info("Voice AI Agent shutdown complete")

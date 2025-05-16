@@ -1,6 +1,6 @@
 """
-Fixed Twilio FastAPI app with optimizations for ultra low latency.
-Main fixes: asyncio.timeout -> asyncio.wait_for, optimized settings.
+Fixed Twilio FastAPI app updated for OpenAI + Pinecone.
+Main fixes: Updated imports and initialization for new knowledge base system.
 """
 #!/usr/bin/env python3
 import os
@@ -19,9 +19,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 import uvicorn
 
-# Project imports - use the fixed handler
+# Project imports - updated for OpenAI + Pinecone
 from telephony.simple_websocket_handler import SimpleWebSocketHandler
 from telephony.config import HOST, PORT, DEBUG
+
+# Updated imports for OpenAI + Pinecone
 from voice_ai_agent import VoiceAIAgent
 from integration.pipeline import VoiceAIAgentPipeline
 from integration.tts_integration import TTSIntegration
@@ -51,15 +53,22 @@ base_url = None
 active_calls = {}
 
 async def initialize_system():
-    """Initialize the Voice AI system with ultra low latency settings."""
+    """Initialize the Voice AI system with OpenAI + Pinecone."""
     global voice_ai_pipeline, base_url
     
-    logger.info("Initializing Voice AI for ultra low latency...")
+    logger.info("Initializing Voice AI with OpenAI + Pinecone for ultra low latency...")
     
     # Validate required environment variables
     base_url = os.getenv('BASE_URL')
     if not base_url:
         raise ValueError("BASE_URL environment variable must be set")
+    
+    # Check OpenAI and Pinecone API keys
+    if not os.getenv('OPENAI_API_KEY'):
+        raise ValueError("OPENAI_API_KEY environment variable must be set")
+    
+    if not os.getenv('PINECONE_API_KEY'):
+        raise ValueError("PINECONE_API_KEY environment variable must be set")
     
     google_creds = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
     if not google_creds or not os.path.exists(google_creds):
@@ -67,10 +76,10 @@ async def initialize_system():
     
     logger.info(f"Using BASE_URL: {base_url}")
     
-    # Initialize Voice AI Agent with optimized settings
+    # Initialize Voice AI Agent with OpenAI + Pinecone
     agent = VoiceAIAgent(
         storage_dir='./storage',
-        model_name='mistral:7b-instruct-v0.2-q4_0',
+        openai_model='gpt-4o-mini',  # Fast OpenAI model
         llm_temperature=0.3,  # Lower temperature for faster responses
         credentials_file=google_creds
     )
@@ -86,7 +95,7 @@ async def initialize_system():
     )
     await tts.init()
     
-    # Create pipeline
+    # Create pipeline with OpenAI + Pinecone components
     voice_ai_pipeline = VoiceAIAgentPipeline(
         speech_recognizer=agent.speech_recognizer,
         conversation_manager=agent.conversation_manager,
@@ -94,7 +103,7 @@ async def initialize_system():
         tts_integration=tts
     )
     
-    logger.info("Ultra low latency system initialization completed")
+    logger.info("Ultra low latency system initialization completed with OpenAI + Pinecone")
 
 async def cleanup_system():
     """Cleanup system resources."""
@@ -120,9 +129,9 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app with minimal middleware for performance
 app = FastAPI(
-    title="Ultra Low Latency Voice AI",
-    description="Voice AI optimized for <2s latency",
-    version="3.0.0",
+    title="Ultra Low Latency Voice AI with OpenAI + Pinecone",
+    description="Voice AI optimized for <2s latency using OpenAI + Pinecone",
+    version="3.1.0",
     lifespan=lifespan
 )
 
@@ -140,10 +149,11 @@ async def index():
     """Health check endpoint."""
     return {
         "status": "running",
-        "message": "Ultra Low Latency Voice AI",
-        "version": "3.0.0",
+        "message": "Ultra Low Latency Voice AI with OpenAI + Pinecone",
+        "version": "3.1.0",
         "active_calls": len(active_calls),
-        "latency_target": "<2 seconds"
+        "latency_target": "<2 seconds",
+        "knowledge_base": "OpenAI + Pinecone"
     }
 
 @app.post("/voice/incoming")
@@ -284,6 +294,7 @@ async def get_stats():
         "timestamp": time.time(),
         "active_calls": len(active_calls),
         "system_ready": voice_ai_pipeline is not None,
+        "knowledge_base": "OpenAI + Pinecone",
         "calls": {}
     }
     
@@ -302,12 +313,15 @@ async def health_check():
     return {
         "status": "healthy" if voice_ai_pipeline else "initializing",
         "timestamp": time.time(),
-        "active_calls": len(active_calls)
+        "active_calls": len(active_calls),
+        "knowledge_base": "OpenAI + Pinecone"
     }
 
 if __name__ == '__main__':
-    print("Starting Ultra Low Latency Voice AI...")
+    print("Starting Ultra Low Latency Voice AI with OpenAI + Pinecone...")
     print(f"Base URL: {os.getenv('BASE_URL', 'Not set')}")
+    print(f"OpenAI API Key: {'Set' if os.getenv('OPENAI_API_KEY') else 'Not set'}")
+    print(f"Pinecone API Key: {'Set' if os.getenv('PINECONE_API_KEY') else 'Not set'}")
     print(f"Google Credentials: {os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'Not set')}")
     
     # Run with optimized settings for latency

@@ -1,5 +1,6 @@
 """
 End-to-end pipeline orchestration for Voice AI Agent.
+Updated to use OpenAI + Pinecone instead of LlamaIndex.
 
 This module provides high-level functions for running the complete
 STT -> Knowledge Base -> TTS pipeline with Google Cloud STT integration
@@ -16,7 +17,7 @@ import numpy as np
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT
 from speech_to_text.stt_integration import STTIntegration
 from knowledge_base.conversation_manager import ConversationManager
-from knowledge_base.llama_index.query_engine import QueryEngine
+from knowledge_base.query_engine import QueryEngine
 
 from integration.tts_integration import TTSIntegration
 
@@ -31,7 +32,7 @@ class VoiceAIAgentPipeline:
     
     Provides a high-level interface for running the complete
     STT -> Knowledge Base -> TTS pipeline with Google Cloud STT v2
-    and Google Cloud TTS.
+    and Google Cloud TTS, using OpenAI + Pinecone for knowledge base.
     """
     
     def __init__(
@@ -47,7 +48,7 @@ class VoiceAIAgentPipeline:
         Args:
             speech_recognizer: Initialized STT component (Google Cloud v2)
             conversation_manager: Initialized conversation manager
-            query_engine: Initialized query engine
+            query_engine: Initialized query engine (OpenAI + Pinecone)
             tts_integration: Initialized TTS integration
         """
         self.speech_recognizer = speech_recognizer
@@ -60,7 +61,7 @@ class VoiceAIAgentPipeline:
         
         # Determine if we're using Google Cloud STT v2
         self.using_google_cloud = isinstance(speech_recognizer, GoogleCloudStreamingSTT)
-        logger.info(f"Pipeline initialized with {'Google Cloud v2' if self.using_google_cloud else 'Other'} STT and Google Cloud TTS")
+        logger.info(f"Pipeline initialized with {'Google Cloud v2' if self.using_google_cloud else 'Other'} STT and OpenAI + Pinecone")
     
     async def _is_valid_transcription(self, transcription: str) -> bool:
         """
@@ -142,13 +143,12 @@ class VoiceAIAgentPipeline:
         timings["stt"] = time.time() - stt_start
         logger.info(f"Transcription completed in {timings['stt']:.2f}s: {transcription}")
         
-        # STAGE 2: Knowledge Base Query
-        logger.info("STAGE 2: Knowledge Base Query")
+        # STAGE 2: Knowledge Base Query (OpenAI + Pinecone)
+        logger.info("STAGE 2: Knowledge Base Query (OpenAI + Pinecone)")
         kb_start = time.time()
         
         try:
-            # Retrieve context and generate response
-            retrieval_results = await self.query_engine.retrieve_with_sources(transcription)
+            # Use the query engine directly (already handles retrieval + generation)
             query_result = await self.query_engine.query(transcription)
             response = query_result.get("response", "")
             
@@ -199,7 +199,8 @@ class VoiceAIAgentPipeline:
             "speech_audio_size": len(speech_audio),
             "speech_audio": None if output_speech_file else speech_audio,
             "timings": timings,
-            "total_time": total_time
+            "total_time": total_time,
+            "engine": "openai_pinecone"
         }
     
     async def process_audio_streaming(
@@ -257,8 +258,8 @@ class VoiceAIAgentPipeline:
             response_start_time = time.time()
             full_response = ""
             
-            # Use the query engine's streaming method
-            async for chunk in self.query_engine.query_with_streaming(transcription):
+            # Use the conversation manager's streaming method
+            async for chunk in self.conversation_manager.generate_streaming_response(transcription):
                 chunk_text = chunk.get("chunk", "")
                 
                 if chunk_text:
@@ -272,6 +273,12 @@ class VoiceAIAgentPipeline:
                     # Update stats
                     total_chunks += 1
                     total_audio_bytes += len(audio_data)
+                
+                # Handle completion
+                if chunk.get("done", False):
+                    if chunk.get("full_response"):
+                        full_response = chunk.get("full_response")
+                    break
             
             # Calculate stats
             response_time = time.time() - response_start_time
@@ -284,7 +291,8 @@ class VoiceAIAgentPipeline:
                 "total_time": total_time,
                 "total_chunks": total_chunks,
                 "total_audio_bytes": total_audio_bytes,
-                "full_response": full_response
+                "full_response": full_response,
+                "engine": "openai_pinecone"
             }
             
         except Exception as e:
@@ -292,7 +300,8 @@ class VoiceAIAgentPipeline:
             return {
                 "error": f"Streaming error: {str(e)}",
                 "transcription": transcription,
-                "transcription_time": transcription_time
+                "transcription_time": transcription_time,
+                "engine": "openai_pinecone"
             }
     
     async def _transcribe_audio(self, audio: np.ndarray) -> tuple[str, float]:
