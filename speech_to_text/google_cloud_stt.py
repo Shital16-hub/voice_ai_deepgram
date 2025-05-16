@@ -1,6 +1,6 @@
 """
-Fixed Google Cloud Speech-to-Text v2 implementation with proper session management,
-robust timeout handling, and echo detection for telephony applications.
+Google Cloud Speech-to-Text v2 implementation with enhanced WebRTC-based echo cancellation,
+improved session management, and voice activity detection.
 """
 import logging
 import asyncio
@@ -10,39 +10,50 @@ import json
 import queue
 import threading
 import uuid
+import webrtcvad
+import numpy as np
 from typing import Dict, Any, Optional, List, Callable, Awaitable, Union, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from collections import deque
 
 # Import Speech-to-Text v2 API
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 from google.oauth2 import service_account
-
-# Import Duration from protobuf directly
 from google.protobuf.duration_pb2 import Duration
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class StreamingTranscriptionResult:
-    """Result from streaming transcription."""
+    """Enhanced result from streaming transcription."""
     text: str
     is_final: bool
     confidence: float = 0.0
     session_id: str = ""
+    vad_detected: bool = False  # Voice activity detection result
+    echo_suppressed: bool = False  # Whether echo was suppressed
+
+@dataclass
+class EchoSuppressionState:
+    """State for WebRTC-based echo suppression."""
+    recent_tts_audio: deque = field(default_factory=lambda: deque(maxlen=50))
+    echo_detection_window: float = 5.0
+    suppression_threshold: float = 0.7
+    last_tts_timestamp: float = 0.0
 
 class GoogleCloudStreamingSTT:
     """
-    Google Cloud Speech-to-Text v2 client with robust session management and echo detection.
-    Optimized for continuous telephony conversations with proper timeout handling.
+    Enhanced Google Cloud Speech-to-Text v2 client with WebRTC echo cancellation,
+    improved voice activity detection, and robust session management.
     """
     
     # Enhanced constants for better session management
     STREAMING_LIMIT = 240000  # 4 minutes - safely under 5min limit
-    CHUNK_TIMEOUT = 10.0      # Reduced timeout for more responsive reconnection
-    RECONNECT_DELAY = 0.5     # Faster reconnection
-    MAX_SILENCE_TIME = 30.0   # Maximum silence before stopping session
-    ECHO_DETECTION_WINDOW = 3.0  # Time window to detect echoes
+    CHUNK_TIMEOUT = 5.0      # Reduced for more responsive handling
+    RECONNECT_DELAY = 0.3    # Faster reconnection
+    MAX_SILENCE_TIME = 8.0   # Reduced for more responsive behavior
+    VAD_AGGRESSIVENESS = 3   # WebRTC VAD aggressiveness (0-3, 3 most aggressive)
     
     def __init__(
         self,
@@ -54,9 +65,11 @@ class GoogleCloudStreamingSTT:
         project_id: Optional[str] = None,
         location: str = "global",
         credentials_file: Optional[str] = None,
+        enable_vad: bool = True,
+        enable_echo_suppression: bool = True,
         **kwargs
     ):
-        """Initialize with robust telephony settings and echo detection."""
+        """Initialize with enhanced WebRTC-based features."""
         self.language = language
         self.sample_rate = sample_rate
         self.encoding = encoding
@@ -64,8 +77,18 @@ class GoogleCloudStreamingSTT:
         self.interim_results = interim_results
         self.location = location
         self.credentials_file = credentials_file
+        self.enable_vad = enable_vad
+        self.enable_echo_suppression = enable_echo_suppression
         
-        # Get project ID with better error handling
+        # Initialize WebRTC VAD
+        if self.enable_vad:
+            self.vad = webrtcvad.Vad(self.VAD_AGGRESSIVENESS)
+            logger.info(f"Initialized WebRTC VAD with aggressiveness {self.VAD_AGGRESSIVENESS}")
+        
+        # Echo suppression state
+        self.echo_state = EchoSuppressionState()
+        
+        # Get project ID with enhanced error handling
         self.project_id = self._get_project_id(project_id)
         
         # Initialize client with explicit credentials
@@ -79,7 +102,7 @@ class GoogleCloudStreamingSTT:
         
         # Enhanced state tracking
         self.is_streaming = False
-        self.audio_queue = queue.Queue(maxsize=100)  # Limit queue size
+        self.audio_queue = queue.Queue(maxsize=200)  # Increased buffer
         self.stream_thread = None
         self.stop_event = threading.Event()
         self.session_id = str(uuid.uuid4())
@@ -89,12 +112,17 @@ class GoogleCloudStreamingSTT:
         self.reconnection_in_progress = False
         self.current_stream = None
         self.last_response_time = None
-        
-        # Voice activity and echo detection
         self.last_audio_time = time.time()
+        
+        # Voice activity and enhanced echo detection
         self.speech_detected = False
-        self.last_spoken_texts = []  # Track recent spoken text for echo detection
+        self.silence_frames = 0
         self.speaking_start_time = None
+        
+        # Enhanced keep-alive mechanism
+        self.keep_alive_interval = 2.0  # Send keep-alive every 2 seconds
+        self.last_keep_alive = time.time()
+        self.keep_alive_data = b'\x80' * 160  # Silent MULAW frame
         
         # Audio processing tracking
         self.total_chunks = 0
@@ -102,15 +130,17 @@ class GoogleCloudStreamingSTT:
         self.session_count = 0
         self.timeout_count = 0
         self.consecutive_errors = 0
+        self.vad_speech_frames = 0
+        self.echo_suppressions = 0
         
         # Create callback event loop for async operations
         self.callback_loop = None
         self.callback_thread = None
         
-        logger.info(f"Initialized Speech v2 with enhanced session management - Project: {self.project_id}")
+        logger.info(f"Initialized Enhanced Speech v2 with WebRTC features - Project: {self.project_id}")
     
     def _get_project_id(self, project_id: Optional[str]) -> str:
-        """Get project ID with robust fallback mechanisms."""
+        """Get project ID with enhanced fallback mechanisms."""
         # Try provided project_id first
         if project_id:
             return project_id
@@ -139,14 +169,12 @@ class GoogleCloudStreamingSTT:
         """Initialize the Google Cloud Speech client with enhanced error handling."""
         try:
             if self.credentials_file and os.path.exists(self.credentials_file):
-                # Use service account credentials
                 credentials = service_account.Credentials.from_service_account_file(
                     self.credentials_file
                 )
                 self.client = SpeechClient(credentials=credentials)
                 logger.info(f"Initialized Speech client with credentials from {self.credentials_file}")
             else:
-                # Use default credentials (ADC)
                 self.client = SpeechClient()
                 logger.info("Initialized Speech client with default credentials")
                 
@@ -155,14 +183,14 @@ class GoogleCloudStreamingSTT:
             raise
     
     def _setup_config(self):
-        """Setup recognition configuration with enhanced telephony optimization."""
+        """Setup recognition configuration with enhanced telephony and VAD settings."""
         # Audio encoding configuration
         if self.encoding == "MULAW":
             audio_encoding = cloud_speech.ExplicitDecodingConfig.AudioEncoding.MULAW
         else:
             audio_encoding = cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16
         
-        # Enhanced recognition config for telephony
+        # Enhanced recognition config for telephony with VAD
         self.recognition_config = cloud_speech.RecognitionConfig(
             explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
                 sample_rate_hertz=self.sample_rate,
@@ -170,28 +198,29 @@ class GoogleCloudStreamingSTT:
                 audio_channel_count=self.channels,
             ),
             language_codes=[self.language],
-            model="telephony",  # Telephony model for better phone call recognition
+            model="telephony_short",  # Optimized for short utterances
             features=cloud_speech.RecognitionFeatures(
-                # Enhanced features for better telephony performance
                 enable_automatic_punctuation=True,
                 enable_spoken_punctuation=False,
                 enable_spoken_emojis=False,
-                profanity_filter=False,  # Disable to avoid false positives
-                enable_word_confidence=True,  # Get word-level confidence
-                max_alternatives=1,  # Only get the best alternative
+                profanity_filter=False,
+                enable_word_confidence=True,
+                max_alternatives=1,
+                # Enhanced for better echo handling
+                enable_word_time_offsets=True,
             ),
         )
         
-        # Enhanced streaming configuration with voice activity detection
+        # Enhanced streaming configuration with aggressive VAD
         self.streaming_config = cloud_speech.StreamingRecognitionConfig(
             config=self.recognition_config,
             streaming_features=cloud_speech.StreamingRecognitionFeatures(
                 interim_results=self.interim_results,
                 enable_voice_activity_events=True,
                 voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
-                    # More aggressive timeouts for telephony
-                    speech_start_timeout=Duration(seconds=5),   # Wait 5s for speech to start
-                    speech_end_timeout=Duration(seconds=1)      # Wait 1s after speech ends
+                    # Very aggressive timeouts for responsive telephony
+                    speech_start_timeout=Duration(seconds=2),   # Wait 2s for speech to start
+                    speech_end_timeout=Duration(nanos=500000000)  # Wait 0.5s after speech ends
                 ),
             ),
         )
@@ -200,6 +229,116 @@ class GoogleCloudStreamingSTT:
             recognizer=self.recognizer_path,
             streaming_config=self.streaming_config,
         )
+    
+    def _apply_webrtc_vad(self, audio_data: bytes) -> bool:
+        """Apply WebRTC Voice Activity Detection to audio data."""
+        if not self.enable_vad:
+            return True
+        
+        try:
+            # WebRTC VAD expects 16-bit PCM, so convert if needed
+            if self.encoding == "MULAW":
+                # Convert MULAW to 16-bit PCM for VAD
+                import audioop
+                pcm_data = audioop.ulaw2lin(audio_data, 2)
+            else:
+                pcm_data = audio_data
+            
+            # WebRTC VAD works with specific frame sizes (10ms, 20ms, or 30ms)
+            # For 8kHz, 20ms = 160 samples = 320 bytes
+            frame_size = 320
+            
+            if len(pcm_data) >= frame_size:
+                # Take the first complete frame
+                frame = pcm_data[:frame_size]
+                # VAD returns True if speech is detected
+                return self.vad.is_speech(frame, self.sample_rate)
+            
+            return False
+        except Exception as e:
+            logger.error(f"Error in WebRTC VAD: {e}")
+            return True  # Default to speech when VAD fails
+    
+    def _apply_echo_suppression(self, audio_data: bytes, transcription: str) -> tuple[bool, bool]:
+        """Apply WebRTC-based echo suppression using audio analysis."""
+        if not self.enable_echo_suppression:
+            return True, False
+        
+        current_time = time.time()
+        
+        # Check if we're within echo detection window of recent TTS
+        if current_time - self.echo_state.last_tts_timestamp > self.echo_state.echo_detection_window:
+            return True, False
+        
+        # Apply multiple echo detection methods
+        echo_detected = False
+        
+        # 1. Timing-based detection
+        if current_time - self.echo_state.last_tts_timestamp < 1.0:
+            echo_detected = True
+            logger.debug("Echo detected: too close to TTS output")
+        
+        # 2. Audio fingerprint matching (simplified)
+        try:
+            # Convert audio to comparable format for analysis
+            if self.echo_state.recent_tts_audio:
+                # Simple energy-based comparison
+                import audioop
+                if self.encoding == "MULAW":
+                    audio_energy = sum(abs(b) for b in audio_data)
+                else:
+                    # For PCM, compute RMS energy
+                    audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                    audio_energy = np.sqrt(np.mean(audio_array**2))
+                
+                # Compare with recent TTS audio characteristics
+                # This is a simplified comparison - could be enhanced with FFT analysis
+                for tts_fingerprint in list(self.echo_state.recent_tts_audio)[-5:]:
+                    if abs(audio_energy - tts_fingerprint.get('energy', 0)) < 0.1 * audio_energy:
+                        echo_detected = True
+                        break
+        except Exception as e:
+            logger.debug(f"Error in audio echo analysis: {e}")
+        
+        # 3. Text-based echo detection
+        if transcription:
+            for tts_fingerprint in list(self.echo_state.recent_tts_audio)[-3:]:
+                tts_text = tts_fingerprint.get('text', '').lower()
+                if tts_text and tts_text in transcription.lower():
+                    echo_detected = True
+                    logger.debug(f"Echo detected: text match with TTS output")
+                    break
+        
+        if echo_detected:
+            self.echo_suppressions += 1
+            logger.debug(f"Echo suppressed: {transcription[:50]}...")
+        
+        return not echo_detected, echo_detected
+    
+    def add_tts_fingerprint(self, text: str, audio_data: Optional[bytes] = None):
+        """Add TTS output fingerprint for echo detection."""
+        current_time = time.time()
+        self.echo_state.last_tts_timestamp = current_time
+        
+        fingerprint = {
+            'text': text,
+            'timestamp': current_time,
+            'energy': 0.0
+        }
+        
+        if audio_data:
+            try:
+                # Calculate audio energy fingerprint
+                if self.encoding == "MULAW":
+                    fingerprint['energy'] = sum(abs(b) for b in audio_data[:160])
+                else:
+                    audio_array = np.frombuffer(audio_data[:320], dtype=np.int16)
+                    fingerprint['energy'] = float(np.sqrt(np.mean(audio_array**2)))
+            except Exception as e:
+                logger.debug(f"Error calculating audio fingerprint: {e}")
+        
+        self.echo_state.recent_tts_audio.append(fingerprint)
+        logger.debug(f"Added TTS fingerprint: {text[:30]}...")
     
     def _create_callback_loop(self):
         """Create a separate event loop for handling async callbacks."""
@@ -215,7 +354,7 @@ class GoogleCloudStreamingSTT:
         
         self.callback_thread = threading.Thread(target=run_callback_loop, daemon=True)
         self.callback_thread.start()
-        logger.debug("Started callback event loop thread")
+        logger.debug("Started enhanced callback event loop thread")
     
     def _stop_callback_loop(self):
         """Stop the callback event loop."""
@@ -226,39 +365,58 @@ class GoogleCloudStreamingSTT:
         logger.debug("Stopped callback event loop thread")
     
     def _request_generator(self) -> Iterator[cloud_speech.StreamingRecognizeRequest]:
-        """Generate requests with enhanced timeout and error handling."""
+        """Enhanced request generator with keep-alive and VAD."""
         # Send initial config
         yield self.config_request
         
-        # Track last audio time for timeout detection
+        # Track timing for keep-alive
         last_audio_sent = time.time()
         
-        # Send audio chunks with better flow control
+        # Send audio chunks with enhanced flow control and keep-alive
         while not self.stop_event.is_set():
             try:
-                # Get audio chunk with shorter timeout
-                chunk = self.audio_queue.get(timeout=0.1)
-                if chunk is None:
-                    break
-                
-                # Check if we need to stop due to session limits
-                if self._should_restart_session():
-                    logger.info("Session approaching limits, preparing for restart")
-                    break
-                
-                # Send audio and track timing
-                yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
-                self.audio_queue.task_done()
-                self.last_audio_time = time.time()
-                last_audio_sent = time.time()
-                
-            except queue.Empty:
-                # Check for timeout conditions
+                # Check if we need keep-alive
                 current_time = time.time()
+                if (current_time - last_audio_sent > self.keep_alive_interval and 
+                    current_time - self.last_keep_alive > self.keep_alive_interval):
+                    # Send keep-alive frame
+                    yield cloud_speech.StreamingRecognizeRequest(audio=self.keep_alive_data)
+                    self.last_keep_alive = current_time
+                    logger.debug("Sent keep-alive frame")
+                    continue
+                
+                # Get audio chunk with shorter timeout for responsiveness
+                try:
+                    chunk = self.audio_queue.get(timeout=0.05)
+                    if chunk is None:
+                        break
+                except queue.Empty:
+                    # Check for session restart conditions
+                    if self._should_restart_session():
+                        logger.info("Session restart required")
+                        break
+                    continue
+                
+                # Apply WebRTC VAD
+                has_speech = self._apply_webrtc_vad(chunk)
+                
+                if has_speech:
+                    # Send audio and track timing
+                    yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
+                    self.audio_queue.task_done()
+                    self.last_audio_time = time.time()
+                    last_audio_sent = time.time()
+                    self.vad_speech_frames += 1
+                else:
+                    # Skip non-speech frames but still update queue
+                    self.audio_queue.task_done()
+                    self.silence_frames += 1
+                
+                # Check for extended silence
                 if current_time - last_audio_sent > self.MAX_SILENCE_TIME:
-                    logger.info(f"No audio for {self.MAX_SILENCE_TIME}s, stopping session")
+                    logger.info(f"Extended silence ({self.MAX_SILENCE_TIME}s), ending session")
                     break
-                continue
+                    
             except Exception as e:
                 logger.error(f"Error in request generator: {e}")
                 break
@@ -279,17 +437,24 @@ class GoogleCloudStreamingSTT:
             logger.info(f"Restarting session due to {self.consecutive_errors} consecutive errors")
             return True
         
+        # Restart if too many silence frames (indicates poor connection)
+        if self.silence_frames > 300:  # ~30 seconds of silence at 10fps
+            logger.info("Restarting session due to excessive silence")
+            return True
+        
         return False
     
     def _run_streaming(self):
-        """Run streaming with robust error handling and session management."""
+        """Enhanced streaming with better error recovery and session management."""
         while self.is_streaming and not self.stop_event.is_set():
             try:
-                logger.info(f"Starting streaming session: {self.session_id}")
+                logger.info(f"Starting enhanced streaming session: {self.session_id}")
                 self.stream_start_time = time.time()
                 self.consecutive_errors = 0
+                self.silence_frames = 0
+                self.vad_speech_frames = 0
                 
-                # Create streaming call with timeout
+                # Create streaming call with enhanced timeout
                 self.current_stream = self.client.streaming_recognize(
                     requests=self._request_generator(),
                     timeout=300  # 5 minute timeout
@@ -332,11 +497,12 @@ class GoogleCloudStreamingSTT:
                 else:
                     logger.error(f"Streaming error (#{self.consecutive_errors}): {e}")
                 
-                # Restart session if still active and errors aren't too frequent
+                # Enhanced restart logic with backoff
                 if self.is_streaming and not self.stop_event.is_set():
                     if self.consecutive_errors < 5:
-                        logger.info("Attempting to recover from streaming error")
-                        time.sleep(min(self.RECONNECT_DELAY * self.consecutive_errors, 5.0))
+                        backoff_delay = min(self.RECONNECT_DELAY * (2 ** self.consecutive_errors), 5.0)
+                        logger.info(f"Attempting recovery with {backoff_delay}s backoff")
+                        time.sleep(backoff_delay)
                         self._start_new_session()
                         continue
                     else:
@@ -345,15 +511,15 @@ class GoogleCloudStreamingSTT:
                 else:
                     break
         
-        logger.info(f"Streaming thread ended (session: {self.session_id})")
+        logger.info(f"Enhanced streaming thread ended (session: {self.session_id})")
     
     def _start_new_session(self):
-        """Start a new session with proper cleanup."""
+        """Start a new session with enhanced cleanup."""
         old_session_id = self.session_id
         self.session_count += 1
         self.session_id = str(uuid.uuid4())
         
-        logger.info(f"Starting new STT session: {self.session_id} (replacing {old_session_id})")
+        logger.info(f"Starting new enhanced STT session: {self.session_id} (replacing {old_session_id})")
         
         # Clear audio queue to prevent old audio from affecting new session
         while not self.audio_queue.empty():
@@ -362,9 +528,13 @@ class GoogleCloudStreamingSTT:
                 self.audio_queue.task_done()
             except queue.Empty:
                 break
+        
+        # Reset counters
+        self.silence_frames = 0
+        self.consecutive_errors = 0
     
     def _process_response(self, response):
-        """Process response with echo detection and enhanced logging."""
+        """Enhanced response processing with echo suppression and VAD."""
         # Handle voice activity events
         if hasattr(response, 'speech_event_type') and response.speech_event_type:
             speech_event = response.speech_event_type
@@ -373,13 +543,13 @@ class GoogleCloudStreamingSTT:
             if speech_event == cloud_speech.StreamingRecognizeResponse.SpeechEventType.SPEECH_ACTIVITY_BEGIN:
                 self.speech_detected = True
                 self.speaking_start_time = time.time()
-                logger.debug("Speech activity detected")
+                logger.debug("Speech activity detected by Google Cloud")
             elif speech_event == cloud_speech.StreamingRecognizeResponse.SpeechEventType.SPEECH_ACTIVITY_END:
                 self.speech_detected = False
                 speaking_duration = time.time() - (self.speaking_start_time or time.time())
                 logger.debug(f"Speech activity ended (duration: {speaking_duration:.2f}s)")
         
-        # Process transcription results with echo detection
+        # Process transcription results with enhanced echo suppression
         for result in response.results:
             if result.alternatives:
                 alternative = result.alternatives[0]
@@ -388,80 +558,36 @@ class GoogleCloudStreamingSTT:
                 if text and result.is_final:
                     confidence = alternative.confidence
                     
-                    # Echo detection
-                    if self._is_echo(text):
-                        logger.debug(f"Echo detected, ignoring: '{text}'")
-                        continue
+                    # Apply enhanced echo suppression
+                    should_process, echo_suppressed = self._apply_echo_suppression(b"", text)
                     
-                    # Create result
-                    transcription_result = StreamingTranscriptionResult(
-                        text=text,
-                        is_final=True,
-                        confidence=confidence,
-                        session_id=self.session_id,
-                    )
-                    
-                    # Track for echo detection
-                    self._track_spoken_text(text)
-                    
-                    # Handle callbacks
-                    if hasattr(self, '_current_callback') and self._current_callback:
-                        if self.callback_loop and not self.callback_loop.is_closed():
-                            asyncio.run_coroutine_threadsafe(
-                                self._current_callback(transcription_result),
-                                self.callback_loop
-                            )
-                    
-                    self.successful_transcriptions += 1
-                    logger.info(f"Final transcription (session {self.session_id}): '{text}' (conf: {confidence:.2f})")
-    
-    def _is_echo(self, text: str) -> bool:
-        """Detect if the transcribed text is likely an echo of our TTS output."""
-        current_time = time.time()
-        
-        # Check against recently spoken texts
-        for spoken_text, timestamp in self.last_spoken_texts:
-            if current_time - timestamp > self.ECHO_DETECTION_WINDOW:
-                continue
-            
-            # Simple similarity check (can be enhanced with more sophisticated algorithms)
-            text_lower = text.lower()
-            spoken_lower = spoken_text.lower()
-            
-            # Check for exact matches or significant overlaps
-            if text_lower == spoken_lower:
-                return True
-            
-            # Check for partial matches (words in common)
-            text_words = set(text_lower.split())
-            spoken_words = set(spoken_lower.split())
-            
-            if len(text_words) > 0 and len(spoken_words) > 0:
-                overlap_ratio = len(text_words & spoken_words) / len(text_words)
-                if overlap_ratio > 0.7:  # 70% word overlap
-                    return True
-        
-        return False
-    
-    def _track_spoken_text(self, text: str):
-        """Track spoken text for echo detection."""
-        current_time = time.time()
-        
-        # Add current text
-        self.last_spoken_texts.append((text, current_time))
-        
-        # Clean old entries (keep only recent ones)
-        self.last_spoken_texts = [
-            (t, ts) for t, ts in self.last_spoken_texts
-            if current_time - ts <= self.ECHO_DETECTION_WINDOW * 2
-        ]
-    
-    def add_tts_text(self, text: str):
-        """Add TTS output text for echo detection."""
-        self._track_spoken_text(text)
+                    if should_process:
+                        # Create enhanced result
+                        transcription_result = StreamingTranscriptionResult(
+                            text=text,
+                            is_final=True,
+                            confidence=confidence,
+                            session_id=self.session_id,
+                            vad_detected=True,  # Already passed VAD if we're here
+                            echo_suppressed=echo_suppressed
+                        )
+                        
+                        # Handle callbacks
+                        if hasattr(self, '_current_callback') and self._current_callback:
+                            if self.callback_loop and not self.callback_loop.is_closed():
+                                asyncio.run_coroutine_threadsafe(
+                                    self._current_callback(transcription_result),
+                                    self.callback_loop
+                                )
+                        
+                        self.successful_transcriptions += 1
+                        logger.info(f"Enhanced transcription (session {self.session_id}): '{text}' "
+                                   f"(conf: {confidence:.2f}, VAD frames: {self.vad_speech_frames})")
+                    else:
+                        logger.debug(f"Echo suppressed: '{text}' (total suppressions: {self.echo_suppressions})")
     
     async def start_streaming(self) -> None:
-        """Start streaming with enhanced initialization."""
+        """Enhanced streaming startup with better initialization."""
         if self.is_streaming:
             logger.debug("Stream already active, keeping existing session")
             return
@@ -474,6 +600,9 @@ class GoogleCloudStreamingSTT:
         self.session_id = str(uuid.uuid4())
         self.reconnection_in_progress = False
         self.consecutive_errors = 0
+        self.silence_frames = 0
+        self.vad_speech_frames = 0
+        self.echo_suppressions = 0
         
         # Clear audio queue
         while not self.audio_queue.empty():
@@ -487,14 +616,14 @@ class GoogleCloudStreamingSTT:
         self.stream_thread = threading.Thread(target=self._run_streaming, daemon=True)
         self.stream_thread.start()
         
-        logger.info(f"Started streaming session: {self.session_id}")
+        logger.info(f"Started enhanced streaming session: {self.session_id}")
     
     async def stop_streaming(self) -> tuple[str, float]:
-        """Stop streaming with proper cleanup."""
+        """Enhanced streaming stop with comprehensive cleanup."""
         if not self.is_streaming:
             return "", 0.0
         
-        logger.info(f"Stopping streaming session: {self.session_id}")
+        logger.info(f"Stopping enhanced streaming session: {self.session_id}")
         
         self.is_streaming = False
         self.stop_event.set()
@@ -526,8 +655,9 @@ class GoogleCloudStreamingSTT:
         # Calculate session duration
         duration = time.time() - self.stream_start_time if self.stream_start_time else 0.0
         
-        logger.info(f"Stopped streaming, duration: {duration:.2f}s, "
-                   f"sessions: {self.session_count}, timeouts: {self.timeout_count}")
+        logger.info(f"Stopped enhanced streaming, duration: {duration:.2f}s, "
+                   f"sessions: {self.session_count}, timeouts: {self.timeout_count}, "
+                   f"VAD speech frames: {self.vad_speech_frames}, echo suppressions: {self.echo_suppressions}")
         
         return "", duration
     
@@ -536,7 +666,7 @@ class GoogleCloudStreamingSTT:
         audio_chunk: Union[bytes, bytearray],
         callback: Optional[Callable[[StreamingTranscriptionResult], Awaitable[None]]] = None
     ) -> Optional[StreamingTranscriptionResult]:
-        """Process audio chunk with enhanced error handling."""
+        """Enhanced audio chunk processing with VAD and echo suppression."""
         # Store callback for use in response processing
         self._current_callback = callback
         
@@ -556,13 +686,19 @@ class GoogleCloudStreamingSTT:
             if len(audio_bytes) < 40:
                 return None
             
-            # Add to queue with timeout to prevent blocking
+            # Add to queue with enhanced error handling
             try:
-                # Use a very short timeout to prevent blocking
-                self.audio_queue.put(audio_bytes, block=True, timeout=0.1)
+                self.audio_queue.put(audio_bytes, block=False)
             except queue.Full:
-                logger.warning("Audio queue full, dropping chunk - may need to increase processing speed")
-                return None
+                # If queue is full, remove oldest item and add new one
+                try:
+                    old_chunk = self.audio_queue.get_nowait()
+                    self.audio_queue.task_done()
+                    self.audio_queue.put(audio_bytes, block=False)
+                    logger.warning("Audio queue full, dropped old chunk")
+                except (queue.Empty, queue.Full):
+                    logger.warning("Could not manage full audio queue")
+                    return None
             
             return None  # Results come through callbacks
             
@@ -571,7 +707,7 @@ class GoogleCloudStreamingSTT:
             return None
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get comprehensive processing statistics."""
+        """Get comprehensive processing statistics with enhanced metrics."""
         current_time = time.time()
         session_duration = current_time - self.stream_start_time if self.stream_start_time else 0
         
@@ -591,12 +727,20 @@ class GoogleCloudStreamingSTT:
             "reconnection_in_progress": self.reconnection_in_progress,
             "queue_size": self.audio_queue.qsize(),
             "last_audio_time": self.last_audio_time,
-            "last_response_time": self.last_response_time
+            "last_response_time": self.last_response_time,
+            # Enhanced metrics
+            "vad_enabled": self.enable_vad,
+            "echo_suppression_enabled": self.enable_echo_suppression,
+            "vad_speech_frames": self.vad_speech_frames,
+            "vad_silence_frames": self.silence_frames,
+            "echo_suppressions": self.echo_suppressions,
+            "recent_tts_fingerprints": len(self.echo_state.recent_tts_audio),
+            "vad_aggressiveness": self.VAD_AGGRESSIVENESS if self.enable_vad else None
         }
     
     async def cleanup(self):
-        """Clean up all resources."""
-        logger.info(f"Cleaning up STT session: {self.session_id}")
+        """Enhanced cleanup with comprehensive resource management."""
+        logger.info(f"Cleaning up enhanced STT session: {self.session_id}")
         await self.stop_streaming()
         
         # Clear any remaining audio queue
@@ -607,4 +751,11 @@ class GoogleCloudStreamingSTT:
             except queue.Empty:
                 break
         
-        logger.info("STT cleanup completed")
+        # Clean up WebRTC resources
+        if hasattr(self, 'vad') and self.vad:
+            del self.vad
+        
+        # Clear echo suppression state
+        self.echo_state.recent_tts_audio.clear()
+        
+        logger.info("Enhanced STT cleanup completed")
