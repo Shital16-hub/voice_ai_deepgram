@@ -1,0 +1,6 @@
+[tool.setuptools]
+zip-safe = false
+
+[build_system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

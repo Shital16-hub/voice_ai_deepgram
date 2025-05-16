@@ -1,66 +1,109 @@
-# Simplified requirements.txt for FastAPI migration
+fastapi
+uvicorn[standard]
+python-multipart
+websockets
 
-# Core FastAPI dependencies
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-websockets>=11.0
+# Async support and performance
+aiohttp
+uvloop
 
-# Keep existing dependencies
-aiohttp>=3.8.0
-asyncio
+# Google Cloud APIs
+google-cloud-speech>=2.21.0,<3.0.0
+google-cloud-texttospeech>=2.14.0,<3.0.0
+google-auth
+google-api-core
+google-cloud-core
+grpcio
+grpcio-status
+protobuf
 
-# AI/ML components (keep existing)
-llama-index>=0.10.0
-llama-index-core>=0.10.0
-llama-index-embeddings-huggingface>=0.2.0
-llama-index-vector-stores-chroma>=0.1.0
-llama-index-llms-ollama>=0.1.0
-llama-index-readers-file>=0.1.0
-chromadb>=0.4.0
-sentence-transformers>=2.2.0
-transformers>=4.30.0
-torch>=2.0.0
+# Google Cloud authentication
+google-auth-oauthlib
 
-# Audio processing (keep existing)
-audioread>=3.0.0
-librosa>=0.10.0
-soundfile>=0.12.0
-numpy>=1.24.0
-scipy>=1.10.0
+# AI/ML Components - LlamaIndex ecosystem
+llama-index
+llama-index-core
+llama-index-embeddings-huggingface
+llama-index-vector-stores-chroma
+llama-index-llms-ollama
+llama-index-readers-file
 
-# Language processing (keep existing)
-spacy>=3.6.0
-nltk>=3.8.0
-langdetect>=1.0.9
+# Vector Database and Embeddings
+chromadb
+sentence-transformers
+transformers
 
-# Twilio integration (keep existing)
-twilio>=8.8.0
+# Audio Processing
+librosa
+soundfile
+numpy
+scipy
+webrtcvad
 
-# Google Cloud APIs (keep existing)
-google-cloud-speech>=2.27.0
-google-auth>=2.23.0
-google-api-core>=2.11.0
-google-cloud-core>=2.3.2
-grpcio>=1.56.0
-protobuf>=4.25.0,<5.0.0
-google-cloud-texttospeech>=2.16.0 
+# Document Processing
+beautifulsoup4
+pdfplumber
+PyMuPDF
+pypdf
+python-docx
+openpyxl
+lxml
 
-# Document processing (keep existing)
-beautifulsoup4>=4.12.0
-pdfplumber>=0.7.0
-PyMuPDF>=1.23.0
-pypdf>=3.12.0
-python-docx>=0.8.11
-openpyxl>=3.1.0
-lxml>=4.9.0
+# Twilio Integration
+twilio
 
-# Utilities (keep existing)
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-pandas>=2.0.0
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-typing-extensions>=4.7.0
+# Data Handling and Utilities
+pydantic
+pydantic-settings
+python-dotenv
+requests
+pandas
+typing-extensions
+
+# Caching and Session Management
+redis
+
+# Monitoring and Logging
+structlog
+prometheus-client
+
+# Development and Testing
+pytest
+pytest-asyncio
+
+# Language Processing
+spacy
+nltk
+langdetect
+
+# System and Performance Monitoring
+psutil
+
+# Authentication and Security
+cryptography
+pyjwt
+
+# CORS and Middleware
+python-multipart
+
+# Additional Utilities
+colorama
+tqdm
+click
+
+# Audio utilities
+pyaudio
+
+# Image processing
+Pillow
+
+# Optimizations
+ujson
+orjson
+
+# For better model loading
+accelerate
+safetensors
+
+# For memory optimization
+memory-profiler

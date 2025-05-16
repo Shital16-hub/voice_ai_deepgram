@@ -1,5 +1,6 @@
 """
-LLM setup for LlamaIndex integration with Ollama.
+Ultra Low Latency LLM Configuration for Sub-2s Response
+Optimized Ollama settings for fastest possible response generation.
 """
 import logging
 import os
@@ -11,36 +12,15 @@ from llama_index.core.llms import ChatMessage, MessageRole
 
 logger = logging.getLogger(__name__)
 
-# Default model configuration
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b-instruct-v0.2-q4_0")
+# Ultra low latency model configuration
+DEFAULT_MODEL = "mistral:7b-instruct-v0.2-q4_0"  # Keep this model but optimize parameters
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "60"))  # Increased to 60 seconds
+OLLAMA_TIMEOUT = 3  # Reduced from 60s to 3s for ultra low latency
 
-# LLM parameters
-DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-DEFAULT_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
-DEFAULT_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "4096"))
-
-# Add parallel processing flag
-PARALLEL_PROCESSING = os.getenv("PARALLEL_PROCESSING", "True").lower() == "true"
-
-def check_ollama_availability(base_url: str = OLLAMA_BASE_URL) -> bool:
-    """
-    Check if Ollama is running and accessible.
-    
-    Args:
-        base_url: Ollama API base URL
-        
-    Returns:
-        True if Ollama is available
-    """
-    import requests
-    try:
-        response = requests.get(f"{base_url}/api/tags")
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Ollama not available: {e}")
-        return False
+# Ultra aggressive LLM parameters for speed
+DEFAULT_TEMPERATURE = 0.1      # Much lower for faster, more deterministic responses
+DEFAULT_MAX_TOKENS = 150       # Reduced from 1024 to 150 for shorter, faster responses
+DEFAULT_CONTEXT_WINDOW = 1024  # Reduced from 4096 to 1024 for speed
 
 def get_ollama_llm(
     model_name: Optional[str] = None,
@@ -49,98 +29,68 @@ def get_ollama_llm(
     **kwargs
 ) -> Ollama:
     """
-    Get Ollama LLM for LlamaIndex integration.
-    
-    Args:
-        model_name: Model name to use (defaults to environment or mistral:7b-instruct)
-        temperature: Sampling temperature (0.0 to 1.0)
-        max_tokens: Maximum tokens to generate
-        **kwargs: Additional parameters to pass to Ollama
-        
-    Returns:
-        Configured Ollama LLM
+    Get ultra fast Ollama LLM optimized for <2s response time.
     """
-    # Get parameters, with fallbacks to defaults
     model = model_name or DEFAULT_MODEL
     base_url = kwargs.pop("base_url", OLLAMA_BASE_URL)
     request_timeout = kwargs.pop("request_timeout", OLLAMA_TIMEOUT)
 
-    # Check if Ollama is available
-    if not check_ollama_availability(base_url):
-        raise ValueError(f"Ollama not available at {base_url}. Please ensure Ollama is running.")
-    
-    # Build parameters
+    # Ultra aggressive parameters for speed
     params = {
         "temperature": temperature if temperature is not None else DEFAULT_TEMPERATURE,
         "max_tokens": max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS,
+        # Ultra fast inference parameters
+        "top_k": 1,           # Only consider top token for speed
+        "top_p": 0.1,         # Very low top_p for deterministic, fast responses
+        "repeat_penalty": 1.0,  # No repeat penalty for speed
+        "num_ctx": DEFAULT_CONTEXT_WINDOW,  # Smaller context for speed
         **kwargs
     }
     
     try:
-        # Check if model exists
-        import requests
-        model_check = requests.post(f"{base_url}/api/show", json={"name": model})
-        if model_check.status_code != 200:
-            # Model doesn't exist, try to pull it
-            logger.warning(f"Model {model} not found locally. Attempting to pull...")
-            pull_response = requests.post(f"{base_url}/api/pull", json={"name": model})
-            if pull_response.status_code != 200:
-                raise ValueError(f"Failed to pull model {model}. Please pull it manually.")
-            
-        # Initialize Ollama LLM
+        # Initialize with ultra low latency settings
         ollama_llm = Ollama(
             model=model,
             base_url=base_url,
-            request_timeout=request_timeout,  # Pass the timeout explicitly
+            request_timeout=request_timeout,
             **params
         )
         
-        logger.info(f"Initialized Ollama LLM with model: {model}, timeout: {request_timeout}s")
+        # Set additional ultra fast parameters
+        ollama_llm.additional_kwargs = {
+            "num_predict": max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS,
+            "num_ctx": DEFAULT_CONTEXT_WINDOW,
+            "temperature": temperature if temperature is not None else DEFAULT_TEMPERATURE,
+            "top_k": 1,
+            "top_p": 0.1,
+        }
+        
+        logger.info(f"Initialized ultra fast Ollama LLM: {model} (timeout: {request_timeout}s)")
         return ollama_llm
         
     except Exception as e:
         logger.error(f"Error initializing Ollama LLM: {e}")
         raise
 
-def setup_global_llm(model_name: Optional[str] = None, **kwargs) -> Ollama:
-    """
-    Set up LlamaIndex to use Ollama LLM globally.
-    
-    Args:
-        model_name: Model name to use
-        **kwargs: Additional parameters to pass to Ollama
-        
-    Returns:
-        The configured Ollama LLM instance
-    """
-    # Get Ollama LLM
-    ollama_llm = get_ollama_llm(model_name, **kwargs)
-    
-    # Set as global LLM
-    Settings.llm = ollama_llm
-    
-    logger.info(f"Set Ollama LLM as global LlamaIndex LLM with model: {ollama_llm.model}")
-    return ollama_llm
-
 def format_system_prompt(
     base_prompt: str,
     retrieved_context: Optional[str] = None
 ) -> str:
     """
-    Format system prompt with optional retrieved context.
-    
-    Args:
-        base_prompt: Base system prompt
-        retrieved_context: Optional context from retrieval
-        
-    Returns:
-        Formatted system prompt
+    Create ultra concise system prompt for fastest processing.
     """
-    if not retrieved_context:
-        return base_prompt
+    # Ultra concise base prompt
+    concise_prompt = """You are a customer support AI. Answer briefly and directly using the provided context. Keep responses under 30 words when possible."""
     
-    # Add the retrieved context to the system prompt
-    return f"{base_prompt}\n\nRelevant information:\n{retrieved_context}"
+    if retrieved_context:
+        # Truncate context for speed
+        max_context_length = 500  # Much shorter context
+        if len(retrieved_context) > max_context_length:
+            retrieved_context = retrieved_context[:max_context_length] + "..."
+        
+        return f"{concise_prompt}\n\nContext: {retrieved_context}"
+    
+    return concise_prompt
 
 def create_chat_messages(
     system_prompt: str,
@@ -148,23 +98,18 @@ def create_chat_messages(
     chat_history: Optional[List[Dict[str, str]]] = None
 ) -> List[ChatMessage]:
     """
-    Create formatted chat messages for LLM.
-    
-    Args:
-        system_prompt: System prompt
-        user_message: User message
-        chat_history: Optional chat history
-        
-    Returns:
-        List of ChatMessage objects
+    Create minimal chat messages for fastest processing.
     """
     messages = [
         ChatMessage(role=MessageRole.SYSTEM, content=system_prompt)
     ]
     
-    # Add chat history if provided
-    if chat_history:
-        for message in chat_history:
+    # Include only the last exchange for speed
+    if chat_history and len(chat_history) > 0:
+        # Only include the very last exchange
+        last_messages = chat_history[-2:] if len(chat_history) >= 2 else chat_history
+        
+        for message in last_messages:
             role = message.get("role", "user")
             content = message.get("content", "")
             
@@ -173,33 +118,34 @@ def create_chat_messages(
             elif role == "assistant":
                 messages.append(ChatMessage(role=MessageRole.ASSISTANT, content=content))
     
-    # Add user message
+    # Add current user message
     messages.append(ChatMessage(role=MessageRole.USER, content=user_message))
     
     return messages
 
-# LangGraph preparation - these functions will be enhanced later
-def get_llm_node_input(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract the input needed for the LLM node from the state.
+# Ultra fast query processing
+def optimize_query_for_speed(query: str) -> str:
+    """Optimize query for fastest processing."""
+    # Keep query short and direct
+    words = query.split()
+    if len(words) > 20:
+        # Truncate very long queries
+        query = " ".join(words[:20]) + "?"
     
-    Args:
-        state: The current state object
-        
-    Returns:
-        The input for the LLM node
-    """
-    # For now, just return a simple extraction, will be enhanced for LangGraph
-    return {
-        "query": state.get("query", ""),
-        "context": state.get("context", ""),
-        "chat_history": state.get("history", [])
-    }
+    return query
 
-def prepare_for_langgraph():
-    """
-    Placeholder function to prepare for LangGraph integration.
-    Will be implemented when migrating to LangGraph.
-    """
-    logger.info("LangGraph integration will be implemented in a future update")
-    pass
+# Optimized knowledge base configuration
+KB_CONFIG = {
+    "chunk_size": 256,           # Smaller chunks for faster retrieval
+    "chunk_overlap": 20,         # Minimal overlap
+    "top_k": 2,                  # Retrieve only 2 most relevant chunks
+    "min_score": 0.3,            # Lower threshold for speed
+}
+
+# Ultra fast conversation manager settings
+CONVERSATION_CONFIG = {
+    "max_history_turns": 3,      # Keep only last 3 turns
+    "context_window_tokens": 512, # Much smaller context window
+    "use_langgraph": False,      # Disabled for speed
+    "skip_greeting": True,       # Skip greeting for telephony
+}
