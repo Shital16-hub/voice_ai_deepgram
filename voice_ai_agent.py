@@ -37,7 +37,7 @@ class VoiceAIAgent:
         self,
         storage_dir: str = './storage',
         openai_model: str = 'gpt-4o-mini',  # Fast OpenAI model
-        llm_temperature: float = 0.1,  # CRITICAL: Lower for faster responses
+        llm_temperature: float = 0.7,  # UPDATED: Increased for more engaging responses
         credentials_file: Optional[str] = None,
         **kwargs
     ):
@@ -214,7 +214,7 @@ class VoiceAIAgent:
             openai_config = get_openai_config()
             openai_config["model"] = self.openai_model
             openai_config["temperature"] = self.llm_temperature
-            openai_config["max_tokens"] = 50  # CRITICAL: Very short responses for telephony
+            openai_config["max_tokens"] = 100  # UPDATED: Increased for longer responses
             
             self.llm = OpenAILLM(config=openai_config)
             
@@ -239,8 +239,8 @@ class VoiceAIAgent:
             self.conversation_manager = ConversationManager(
                 query_engine=self.query_engine,
                 skip_greeting=True,      # Better for telephony
-                max_history_turns=3,     # CRITICAL: Shorter for telephony
-                context_window_tokens=1024  # CRITICAL: Smaller context for speed
+                max_history_turns=3,     # UPDATED: Include more context
+                context_window_tokens=2048  # UPDATED: Increased for better context
             )
             await self.conversation_manager.init()
             logger.info("✅ Conversation Manager initialized")

@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Optional, AsyncIterator
 
 from knowledge_base.config import get_retriever_config, get_performance_config
 from knowledge_base.index_manager import IndexManager
-from knowledge_base.openai_llm import OpenAILLM, create_telephony_optimized_messages
+from knowledge_base.openai_llm import OpenAILLM
 from knowledge_base.schema import Document
 
 logger = logging.getLogger(__name__)
@@ -39,13 +39,13 @@ class QueryEngine:
         self.performance_config = get_performance_config()
         
         # CRITICAL: Extract timeout settings with better defaults
-        self.retrieval_timeout = self.config.get("timeout", 4.0)  # Reduced from 10.0s to 4.0s
-        self.total_timeout = self.performance_config.get("total_response_timeout", 10.0)  # Reduced from 25.0s to 10.0s
-        self.openai_timeout = self.performance_config.get("openai_timeout", 4.0)  # Reduced from 15.0s to 4.0s
+        self.retrieval_timeout = self.config.get("timeout", 2.0)  # UPDATED: Reduced from 4.0s to 2.0s
+        self.total_timeout = self.performance_config.get("total_response_timeout", 5.0)  # UPDATED: Reduced from 10.0s to 5.0s
+        self.openai_timeout = self.performance_config.get("openai_timeout", 3.0)  # UPDATED: Reduced from 4.0s to 3.0s
         
-        # CRITICAL: Reduced retrieve count and higher threshold for faster searching
-        self.top_k = self.config.get("top_k", 1)  # Reduced from 3 to 1
-        self.min_score = self.config.get("min_score", 0.7)  # Increased from 0.5/0.6 to 0.7
+        # CRITICAL: Retrieval settings
+        self.top_k = self.config.get("top_k", 2)  # UPDATED: 2 documents for better answers
+        self.min_score = self.config.get("min_score", 0.5)  # UPDATED: 0.5 for broader matches
 
         # Initialize OpenAI LLM with timeout
         self.llm = llm or OpenAILLM()
@@ -221,7 +221,7 @@ class QueryEngine:
 
     def format_retrieved_context(self, results: List[Dict[str, Any]]) -> str:
         """
-        CRITICAL FIX: Format context optimized for telephony (ultra-short).
+        Format retrieved documents as context string with optimizations for better responses.
         
         Args:
             results: Retrieved document results
@@ -232,9 +232,9 @@ class QueryEngine:
         if not results:
             return ""
 
-        # CRITICAL: For telephony, keep context extremely concise
+        # UPDATED: Improved context formatting for better responses
         context_parts = []
-        max_context_words = self.performance_config.get("max_context_words", 50)  # Ultra-limited (reduced from 100)
+        max_context_words = self.performance_config.get("max_context_words", 200)  # UPDATED: Increased from 50
         current_words = 0
 
         for i, doc in enumerate(results):
@@ -242,23 +242,23 @@ class QueryEngine:
             metadata = doc.get("metadata", {})
             source = metadata.get("source", f"Source {i+1}")
 
-            # CRITICAL: Truncate individual documents extremely aggressively
+            # UPDATED: More generous document text limit
             words = text.split()
             if current_words + len(words) > max_context_words:
                 remaining_words = max_context_words - current_words
                 if remaining_words > 0:
                     text = " ".join(words[:remaining_words]) + "..."
-                    context_parts.append(f"{text}")  # Removed source prefix for brevity
+                    context_parts.append(f"From {source}: {text}")  # UPDATED: Added source prefix
                 break
             
-            context_parts.append(f"{text}")  # Removed source prefix for brevity
+            context_parts.append(f"From {source}: {text}")  # UPDATED: Added source prefix
             current_words += len(words)
 
-        context = " ".join(context_parts)
+        context = "\n\n".join(context_parts)  # UPDATED: Better separation with newlines
         
-        # CRITICAL: Final length check - even shorter
-        if len(context) > 200:  # Reduced from 300 to 200
-            context = context[:197] + "..."
+        # Reasonable length check
+        if len(context) > 800:  # UPDATED: Increased from 200
+            context = context[:797] + "..."
 
         return context
 
@@ -331,7 +331,7 @@ class QueryEngine:
             logger.error(f"Total query timeout for: '{query_text}'")
             return {
                 "query": query_text,
-                "response": "Sorry, I'm taking too long. Try again?",  # Ultra-short for telephony
+                "response": "Sorry, I'm taking too long. Can you please try again?",  # UPDATED: More conversational
                 "sources": [],
                 "total_time": time.time() - start_time,
                 "error": "total_timeout",
@@ -342,7 +342,7 @@ class QueryEngine:
             
             return {
                 "query": query_text,
-                "response": "I'm having trouble. Please try again.",  # Ultra-short
+                "response": "I'm having trouble with that right now. Could you try again?",  # UPDATED: More conversational
                 "sources": [],
                 "total_time": time.time() - start_time,
                 "error": str(e),
@@ -411,7 +411,7 @@ class QueryEngine:
                     }
                     
                     # CRITICAL: Check if we've reached the shortened word limit
-                    if len(full_response.split()) >= 10:  # Ultra-short limit
+                    if len(full_response.split()) >= 50:  # UPDATED: Increased for more natural responses
                         logger.info("Reached word limit, ending streaming early")
                         break
                     
@@ -438,7 +438,7 @@ class QueryEngine:
             except asyncio.TimeoutError:
                 logger.error("Streaming generation timed out")
                 yield {
-                    "chunk": " Sorry, taking too long.",  # Ultra-short
+                    "chunk": " Sorry, taking too long.",
                     "full_response": full_response + " Sorry, taking too long.",
                     "done": True,
                     "sources": retrieval_results.get("sources", []),
@@ -450,7 +450,7 @@ class QueryEngine:
             logger.error(f"Retrieval timed out for streaming query: {query_text}")
             
             yield {
-                "chunk": "Having trouble finding that quickly.",  # Ultra-short
+                "chunk": "Having trouble finding that quickly.",
                 "done": True,
                 "error": "retrieval_timeout",
                 "total_time": time.time() - start_time
@@ -459,7 +459,7 @@ class QueryEngine:
             logger.error(f"Error in streaming query: {e}")
             
             yield {
-                "chunk": "Having trouble. Please try again.",  # Ultra-short
+                "chunk": "Having trouble. Please try again.",
                 "done": True,
                 "error": str(e),
                 "total_time": time.time() - start_time
@@ -476,7 +476,7 @@ class QueryEngine:
             # Get index stats with timeout
             index_stats = await asyncio.wait_for(
                 self.index_manager.get_index_stats(),
-                timeout=3.0  # Reduced from 5.0s
+                timeout=3.0
             )
             
             # Get LLM info

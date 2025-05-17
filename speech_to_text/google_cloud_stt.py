@@ -1,4 +1,4 @@
-# speech_to_text/google_cloud_stt.py - CRITICAL FIXES for Twilio Integration
+# speech_to_text/google_cloud_stt.py - CRITICAL FIXES
 
 """
 Google Cloud Speech-to-Text v2 client FIXED for Twilio integration.
@@ -41,9 +41,9 @@ class GoogleCloudStreamingSTT:
     
     # FIXED: Optimized constants
     STREAMING_LIMIT = 240000      # 4 minutes (Twilio call limit)
-    CHUNK_TIMEOUT = 1.0           # Faster timeout for better performance
+    CHUNK_TIMEOUT = 0.5           # UPDATED: Even faster timeout for better performance
     RECONNECT_DELAY = 0.2         # Shorter delay for faster recovery
-    MAX_SILENCE_TIME = 2.0        # More responsive silence detection
+    MAX_SILENCE_TIME = 1.5        # UPDATED: More responsive silence detection
     
     def __init__(
         self,
@@ -102,7 +102,12 @@ class GoogleCloudStreamingSTT:
         self._restart_counter = 0
         self._max_restarts = 3  # Allow up to 3 restarts before requiring a new streaming session
         self._last_streaming_start = None
-        self._streaming_time_limit = 240  # Seconds before needing a restart
+        self._streaming_time_limit = 120  # UPDATED: 2 minutes (reduced from 4) before needing a restart
+        
+        # CRITICAL NEW: Add streaming watchdog timer to detect stalled streams
+        self._last_received_audio_time = None
+        self._last_result_time = None
+        self._stream_healthy = True
         
         # Minimal metrics
         self.total_chunks = 0
@@ -185,7 +190,7 @@ class GoogleCloudStreamingSTT:
                 enable_voice_activity_events=True,     # Keep voice activity events
                 voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
                     # CRITICAL FIX: Proper timeouts for reliable speech detection
-                    speech_start_timeout=Duration(seconds=5),     # Reduced from 10s for faster response
+                    speech_start_timeout=Duration(seconds=3),     # UPDATED: Even shorter
                     speech_end_timeout=Duration(seconds=1)        # Reduced for faster completion
                 ),
             ),
@@ -211,6 +216,9 @@ class GoogleCloudStreamingSTT:
                 
                 # CRITICAL FIX: Validate audio chunk before sending
                 if isinstance(chunk, bytes) and len(chunk) > 0:
+                    # Update last received audio time for watchdog
+                    self._last_received_audio_time = time.time()
+                    
                     yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
                     self.audio_queue.task_done()
                 
@@ -222,6 +230,9 @@ class GoogleCloudStreamingSTT:
     
     def _handle_callback_sync(self, streaming_result: StreamingTranscriptionResult):
         """CRITICAL FIX: Synchronous callback handler with result tracking."""
+        # Update result timestamp for health check
+        self._last_result_time = time.time()
+        
         # CRITICAL FIX: Track final results to solve second call issue
         if streaming_result.is_final:
             with self._result_lock:
@@ -252,6 +263,9 @@ class GoogleCloudStreamingSTT:
                 if self.stop_event.is_set():
                     break
                 
+                # Update stream health status
+                self._stream_healthy = True
+                
                 # CRITICAL FIX: Better result processing
                 for result in response.results:
                     if result.alternatives:
@@ -278,6 +292,9 @@ class GoogleCloudStreamingSTT:
         
         except Exception as e:
             logger.error(f"Error in streaming: {e}")
+            # Set stream health to false
+            self._stream_healthy = False
+            
             # CRITICAL FIX: Don't fail silently, restart if needed
             if not self.stop_event.is_set():
                 logger.info("Attempting to restart streaming...")
@@ -315,6 +332,9 @@ class GoogleCloudStreamingSTT:
         
         # CRITICAL FIX: Reset state tracking values
         self._last_streaming_start = time.time()
+        self._last_received_audio_time = time.time()
+        self._last_result_time = time.time()
+        self._stream_healthy = True
         self._restart_counter = 0
         
         # CRITICAL FIX: Clear queue properly
@@ -383,6 +403,16 @@ class GoogleCloudStreamingSTT:
             logger.warning("Received audio chunk but streaming is not active - starting streaming")
             await self.start_streaming()
         
+        # CRITICAL NEW: Health check for stream
+        current_time = time.time()
+        if self._last_received_audio_time and current_time - self._last_received_audio_time > 10:
+            # If no audio for 10 seconds, check if we're getting results
+            if not self._last_result_time or current_time - self._last_result_time > 15:
+                # No results for 15 seconds, force restart
+                logger.warning("Stream health check failed - forcing restart")
+                await self.stop_streaming()
+                await self.start_streaming()
+        
         self.total_chunks += 1
         
         # CRITICAL FIX: Validate audio chunk
@@ -420,6 +450,12 @@ class GoogleCloudStreamingSTT:
     
     async def check_health(self) -> bool:
         """CRITICAL NEW FIX: Check and repair streaming session health."""
+        if not self._stream_healthy:
+            logger.warning("Stream health check failed: stream not healthy")
+            await self.stop_streaming()
+            await self.start_streaming()
+            return True
+            
         # Check if streaming needs to be restarted due to time limit
         if self.is_streaming and self._last_streaming_start:
             streaming_duration = time.time() - self._last_streaming_start
@@ -442,9 +478,11 @@ class GoogleCloudStreamingSTT:
         with self._result_lock:
             last_result_text = self._last_final_result.text if self._last_final_result else None
         
+        current_time = time.time()
         return {
             "session_id": self.session_id,
             "is_streaming": self.is_streaming,
+            "stream_healthy": self._stream_healthy,
             "total_chunks": self.total_chunks,
             "successful_transcriptions": self.successful_transcriptions,
             "queue_size": self.audio_queue.qsize(),
@@ -456,9 +494,13 @@ class GoogleCloudStreamingSTT:
             "last_final_result": last_result_text,
             "restart_counter": self._restart_counter,
             "max_restarts": self._max_restarts,
-            "session_age": time.time() - self._last_streaming_start if self._last_streaming_start else 0,
+            "session_age": current_time - self._last_streaming_start if self._last_streaming_start else 0,
+            "last_audio_received": self._last_received_audio_time,
+            "time_since_audio": current_time - self._last_received_audio_time if self._last_received_audio_time else None,
+            "last_result_time": self._last_result_time,
+            "time_since_result": current_time - self._last_result_time if self._last_result_time else None,
             "voice_activity_timeout": {
-                "speech_start": "5s",  # Updated values
+                "speech_start": "3s",  # Updated values
                 "speech_end": "1s"
             }
         }

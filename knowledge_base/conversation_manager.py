@@ -12,7 +12,7 @@ import time
 import json
 
 from knowledge_base.query_engine import QueryEngine
-from knowledge_base.openai_llm import create_telephony_optimized_messages
+from knowledge_base.openai_llm import OpenAILLM
 
 logger = logging.getLogger(__name__)
 

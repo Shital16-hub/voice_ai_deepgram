@@ -1,6 +1,6 @@
 """
 Fixed Twilio FastAPI app updated for OpenAI + Pinecone.
-Main fixes: Updated imports and initialization for new knowledge base system.
+CRITICAL FIXES: Fixed session management and connection handling.
 """
 #!/usr/bin/env python3
 import os
@@ -80,7 +80,7 @@ async def initialize_system():
     agent = VoiceAIAgent(
         storage_dir='./storage',
         openai_model='gpt-4o-mini',  # Fast OpenAI model
-        llm_temperature=0.0,  # CRITICAL: Zero temperature for maximum speed
+        llm_temperature=0.7,  # UPDATED: Increased for more conversational responses
         credentials_file=google_creds
     )
     await agent.init()
@@ -240,7 +240,7 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     await handler._ensure_streaming_health()
                 except Exception as e:
                     logger.error(f"Error in health check: {e}")
-                await asyncio.sleep(15)  # Check every 15 seconds
+                await asyncio.sleep(10)  # UPDATED: Check more frequently (10 seconds)
                 
         health_check_task = asyncio.create_task(periodic_health_check())
         
@@ -356,7 +356,7 @@ if __name__ == '__main__':
         loop="asyncio",
         http="h11",
         # WebSocket optimizations
-        ws_ping_interval=30,
+        ws_ping_interval=15,  # UPDATED: More frequent pings
         ws_ping_timeout=10,
         # Reduce worker threads for latency
         workers=1

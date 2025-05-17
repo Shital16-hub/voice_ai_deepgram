@@ -50,7 +50,7 @@ class SimpleWebSocketHandler:
     
     # CRITICAL FIX: More lenient configuration
     MIN_TRANSCRIPTION_LENGTH = 1  # Accept even single words
-    RESPONSE_TIMEOUT = 4.0        # Reduced timeout for faster responses
+    RESPONSE_TIMEOUT = 3.0        # UPDATED: Reduced timeout for faster responses
     SILENCE_TIMEOUT = 5.0         # CRITICAL: Reduced for faster detection
     
     def __init__(self, call_sid: str, pipeline):
@@ -111,7 +111,11 @@ class SimpleWebSocketHandler:
         
         # CRITICAL FIX: Health check timer
         self._last_health_check = time.time()
-        self._health_check_interval = 15  # Check health every 15 seconds
+        self._health_check_interval = 10  # UPDATED: Check health more frequently (10 seconds)
+        
+        # CRITICAL NEW FIX: Add forced restart timer
+        self._last_forced_restart = time.time()
+        self._forced_restart_interval = 30  # Force STT restart every 30 seconds
         
         logger.info(f"FIXED WebSocket handler initialized - Call: {call_sid}")
         logger.info(f"CRITICAL FIXES: Interim results enabled, improved VAD, better timeouts")
@@ -138,16 +142,26 @@ class SimpleWebSocketHandler:
             self._last_health_check = now
             await self._ensure_streaming_health()
         
+        # CRITICAL NEW FIX: Force restart every X seconds to prevent session staleness
+        if (self._last_forced_restart + self._forced_restart_interval < now):
+            self._last_forced_restart = now
+            logger.info("Performing periodic forced restart of STT session")
+            if self.stt_client.is_streaming:
+                await self.stt_client.stop_streaming()
+            await asyncio.sleep(0.2)  # Short delay
+            await self.stt_client.start_streaming()
+            logger.info("Periodic STT restart completed")
+        
         # CRITICAL FIX: Always ensure STT is running before processing audio
         if not self.stt_client.is_streaming:
             logger.info("STT not streaming - restarting STT session")
             await self.stt_client.start_streaming()
         
-        # CRITICAL FIX: More sophisticated echo prevention with safe timeout
+        # CRITICAL FIX: Echo prevention with safe timeout
         if self.response_in_progress:
-            # Allow audio processing during response generation but only wait up to 0.3 seconds
+            # Allow audio processing during response generation but only wait up to 0.2 seconds
             if (self.state.last_tts_time and 
-                (time.time() - self.state.last_tts_time) > 0.3):  # REDUCED from 1.0 to 0.3 for faster responses
+                (time.time() - self.state.last_tts_time) > 0.2):  # UPDATED: Reduced delay for faster responses
                 self.response_in_progress = False
                 self.state.is_speaking = False
                 logger.debug("Cleared response_in_progress flag after echo delay timeout")
@@ -189,7 +203,7 @@ class SimpleWebSocketHandler:
             self.error_count += 1
     
     async def _ensure_streaming_health(self):
-        """CRITICAL FIX: Ensure streaming session is healthy based on Google recommendations."""
+        """CRITICAL FIX: Ensure streaming session is healthy."""
         if not self.stt_client:
             return
             
@@ -199,13 +213,14 @@ class SimpleWebSocketHandler:
             await self.stt_client.start_streaming()
             return
             
-        # Check if we're close to the session time limit
+        # Check if session is getting too old
         if hasattr(self.stt_client, '_last_streaming_start') and self.stt_client._last_streaming_start:
             streaming_duration = time.time() - self.stt_client._last_streaming_start
-            # Google Speech limits streaming to around 5 minutes, restart before that
-            if streaming_duration > 240:  # 4 minutes
+            # Google Speech typically limits streaming to around 5 minutes, restart before that
+            if streaming_duration > 120:  # UPDATED: Reduced to 2 minutes to avoid session issues
                 logger.info(f"Streaming session active for {streaming_duration}s, preemptively restarting")
                 await self.stt_client.stop_streaming()
+                await asyncio.sleep(0.2)  # Add small delay between stop and start
                 await self.stt_client.start_streaming()
     
     async def _handle_transcription_result_enhanced(self, result: StreamingTranscriptionResult):
@@ -415,8 +430,8 @@ class SimpleWebSocketHandler:
                 await self._send_ws_message_fast(ws, message)
                 
                 # CRITICAL FIX: Faster delay for MULAW at 8kHz
-                # Changed from real-time to slightly faster than real-time
-                delay = chunk_size / 8000 * 0.9  # 90% of real-time for slightly faster playback
+                # UPDATED: Even faster playback rate
+                delay = chunk_size / 8000 * 0.85  # 85% of real-time for faster playback
                 await asyncio.sleep(delay)
                 
             except Exception as e:
@@ -452,7 +467,7 @@ class SimpleWebSocketHandler:
         
         # Send welcome message with proper delay
         await asyncio.sleep(0.5)  # Increased delay for better setup
-        await self._send_response("Hello! How can I help you?", ws)
+        await self._send_response("Hello! How can I help you today?", ws)
     
     async def _cleanup(self):
         """CRITICAL FIX: Enhanced cleanup with better statistics."""
@@ -532,5 +547,8 @@ class SimpleWebSocketHandler:
             # CRITICAL NEW: Health check status
             "last_health_check": self._last_health_check,
             "health_check_interval": self._health_check_interval,
-            "next_health_check_in": max(0, self._last_health_check + self._health_check_interval - time.time())
+            "next_health_check_in": max(0, self._last_health_check + self._health_check_interval - time.time()),
+            "last_forced_restart": self._last_forced_restart,
+            "forced_restart_interval": self._forced_restart_interval,
+            "next_forced_restart_in": max(0, self._last_forced_restart + self._forced_restart_interval - time.time())
         }

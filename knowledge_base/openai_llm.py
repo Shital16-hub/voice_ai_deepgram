@@ -1,8 +1,8 @@
-# knowledge_base/openai_llm.py - FIXED VERSION
+# knowledge_base/openai_llm.py - UPDATED
 
 """
 OpenAI-powered LLM integration optimized for telephony conversations.
-CRITICAL FIXES: Added timeouts, better error handling, and ultra-fast responses.
+FIXED: More conversational responses and improved error handling.
 """
 import logging
 import asyncio
@@ -30,7 +30,7 @@ class OpenAILLM:
         # CRITICAL FIX: Initialize with timeout settings
         self.client = AsyncOpenAI(
             api_key=self.config["api_key"],
-            timeout=10.0  # CRITICAL: Default timeout to prevent hanging
+            timeout=10.0  # Default timeout to prevent hanging
         )
         
         self.model = self.config["model"]
@@ -39,10 +39,10 @@ class OpenAILLM:
         self.system_prompt = self.config["system_prompt"]
         
         # CRITICAL FIX: Extract extra performance settings
-        self.top_p = self.config.get("top_p", 0.1)  # Focused output
-        self.frequency_penalty = self.config.get("frequency_penalty", 0.0)
-        self.presence_penalty = self.config.get("presence_penalty", 0.0)
-        self.request_timeout = self.config.get("timeout", 4.0)  # 4s timeout for request
+        self.top_p = self.config.get("top_p", 0.9)  # UPDATED: Higher for more variety
+        self.frequency_penalty = self.config.get("frequency_penalty", 0.3)  # UPDATED: Added for diversity
+        self.presence_penalty = self.config.get("presence_penalty", 0.3)  # UPDATED: Added for diversity
+        self.request_timeout = self.config.get("timeout", 4.0)
         
         logger.info(f"Initialized OpenAI LLM with model: {self.model} (timeout: {self.request_timeout}s)")
     
@@ -73,7 +73,7 @@ class OpenAILLM:
                     messages=messages,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    # CRITICAL FIX: Add ultra-fast settings
+                    # CRITICAL FIX: Add generation settings
                     top_p=self.top_p,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
@@ -86,12 +86,9 @@ class OpenAILLM:
             
             result = response.choices[0].message.content.strip()
             
-            # CRITICAL FIX: Ensure response is super short for telephony
-            # Truncate to first sentence if too long
-            if len(result.split()) > 12:  # Even stricter than config setting
-                sentences = result.split('.')
-                if sentences:
-                    result = sentences[0].strip() + '.'
+            # CRITICAL FIX: Ensure response isn't too short
+            if len(result.split()) < 3:
+                result += " Feel free to ask me more questions."
             
             return result
             
@@ -122,14 +119,13 @@ class OpenAILLM:
         messages = self._create_messages(query, context, chat_history)
         
         try:
-            # CRITICAL FIX: Add ultra-fast streaming
             stream = await asyncio.wait_for(
                 self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    # CRITICAL FIX: Add ultra-fast settings
+                    # CRITICAL FIX: Add generation settings
                     top_p=self.top_p,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
@@ -144,9 +140,9 @@ class OpenAILLM:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     
-                    # CRITICAL FIX: Limit response length for telephony
+                    # CRITICAL FIX: Track words but don't limit too strictly
                     word_count += len(content.split())
-                    if word_count > 12:  # Even stricter than config setting
+                    if word_count > 50:  # UPDATED: Increased limit for longer responses
                         break
                     
                     yield content
@@ -170,9 +166,9 @@ class OpenAILLM:
         # Add system prompt with context
         system_content = self.system_prompt
         if context:
-            # CRITICAL FIX: Truncate context for telephony
-            if len(context) > 300:  # Even shorter!
-                context = context[:297] + "..."
+            # CRITICAL FIX: Allow longer context
+            if len(context) > 1000:  # UPDATED: Increased context length
+                context = context[:997] + "..."
             system_content += f"\n\nRelevant information:\n{context}"
         
         messages.append({
@@ -180,10 +176,10 @@ class OpenAILLM:
             "content": system_content
         })
         
-        # Add chat history (limit to most recent exchange for telephony)
+        # Add chat history (limit to recent exchanges for telephony)
         if chat_history:
-            # CRITICAL FIX: Only last exchange for super fast responses
-            for message in chat_history[-2:]:  # Just one exchange
+            # CRITICAL FIX: Include more context from history
+            for message in chat_history[-4:]:  # UPDATED: Include up to 2 exchanges
                 messages.append(message)
         
         # Add current query
@@ -206,50 +202,3 @@ class OpenAILLM:
             "frequency_penalty": self.frequency_penalty,
             "presence_penalty": self.presence_penalty
         }
-
-def create_telephony_optimized_messages(
-    user_message: str,
-    context: Optional[str] = None,
-    chat_history: Optional[List[Dict[str, str]]] = None
-) -> List[Dict[str, str]]:
-    """
-    Create optimized messages for telephony use case with CRITICAL fixes.
-    
-    Args:
-        user_message: Current user message
-        context: Retrieved context from knowledge base
-        chat_history: Recent conversation history
-        
-    Returns:
-        Formatted messages for OpenAI
-    """
-    messages = []
-    
-    # CRITICAL FIX: Ultra-optimized system prompt for telephony
-    system_prompt = """You are a voice assistant for customer support calls. Keep ALL responses under 10 words. Be direct and helpful."""
-    
-    # Add context to system prompt if available
-    if context:
-        # CRITICAL FIX: Extremely limit context length
-        if len(context) > 200:  # Super short!
-            context = context[:197] + "..."
-        system_prompt += f"\n\nRelevant Information:\n{context}"
-    
-    messages.append({
-        "role": "system",
-        "content": system_prompt
-    })
-    
-    # CRITICAL FIX: Add minimal chat history for telephony
-    if chat_history:
-        # Only include last message for ultra-fast responses
-        recent_message = chat_history[-1]
-        messages.append(recent_message)
-    
-    # Add current user message
-    messages.append({
-        "role": "user",
-        "content": user_message
-    })
-    
-    return messages
