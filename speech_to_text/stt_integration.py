@@ -63,7 +63,7 @@ class STTIntegration:
                 sample_rate=8000,  # Match Twilio exactly
                 encoding="MULAW",   # Match Twilio exactly
                 channels=1,
-                interim_results=False,  # Only final results for accuracy
+                interim_results=True,  # CRITICAL FIX: Enable for debugging and faster results
                 project_id=final_project_id,
                 enhanced_model=True,    # Use telephony-enhanced model
                 location="global"
@@ -127,6 +127,15 @@ class STTIntegration:
                 # Convert list of numbers to bytes (assume they're already MULAW samples)
                 audio_data = bytes(audio_data)
             
+            # CRITICAL FIX: Ensure we have a fresh streaming session for better results
+            if (self.speech_recognizer and 
+                hasattr(self.speech_recognizer, '_last_streaming_start') and 
+                self.speech_recognizer._last_streaming_start and 
+                time.time() - self.speech_recognizer._last_streaming_start > 120):  # 2 min old
+                logger.info("Refreshing STT streaming session for better results")
+                await self.speech_recognizer.stop_streaming()
+                await self.speech_recognizer.start_streaming()
+            
             # Get results directly from STT v2 - no preprocessing
             final_results = []
             
@@ -139,14 +148,19 @@ class STTIntegration:
                 if callback:
                     await callback(result)
             
-            # Start streaming session
-            await self.speech_recognizer.start_streaming()
+            # Start streaming session if needed
+            if not self.speech_recognizer.is_streaming:
+                logger.info("Starting new streaming session")
+                await self.speech_recognizer.start_streaming()
             
             # Process the audio directly
             await self.speech_recognizer.process_audio_chunk(audio_data, store_result)
             
             # Stop streaming to get final results
             final_text, duration = await self.speech_recognizer.stop_streaming()
+            
+            # CRITICAL FIX: Immediately restart streaming for continuous listening
+            await self.speech_recognizer.start_streaming()
             
             # Get the best result
             if final_text:
@@ -208,15 +222,31 @@ class STTIntegration:
             logger.error("STT integration not properly initialized")
             return None
         
+        # CRITICAL FIX: Ensure we have an active streaming session
+        if not self.speech_recognizer.is_streaming:
+            logger.info("No active streaming session, starting one")
+            await self.speech_recognizer.start_streaming()
+        
         # Convert list to bytes if needed
         if isinstance(audio_chunk, list):
             audio_chunk = bytes(audio_chunk)
         
         # Pass directly to STT v2 without any processing
-        return await self.speech_recognizer.process_audio_chunk(
+        result = await self.speech_recognizer.process_audio_chunk(
             audio_chunk=audio_chunk,
             callback=callback
         )
+        
+        # CRITICAL FIX: After processing a chunk with a final result,
+        # check if we need to restart the streaming session
+        if (result and result.is_final and 
+            hasattr(self.speech_recognizer, '_restart_counter') and
+            self.speech_recognizer._restart_counter >= 2):
+            logger.info("Proactively restarting streaming session after final result")
+            await self.speech_recognizer.stop_streaming()
+            await self.speech_recognizer.start_streaming()
+            
+        return result
     
     async def end_streaming(self) -> Tuple[str, float]:
         """End the streaming session and get final transcription."""
@@ -226,6 +256,9 @@ class STTIntegration:
         
         # Stop streaming session
         final_text, duration = await self.speech_recognizer.stop_streaming()
+        
+        # CRITICAL FIX: Immediately restart streaming
+        await self.speech_recognizer.start_streaming()
         
         # Minimal cleanup
         cleaned_text = self.cleanup_transcription(final_text)

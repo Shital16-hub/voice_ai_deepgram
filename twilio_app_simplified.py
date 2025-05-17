@@ -80,7 +80,7 @@ async def initialize_system():
     agent = VoiceAIAgent(
         storage_dir='./storage',
         openai_model='gpt-4o-mini',  # Fast OpenAI model
-        llm_temperature=0.3,  # Lower temperature for faster responses
+        llm_temperature=0.0,  # CRITICAL: Zero temperature for maximum speed
         credentials_file=google_creds
     )
     await agent.init()
@@ -222,6 +222,7 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         return
     
     handler = None
+    health_check_task = None
     
     try:
         # Accept connection immediately
@@ -231,6 +232,17 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         # Create handler with ultra low latency settings
         handler = SimpleWebSocketHandler(call_sid, voice_ai_pipeline)
         active_calls[call_sid] = handler
+        
+        # CRITICAL NEW FIX: Add periodic health check task
+        async def periodic_health_check():
+            while True:
+                try:
+                    await handler._ensure_streaming_health()
+                except Exception as e:
+                    logger.error(f"Error in health check: {e}")
+                await asyncio.sleep(15)  # Check every 15 seconds
+                
+        health_check_task = asyncio.create_task(periodic_health_check())
         
         # Process messages with minimal overhead
         try:
@@ -275,7 +287,15 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         logger.error(f"WebSocket establishment error: {e}")
         
     finally:
-        # Clean up
+        # Clean up health check task
+        if health_check_task:
+            health_check_task.cancel()
+            try:
+                await health_check_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Clean up handler
         if handler:
             try:
                 await handler._cleanup()

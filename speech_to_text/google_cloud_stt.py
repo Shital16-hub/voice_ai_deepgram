@@ -41,9 +41,9 @@ class GoogleCloudStreamingSTT:
     
     # FIXED: Optimized constants
     STREAMING_LIMIT = 240000      # 4 minutes (Twilio call limit)
-    CHUNK_TIMEOUT = 2.0           # Increased timeout for better speech detection
-    RECONNECT_DELAY = 0.5         # Longer delay for stability
-    MAX_SILENCE_TIME = 3.0        # Increased silence detection
+    CHUNK_TIMEOUT = 1.0           # Faster timeout for better performance
+    RECONNECT_DELAY = 0.2         # Shorter delay for faster recovery
+    MAX_SILENCE_TIME = 2.0        # More responsive silence detection
     
     def __init__(
         self,
@@ -97,6 +97,12 @@ class GoogleCloudStreamingSTT:
         # CRITICAL FIX: Track results for second call issue
         self._last_final_result = None
         self._result_lock = threading.Lock()
+        
+        # CRITICAL FIX: Add stream reset tracking
+        self._restart_counter = 0
+        self._max_restarts = 3  # Allow up to 3 restarts before requiring a new streaming session
+        self._last_streaming_start = None
+        self._streaming_time_limit = 240  # Seconds before needing a restart
         
         # Minimal metrics
         self.total_chunks = 0
@@ -179,8 +185,8 @@ class GoogleCloudStreamingSTT:
                 enable_voice_activity_events=True,     # Keep voice activity events
                 voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
                     # CRITICAL FIX: Proper timeouts for reliable speech detection
-                    speech_start_timeout=Duration(seconds=10),     # Increased to 10s
-                    speech_end_timeout=Duration(seconds=2)         # Increased to 2s
+                    speech_start_timeout=Duration(seconds=5),     # Reduced from 10s for faster response
+                    speech_end_timeout=Duration(seconds=1)        # Reduced for faster completion
                 ),
             ),
         )
@@ -198,7 +204,7 @@ class GoogleCloudStreamingSTT:
         # CRITICAL FIX: Better audio chunk processing
         while not self.stop_event.is_set():
             try:
-                # Get audio chunk with increased timeout
+                # Get audio chunk with optimized timeout
                 chunk = self.audio_queue.get(timeout=0.1)
                 if chunk is None:
                     break
@@ -275,14 +281,27 @@ class GoogleCloudStreamingSTT:
             # CRITICAL FIX: Don't fail silently, restart if needed
             if not self.stop_event.is_set():
                 logger.info("Attempting to restart streaming...")
-                time.sleep(1)
-                # Could implement restart logic here if needed
+                time.sleep(0.5)  # Reduced delay for faster recovery
     
     async def start_streaming(self) -> None:
         """CRITICAL FIX: Start streaming with proper session management."""
-        # CRITICAL FIX: Stop existing stream before starting new one
+        # CRITICAL FIX: Check if we need to restart an existing session
         if self.is_streaming:
-            await self.stop_streaming()
+            if self._last_streaming_start:
+                streaming_duration = time.time() - self._last_streaming_start
+                if streaming_duration > self._streaming_time_limit:
+                    logger.info(f"Streaming session active for {streaming_duration}s, forcing restart")
+                    await self.stop_streaming()
+                elif self._restart_counter >= self._max_restarts:
+                    logger.info(f"Reached {self._restart_counter} restarts, forcing new streaming session")
+                    await self.stop_streaming()
+                else:
+                    logger.info("Streaming already active, incrementing restart counter")
+                    self._restart_counter += 1
+                    return
+            else:
+                # No timestamp, just stop the existing session to be safe
+                await self.stop_streaming()
         
         # CRITICAL FIX: Capture the current event loop
         try:
@@ -293,6 +312,10 @@ class GoogleCloudStreamingSTT:
         self.is_streaming = True
         self.stop_event.clear()
         self.session_id = str(uuid.uuid4())
+        
+        # CRITICAL FIX: Reset state tracking values
+        self._last_streaming_start = time.time()
+        self._restart_counter = 0
         
         # CRITICAL FIX: Clear queue properly
         while not self.audio_queue.empty():
@@ -326,9 +349,9 @@ class GoogleCloudStreamingSTT:
         except queue.Full:
             pass
         
-        # Wait for thread
+        # Wait for thread with shorter timeout
         if self.stream_thread and self.stream_thread.is_alive():
-            self.stream_thread.join(timeout=2.0)  # Increased timeout
+            self.stream_thread.join(timeout=1.0)  # Reduced timeout
         
         # CRITICAL FIX: Return last final result if available
         final_text = ""
@@ -339,6 +362,7 @@ class GoogleCloudStreamingSTT:
                 final_text = self._last_final_result.text
                 duration = 0.0  # We don't track duration in this implementation
         
+        logger.info(f"Stopped streaming session: {self.session_id}")
         return final_text, duration
     
     async def process_audio_chunk(
@@ -356,6 +380,7 @@ class GoogleCloudStreamingSTT:
                 self._main_loop = asyncio.get_event_loop()
         
         if not self.is_streaming:
+            logger.warning("Received audio chunk but streaming is not active - starting streaming")
             await self.start_streaming()
         
         self.total_chunks += 1
@@ -381,11 +406,36 @@ class GoogleCloudStreamingSTT:
             self.audio_queue.put(audio_bytes, block=False)
             
         except queue.Full:
-            logger.warning("Audio queue full, dropping chunk")
+            logger.warning("Audio queue full, dropping oldest chunk")
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.task_done()
+                self.audio_queue.put(audio_bytes, block=False)
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Error processing audio chunk: {e}")
         
         return None
+    
+    async def check_health(self) -> bool:
+        """CRITICAL NEW FIX: Check and repair streaming session health."""
+        # Check if streaming needs to be restarted due to time limit
+        if self.is_streaming and self._last_streaming_start:
+            streaming_duration = time.time() - self._last_streaming_start
+            if streaming_duration > self._streaming_time_limit:
+                logger.info(f"Stream health check: session active for {streaming_duration}s, restarting")
+                await self.stop_streaming()
+                await self.start_streaming()
+                return True
+                
+        # Check if streaming is inactive but should be active
+        if not self.is_streaming:
+            logger.info("Stream health check: streaming inactive, restarting")
+            await self.start_streaming()
+            return True
+            
+        return True  # Healthy or repaired
     
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive stats."""
@@ -404,9 +454,12 @@ class GoogleCloudStreamingSTT:
             "encoding": self.encoding,
             "sample_rate": self.sample_rate,
             "last_final_result": last_result_text,
+            "restart_counter": self._restart_counter,
+            "max_restarts": self._max_restarts,
+            "session_age": time.time() - self._last_streaming_start if self._last_streaming_start else 0,
             "voice_activity_timeout": {
-                "speech_start": "10s",
-                "speech_end": "2s"
+                "speech_start": "5s",  # Updated values
+                "speech_end": "1s"
             }
         }
     

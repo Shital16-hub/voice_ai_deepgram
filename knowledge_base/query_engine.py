@@ -38,13 +38,14 @@ class QueryEngine:
         self.config = config or get_retriever_config()
         self.performance_config = get_performance_config()
         
-        # CRITICAL: Extract timeout settings
-        self.retrieval_timeout = self.config.get("timeout", 10.0)
-        self.total_timeout = self.performance_config.get("total_response_timeout", 25.0)
-        self.openai_timeout = self.performance_config.get("openai_timeout", 15.0)
+        # CRITICAL: Extract timeout settings with better defaults
+        self.retrieval_timeout = self.config.get("timeout", 4.0)  # Reduced from 10.0s to 4.0s
+        self.total_timeout = self.performance_config.get("total_response_timeout", 10.0)  # Reduced from 25.0s to 10.0s
+        self.openai_timeout = self.performance_config.get("openai_timeout", 4.0)  # Reduced from 15.0s to 4.0s
         
-        self.top_k = self.config["top_k"]
-        self.min_score = self.config["min_score"]
+        # CRITICAL: Reduced retrieve count and higher threshold for faster searching
+        self.top_k = self.config.get("top_k", 1)  # Reduced from 3 to 1
+        self.min_score = self.config.get("min_score", 0.7)  # Increased from 0.5/0.6 to 0.7
 
         # Initialize OpenAI LLM with timeout
         self.llm = llm or OpenAILLM()
@@ -64,7 +65,7 @@ class QueryEngine:
             if not self.index_manager.is_initialized:
                 await asyncio.wait_for(
                     self.index_manager.init(),
-                    timeout=30.0
+                    timeout=20.0  # Generous timeout for initial setup
                 )
 
             self.is_initialized = True
@@ -102,7 +103,7 @@ class QueryEngine:
         min_score = min_score if min_score is not None else self.min_score
 
         try:
-            # CRITICAL FIX: Add timeout to retrieval
+            # CRITICAL FIX: Add shorter timeout to retrieval
             results = await asyncio.wait_for(
                 self.index_manager.search_documents(
                     query=query,
@@ -220,7 +221,7 @@ class QueryEngine:
 
     def format_retrieved_context(self, results: List[Dict[str, Any]]) -> str:
         """
-        CRITICAL FIX: Format context optimized for telephony (very short).
+        CRITICAL FIX: Format context optimized for telephony (ultra-short).
         
         Args:
             results: Retrieved document results
@@ -233,7 +234,7 @@ class QueryEngine:
 
         # CRITICAL: For telephony, keep context extremely concise
         context_parts = []
-        max_context_words = self.performance_config.get("max_context_words", 100)
+        max_context_words = self.performance_config.get("max_context_words", 50)  # Ultra-limited (reduced from 100)
         current_words = 0
 
         for i, doc in enumerate(results):
@@ -241,23 +242,23 @@ class QueryEngine:
             metadata = doc.get("metadata", {})
             source = metadata.get("source", f"Source {i+1}")
 
-            # CRITICAL: Truncate individual documents aggressively
+            # CRITICAL: Truncate individual documents extremely aggressively
             words = text.split()
             if current_words + len(words) > max_context_words:
                 remaining_words = max_context_words - current_words
                 if remaining_words > 0:
                     text = " ".join(words[:remaining_words]) + "..."
-                    context_parts.append(f"{source}: {text}")
+                    context_parts.append(f"{text}")  # Removed source prefix for brevity
                 break
             
-            context_parts.append(f"{source}: {text}")
+            context_parts.append(f"{text}")  # Removed source prefix for brevity
             current_words += len(words)
 
-        context = " | ".join(context_parts)
+        context = " ".join(context_parts)
         
-        # CRITICAL: Final length check
-        if len(context) > 300:
-            context = context[:297] + "..."
+        # CRITICAL: Final length check - even shorter
+        if len(context) > 200:  # Reduced from 300 to 200
+            context = context[:197] + "..."
 
         return context
 
@@ -302,7 +303,7 @@ class QueryEngine:
                     )
                 except asyncio.TimeoutError:
                     logger.error("OpenAI generation timed out")
-                    response = "I'm processing that. Could you try again?"
+                    response = "I'm processing that. Try again?"  # Ultra-short fallback
                 
                 generation_time = time.time() - generation_start
 
@@ -330,7 +331,7 @@ class QueryEngine:
             logger.error(f"Total query timeout for: '{query_text}'")
             return {
                 "query": query_text,
-                "response": "I'm taking too long to respond. Could you try again?",
+                "response": "Sorry, I'm taking too long. Try again?",  # Ultra-short for telephony
                 "sources": [],
                 "total_time": time.time() - start_time,
                 "error": "total_timeout",
@@ -341,7 +342,7 @@ class QueryEngine:
             
             return {
                 "query": query_text,
-                "response": "I'm having trouble finding that information. Could you rephrase your question?",
+                "response": "I'm having trouble. Please try again.",  # Ultra-short
                 "sources": [],
                 "total_time": time.time() - start_time,
                 "error": str(e),
@@ -389,19 +390,10 @@ class QueryEngine:
             generation_start = time.time()
 
             try:
-                # Create a timeout wrapper for streaming
-                async def _stream_with_timeout():
-                    async for chunk in self.llm.generate_streaming_response(
-                        query=query_text,
-                        context=context if context else None,
-                        chat_history=chat_history
-                    ):
-                        return chunk
-
-                # Stream with individual chunk timeout
-                timeout_per_chunk = 5.0
+                # Stream with timeout
                 chunk_count = 0
                 
+                # Generate with a simplified telegraphy style messaging
                 async for chunk in self.llm.generate_streaming_response(
                     query=query_text,
                     context=context if context else None,
@@ -418,9 +410,14 @@ class QueryEngine:
                         "chunk_number": chunk_count
                     }
                     
+                    # CRITICAL: Check if we've reached the shortened word limit
+                    if len(full_response.split()) >= 10:  # Ultra-short limit
+                        logger.info("Reached word limit, ending streaming early")
+                        break
+                    
                     # CRITICAL: Check if we're taking too long
-                    if time.time() - generation_start > self.openai_timeout:
-                        logger.warning("Streaming timeout reached, ending response")
+                    if time.time() - generation_start > self.openai_timeout * 0.8:
+                        logger.warning("Generation timeout approaching, ending streaming early")
                         break
 
                 # Final completion signal
@@ -441,8 +438,8 @@ class QueryEngine:
             except asyncio.TimeoutError:
                 logger.error("Streaming generation timed out")
                 yield {
-                    "chunk": " I'm taking too long. Let me know if you need anything else.",
-                    "full_response": full_response + " I'm taking too long. Let me know if you need anything else.",
+                    "chunk": " Sorry, taking too long.",  # Ultra-short
+                    "full_response": full_response + " Sorry, taking too long.",
                     "done": True,
                     "sources": retrieval_results.get("sources", []),
                     "error": "streaming_timeout",
@@ -453,7 +450,7 @@ class QueryEngine:
             logger.error(f"Retrieval timed out for streaming query: {query_text}")
             
             yield {
-                "chunk": "I'm having trouble finding that information quickly.",
+                "chunk": "Having trouble finding that quickly.",  # Ultra-short
                 "done": True,
                 "error": "retrieval_timeout",
                 "total_time": time.time() - start_time
@@ -462,7 +459,7 @@ class QueryEngine:
             logger.error(f"Error in streaming query: {e}")
             
             yield {
-                "chunk": "I'm having trouble processing that request.",
+                "chunk": "Having trouble. Please try again.",  # Ultra-short
                 "done": True,
                 "error": str(e),
                 "total_time": time.time() - start_time
@@ -479,7 +476,7 @@ class QueryEngine:
             # Get index stats with timeout
             index_stats = await asyncio.wait_for(
                 self.index_manager.get_index_stats(),
-                timeout=5.0
+                timeout=3.0  # Reduced from 5.0s
             )
             
             # Get LLM info
