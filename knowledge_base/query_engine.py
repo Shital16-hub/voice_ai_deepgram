@@ -39,18 +39,22 @@ class QueryEngine:
         self.performance_config = get_performance_config()
         
         # CRITICAL: Extract timeout settings with better defaults
-        self.retrieval_timeout = self.config.get("timeout", 4.0)  # Reduced from 10.0s to 4.0s
-        self.total_timeout = self.performance_config.get("total_response_timeout", 10.0)  # Reduced from 25.0s to 10.0s
-        self.openai_timeout = self.performance_config.get("openai_timeout", 4.0)  # Reduced from 15.0s to 4.0s
+        self.retrieval_timeout = self.config.get("timeout", 2.0)  # Reduced from 4.0s to 2.0s
+        self.total_timeout = self.performance_config.get("total_response_timeout", 5.0)  # Reduced from 10.0s to 5.0s
+        self.openai_timeout = self.performance_config.get("openai_timeout", 3.0)  # Reduced from 4.0s to 3.0s
         
         # CRITICAL: Reduced retrieve count and higher threshold for faster searching
-        self.top_k = self.config.get("top_k", 1)  # Reduced from 3 to 1
-        self.min_score = self.config.get("min_score", 0.7)  # Increased from 0.5/0.6 to 0.7
+        self.top_k = self.config.get("top_k", 1)  # Keep at 1 for fastest response
+        self.min_score = self.config.get("min_score", 0.65)  # Reduced from 0.7 to 0.65 for better recall
 
         # Initialize OpenAI LLM with timeout
         self.llm = llm or OpenAILLM()
 
         self.is_initialized = False
+        
+        # CRITICAL NEW: Add response cache for common questions
+        self.response_cache = {}
+        self.cache_hits = 0
 
         logger.info(f"Initialized QueryEngine with top_k={self.top_k}, min_score={self.min_score}")
         logger.info(f"Timeouts: retrieval={self.retrieval_timeout}s, total={self.total_timeout}s")
@@ -65,7 +69,7 @@ class QueryEngine:
             if not self.index_manager.is_initialized:
                 await asyncio.wait_for(
                     self.index_manager.init(),
-                    timeout=20.0  # Generous timeout for initial setup
+                    timeout=10.0  # Reduced from 20.0s
                 )
 
             self.is_initialized = True
@@ -275,6 +279,15 @@ class QueryEngine:
         if not self.is_initialized:
             await self.init()
 
+        # CRITICAL NEW: Check cache first for common questions
+        cache_key = query_text.lower().strip()
+        if cache_key in self.response_cache:
+            self.cache_hits += 1
+            cached = self.response_cache[cache_key]
+            cached["cache_hit"] = True
+            logger.info(f"Cache hit for query: '{query_text}' (hits: {self.cache_hits})")
+            return cached
+
         start_time = time.time()
 
         try:
@@ -308,7 +321,7 @@ class QueryEngine:
                 generation_time = time.time() - generation_start
 
                 # Prepare result
-                return {
+                result = {
                     "query": query_text,
                     "response": response,
                     "sources": results,
@@ -318,6 +331,12 @@ class QueryEngine:
                     "context_used": bool(context),
                     "context_length": len(context) if context else 0
                 }
+                
+                # CRITICAL NEW: Cache the result for future use
+                if len(self.response_cache) < 100:  # Limit cache size
+                    self.response_cache[cache_key] = result.copy()
+                    
+                return result
 
             # Execute with total timeout
             result = await asyncio.wait_for(
@@ -368,6 +387,31 @@ class QueryEngine:
             await self.init()
 
         start_time = time.time()
+        
+        # CRITICAL NEW: Check cache first for common questions
+        cache_key = query_text.lower().strip()
+        if cache_key in self.response_cache:
+            self.cache_hits += 1
+            cached = self.response_cache[cache_key]
+            logger.info(f"Cache hit for streaming query: '{query_text}' (hits: {self.cache_hits})")
+            
+            # Return cached response as a single chunk for immediate playback
+            yield {
+                "chunk": cached["response"],
+                "done": False,
+                "sources": cached.get("sources", []),
+                "cache_hit": True
+            }
+            
+            yield {
+                "chunk": "",
+                "full_response": cached["response"],
+                "done": True,
+                "sources": cached.get("sources", []),
+                "cache_hit": True,
+                "total_time": 0.1  # Very fast due to cache
+            }
+            return
 
         try:
             # CRITICAL FIX: Retrieve context quickly with timeout
@@ -411,7 +455,7 @@ class QueryEngine:
                     }
                     
                     # CRITICAL: Check if we've reached the shortened word limit
-                    if len(full_response.split()) >= 10:  # Ultra-short limit
+                    if len(full_response.split()) >= 30:  # Increased from 10 to 30 words
                         logger.info("Reached word limit, ending streaming early")
                         break
                     
@@ -422,6 +466,15 @@ class QueryEngine:
 
                 # Final completion signal
                 generation_time = time.time() - generation_start
+                
+                # CRITICAL NEW: Cache the result for future queries
+                if len(self.response_cache) < 100:  # Limit cache size
+                    self.response_cache[cache_key] = {
+                        "query": query_text,
+                        "response": full_response,
+                        "sources": retrieval_results.get("sources", []),
+                        "total_time": time.time() - start_time
+                    }
                 
                 yield {
                     "chunk": "",
@@ -476,7 +529,7 @@ class QueryEngine:
             # Get index stats with timeout
             index_stats = await asyncio.wait_for(
                 self.index_manager.get_index_stats(),
-                timeout=3.0  # Reduced from 5.0s
+                timeout=2.0  # Reduced from 3.0s
             )
             
             # Get LLM info
@@ -493,7 +546,12 @@ class QueryEngine:
                     "openai_timeout": self.openai_timeout
                 },
                 "performance_config": self.performance_config,
-                "is_initialized": self.is_initialized
+                "is_initialized": self.is_initialized,
+                "cache": {
+                    "enabled": True,
+                    "size": len(self.response_cache),
+                    "hits": self.cache_hits
+                }
             }
         except asyncio.TimeoutError:
             logger.error("Get stats timed out")
