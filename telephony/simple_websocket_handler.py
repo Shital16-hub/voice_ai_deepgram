@@ -50,8 +50,8 @@ class SimpleWebSocketHandler:
     
     # CRITICAL FIX: More lenient configuration
     MIN_TRANSCRIPTION_LENGTH = 1  # Accept even single words
-    RESPONSE_TIMEOUT = 3.0        # Reduced timeout for faster responses (from 4.0)
-    SILENCE_TIMEOUT = 4.0         # CRITICAL: Reduced for faster detection (from 5.0)
+    RESPONSE_TIMEOUT = 4.0        # Reduced timeout for faster responses
+    SILENCE_TIMEOUT = 5.0         # CRITICAL: Reduced for faster detection
     
     def __init__(self, call_sid: str, pipeline):
         """Initialize with CRITICAL FIXES for speech detection."""
@@ -109,13 +109,9 @@ class SimpleWebSocketHandler:
         self.conversation_started = False
         self.first_response_sent = False
         
-        # CRITICAL FIX: Health check timer - reduced interval for more frequent checks
+        # CRITICAL FIX: Health check timer
         self._last_health_check = time.time()
-        self._health_check_interval = 10  # Check health every 10 seconds (reduced from 15)
-        
-        # CRITICAL NEW: Add buffer for handling partial speech
-        self._speech_buffer = ""
-        self._last_speech_time = 0
+        self._health_check_interval = 15  # Check health every 15 seconds
         
         logger.info(f"FIXED WebSocket handler initialized - Call: {call_sid}")
         logger.info(f"CRITICAL FIXES: Interim results enabled, improved VAD, better timeouts")
@@ -151,7 +147,7 @@ class SimpleWebSocketHandler:
         if self.response_in_progress:
             # Allow audio processing during response generation but only wait up to 0.3 seconds
             if (self.state.last_tts_time and 
-                (time.time() - self.state.last_tts_time) > 0.2):  # REDUCED from 0.3 to 0.2 for faster responses
+                (time.time() - self.state.last_tts_time) > 0.3):  # REDUCED from 1.0 to 0.3 for faster responses
                 self.response_in_progress = False
                 self.state.is_speaking = False
                 logger.debug("Cleared response_in_progress flag after echo delay timeout")
@@ -193,7 +189,7 @@ class SimpleWebSocketHandler:
             self.error_count += 1
     
     async def _ensure_streaming_health(self):
-        """CRITICAL IMPROVED: Ensure streaming session is healthy with better session management."""
+        """CRITICAL FIX: Ensure streaming session is healthy based on Google recommendations."""
         if not self.stt_client:
             return
             
@@ -203,14 +199,13 @@ class SimpleWebSocketHandler:
             await self.stt_client.start_streaming()
             return
             
-        # IMPROVED: More aggressive session rotation to prevent timeouts
+        # Check if we're close to the session time limit
         if hasattr(self.stt_client, '_last_streaming_start') and self.stt_client._last_streaming_start:
             streaming_duration = time.time() - self.stt_client._last_streaming_start
-            # Rotate session every 2 minutes instead of 4
-            if streaming_duration > 120:  # 2 minutes (reduced from 240s)
+            # Google Speech limits streaming to around 5 minutes, restart before that
+            if streaming_duration > 240:  # 4 minutes
                 logger.info(f"Streaming session active for {streaming_duration}s, preemptively restarting")
                 await self.stt_client.stop_streaming()
-                await asyncio.sleep(0.1)  # Brief pause to ensure clean restart
                 await self.stt_client.start_streaming()
     
     async def _handle_transcription_result_enhanced(self, result: StreamingTranscriptionResult):
@@ -225,10 +220,6 @@ class SimpleWebSocketHandler:
             if self.stt_debug:
                 logger.info(f"INTERIM #{self.state.interim_results_received}: '{result.text.strip()}' "
                            f"(confidence: {result.confidence:.2f})")
-            
-            # NEW: Update speech buffer for partial results
-            self._speech_buffer = result.text.strip()
-            self._last_speech_time = time.time()
         
         # Process final results
         if result.is_final and result.text.strip():
@@ -243,7 +234,7 @@ class SimpleWebSocketHandler:
             # This ensures we can process a new query immediately
             self.response_in_progress = False
             
-            # CRITICAL FIX: IMPROVED validation logic
+            # CRITICAL FIX: Much more lenient validation
             if self._is_valid_transcription_enhanced(transcription, confidence):
                 await self._process_final_transcription(transcription)
             else:
@@ -251,30 +242,25 @@ class SimpleWebSocketHandler:
                 logger.debug(f"REJECTED transcription: '{transcription}' (confidence: {confidence:.2f})")
     
     def _is_valid_transcription_enhanced(self, transcription: str, confidence: float) -> bool:
-        """IMPROVED: Even more lenient validation with better echo prevention."""
+        """CRITICAL FIX: Very lenient validation with detailed logging."""
         # Basic length check - very lenient
         word_count = len(transcription.split())
         if word_count < self.MIN_TRANSCRIPTION_LENGTH:
             logger.debug(f"REJECT: Too short ({word_count} words)")
             return False
         
-        # IMPROVED: Accept ANY confidence score
-        if confidence < -0.5:  # Only reject extremely negative confidence
+        # CRITICAL FIX: Accept very low confidence scores
+        if confidence < 0.0:  # Only reject clearly invalid results
             logger.debug(f"REJECT: Invalid confidence ({confidence:.2f})")
             return False
         
-        # IMPROVED: Better echo prevention
+        # CRITICAL FIX: More lenient echo check
         if (self.state.last_tts_time and 
-            (time.time() - self.state.last_tts_time) < 0.5):  # Extended from 0.3s to 0.5s
-            # Only reject exact or very similar responses
-            last_words = set(self.last_response_text.lower().strip().split())
-            current_words = set(transcription.lower().strip().split())
-            if len(last_words) > 0 and len(current_words) > 0:
-                intersection = len(last_words.intersection(current_words))
-                similarity = intersection / max(len(last_words), 1)
-                if similarity > 0.7:
-                    logger.debug(f"REJECT: Echo detected (word similarity: {similarity:.2f})")
-                    return False
+            (time.time() - self.state.last_tts_time) < 0.3):  # Reduced from 0.5s to 0.3s
+            # Only reject if it's exactly the same
+            if transcription.lower().strip() == self.last_response_text.lower().strip():
+                logger.debug(f"REJECT: Echo detected")
+                return False
         
         # Skip only obvious noise patterns
         noise_patterns = ['hmm', 'uh', 'um', 'ah']
@@ -282,7 +268,7 @@ class SimpleWebSocketHandler:
             logger.debug(f"REJECT: Noise pattern")
             return False
         
-        # IMPROVED: Accept everything else
+        # CRITICAL FIX: Accept everything else
         logger.info(f"ACCEPT: '{transcription}' (confidence: {confidence:.2f})")
         return True
     
@@ -314,7 +300,7 @@ class SimpleWebSocketHandler:
             self.error_count += 1
         finally:
             # CRITICAL FIX: Small delay before clearing flag to avoid echo
-            await asyncio.sleep(0.1)  # Reduced from 0.2 for faster responsiveness
+            await asyncio.sleep(0.2)  # Reduced from 0.5
             self.response_in_progress = False
             logger.debug("Cleared response_in_progress flag after processing")
     
@@ -358,7 +344,7 @@ class SimpleWebSocketHandler:
             # TTS synthesis with timeout
             audio_data = await asyncio.wait_for(
                 self.tts_client.synthesize(text),
-                timeout=2.0  # Reduced timeout from 3.0 to 2.0
+                timeout=3.0  # Reduced timeout
             )
             
             if audio_data:
@@ -381,7 +367,7 @@ class SimpleWebSocketHandler:
                     logger.info("Forcing STT restart after response")
                     if self.stt_client.is_streaming:
                         await self.stt_client.stop_streaming()
-                    await asyncio.sleep(0.1)  # Reduced delay from 0.2 to 0.1
+                    await asyncio.sleep(0.2)  # Short delay to ensure clean restart
                     await self.stt_client.start_streaming()
                     logger.info("STT restarted successfully")
                 except Exception as e:
@@ -398,20 +384,20 @@ class SimpleWebSocketHandler:
             self.error_count += 1
         finally:
             # CRITICAL FIX: Ensure STT continues after response - shorter delay
-            await asyncio.sleep(0.1)  # Reduced from 0.3 for faster response
+            await asyncio.sleep(0.3)  # Reduced from 1.0 for faster response
             
             # CRITICAL FIX: Clear the response flag
             self.response_in_progress = False
             logger.info("Response flag cleared")
     
     async def _send_audio_fast(self, audio_data: bytes, ws):
-        """OPTIMIZED: Send audio with even faster chunking."""
+        """CRITICAL FIX: Send audio with proper chunking and timing."""
         if not self.state.stream_sid or not ws:
             logger.warning("Cannot send audio: missing stream_sid or websocket")
             return
         
-        # Optimized chunk size - reduced from 800 to 400 for lower latency
-        chunk_size = 400  # 50ms chunks at 8kHz MULAW (reduced from 100ms)
+        # Optimized chunk size for Twilio MULAW
+        chunk_size = 800  # 100ms chunks at 8kHz MULAW
         
         for i in range(0, len(audio_data), chunk_size):
             chunk = audio_data[i:i+chunk_size]
@@ -428,8 +414,9 @@ class SimpleWebSocketHandler:
                 # Send immediately
                 await self._send_ws_message_fast(ws, message)
                 
-                # OPTIMIZED: Extremely fast delay 
-                delay = chunk_size / 8000 * 0.75  # 75% of real-time for faster playback (reduced from 90%)
+                # CRITICAL FIX: Faster delay for MULAW at 8kHz
+                # Changed from real-time to slightly faster than real-time
+                delay = chunk_size / 8000 * 0.9  # 90% of real-time for slightly faster playback
                 await asyncio.sleep(delay)
                 
             except Exception as e:
@@ -464,7 +451,7 @@ class SimpleWebSocketHandler:
             await self.stt_client.start_streaming()
         
         # Send welcome message with proper delay
-        await asyncio.sleep(0.2)  # Reduced from 0.5 to improve initial response time
+        await asyncio.sleep(0.5)  # Increased delay for better setup
         await self._send_response("Hello! How can I help you?", ws)
     
     async def _cleanup(self):
@@ -545,9 +532,5 @@ class SimpleWebSocketHandler:
             # CRITICAL NEW: Health check status
             "last_health_check": self._last_health_check,
             "health_check_interval": self._health_check_interval,
-            "next_health_check_in": max(0, self._last_health_check + self._health_check_interval - time.time()),
-            
-            # Timing stats for last activity
-            "time_since_last_transcription": round(time.time() - self.state.last_transcription_time, 2),
-            "time_since_last_tts": round(time.time() - (self.state.last_tts_time or self.state.start_time), 2)
+            "next_health_check_in": max(0, self._last_health_check + self._health_check_interval - time.time())
         }

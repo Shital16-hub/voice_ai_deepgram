@@ -30,7 +30,7 @@ class OpenAILLM:
         # CRITICAL FIX: Initialize with timeout settings
         self.client = AsyncOpenAI(
             api_key=self.config["api_key"],
-            timeout=5.0  # Increased default timeout slightly for better reliability
+            timeout=10.0  # CRITICAL: Default timeout to prevent hanging
         )
         
         self.model = self.config["model"]
@@ -39,10 +39,10 @@ class OpenAILLM:
         self.system_prompt = self.config["system_prompt"]
         
         # CRITICAL FIX: Extract extra performance settings
-        self.top_p = self.config.get("top_p", 0.3)  # Increased from 0.1 for better variety
+        self.top_p = self.config.get("top_p", 0.1)  # Focused output
         self.frequency_penalty = self.config.get("frequency_penalty", 0.0)
-        self.presence_penalty = self.config.get("presence_penalty", 0.1)  # Added small penalty
-        self.request_timeout = self.config.get("timeout", 3.0)  # 3s timeout for request
+        self.presence_penalty = self.config.get("presence_penalty", 0.0)
+        self.request_timeout = self.config.get("timeout", 4.0)  # 4s timeout for request
         
         logger.info(f"Initialized OpenAI LLM with model: {self.model} (timeout: {self.request_timeout}s)")
     
@@ -73,7 +73,7 @@ class OpenAILLM:
                     messages=messages,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    # CRITICAL FIX: Optimized settings
+                    # CRITICAL FIX: Add ultra-fast settings
                     top_p=self.top_p,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
@@ -86,11 +86,12 @@ class OpenAILLM:
             
             result = response.choices[0].message.content.strip()
             
-            # CRITICAL FIX: Ensure response is appropriate length for telephony
-            # If too long, keep just first 2 sentences
-            sentences = result.split('.')
-            if len(sentences) > 2:
-                result = '.'.join(sentences[:2]).strip() + '.'
+            # CRITICAL FIX: Ensure response is super short for telephony
+            # Truncate to first sentence if too long
+            if len(result.split()) > 12:  # Even stricter than config setting
+                sentences = result.split('.')
+                if sentences:
+                    result = sentences[0].strip() + '.'
             
             return result
             
@@ -128,7 +129,7 @@ class OpenAILLM:
                     messages=messages,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    # CRITICAL FIX: Optimized settings for better responses
+                    # CRITICAL FIX: Add ultra-fast settings
                     top_p=self.top_p,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
@@ -139,22 +140,13 @@ class OpenAILLM:
             )
             
             word_count = 0
-            sentence_count = 0
-            current_sentence = ""
-            
             async for chunk in stream:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
-                    current_sentence += content
-                    
-                    # Check if we've completed a sentence
-                    if '.' in content or '!' in content or '?' in content:
-                        sentence_count += 1
                     
                     # CRITICAL FIX: Limit response length for telephony
                     word_count += len(content.split())
-                    if word_count > 30 or sentence_count >= 2:  # Increased from 12 to 30 words, max 2 sentences
-                        yield content
+                    if word_count > 12:  # Even stricter than config setting
                         break
                     
                     yield content
@@ -178,7 +170,9 @@ class OpenAILLM:
         # Add system prompt with context
         system_content = self.system_prompt
         if context:
-            # CRITICAL FIX: Include context but keep it brief
+            # CRITICAL FIX: Truncate context for telephony
+            if len(context) > 300:  # Even shorter!
+                context = context[:297] + "..."
             system_content += f"\n\nRelevant information:\n{context}"
         
         messages.append({
@@ -188,8 +182,8 @@ class OpenAILLM:
         
         # Add chat history (limit to most recent exchange for telephony)
         if chat_history:
-            # CRITICAL FIX: Include two exchanges for better context
-            for message in chat_history[-4:]:  # Last two exchanges (four messages)
+            # CRITICAL FIX: Only last exchange for super fast responses
+            for message in chat_history[-2:]:  # Just one exchange
                 messages.append(message)
         
         # Add current query
@@ -231,8 +225,8 @@ def create_telephony_optimized_messages(
     """
     messages = []
     
-    # CRITICAL FIX: Improved system prompt for telephony
-    system_prompt = """You are a helpful voice assistant. Keep responses brief but conversational (under 2-3 sentences). Be friendly and engaging."""
+    # CRITICAL FIX: Ultra-optimized system prompt for telephony
+    system_prompt = """You are a voice assistant for customer support calls. Keep ALL responses under 10 words. Be direct and helpful."""
     
     # Add context to system prompt if available
     if context:
@@ -248,10 +242,9 @@ def create_telephony_optimized_messages(
     
     # CRITICAL FIX: Add minimal chat history for telephony
     if chat_history:
-        # Include last two messages for better context
-        recent_messages = chat_history[-2:]
-        for message in recent_messages:
-            messages.append(message)
+        # Only include last message for ultra-fast responses
+        recent_message = chat_history[-1]
+        messages.append(recent_message)
     
     # Add current user message
     messages.append({

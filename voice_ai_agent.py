@@ -1,7 +1,6 @@
 """
 Voice AI Agent main class updated for OpenAI + Pinecone integration.
 CRITICAL FIXES: Proper initialization order, retry logic, and error handling.
-IMPROVED: Better response quality and lower latency.
 """
 import os
 import logging
@@ -32,18 +31,18 @@ if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """OPTIMIZED Voice AI Agent class with better initialization and performance."""
+    """FIXED Voice AI Agent class with proper initialization and error handling."""
     
     def __init__(
         self,
         storage_dir: str = './storage',
         openai_model: str = 'gpt-4o-mini',  # Fast OpenAI model
-        llm_temperature: float = 0.3,  # IMPROVED: Increased for better responses
+        llm_temperature: float = 0.1,  # CRITICAL: Lower for faster responses
         credentials_file: Optional[str] = None,
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with CRITICAL FIXES and IMPROVEMENTS.
+        Initialize the Voice AI Agent with CRITICAL FIXES.
         """
         self.storage_dir = storage_dir
         self.openai_model = openai_model
@@ -143,7 +142,7 @@ class VoiceAIAgent:
         )
     
     async def init(self):
-        """IMPROVED: Initialize with better performance and lower latency."""
+        """CRITICAL FIX: Initialize with proper order, retry logic, and error handling."""
         if self._initialized:
             return
         
@@ -155,7 +154,7 @@ class VoiceAIAgent:
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_file
                 logger.info(f"Set GOOGLE_APPLICATION_CREDENTIALS to: {self.credentials_file}")
             
-            # STEP 1: Initialize speech recognizer first (fastest)
+            # CRITICAL FIX: 1. Initialize speech recognizer first (fastest)
             logger.info("Step 1: Initializing Google Cloud STT...")
             self.speech_recognizer = GoogleCloudStreamingSTT(
                 language=self.stt_language,
@@ -176,16 +175,16 @@ class VoiceAIAgent:
             await self.stt_integration.init(project_id=self.project_id)
             logger.info("✅ Google Cloud STT initialized")
             
-            # STEP 2: Initialize embeddings with optimized retry
+            # CRITICAL FIX: 2. Initialize embeddings with retry
             logger.info("Step 2: Initializing OpenAI embeddings...")
-            max_retries = 2  # IMPROVED: Reduced from 3 for less latency
+            max_retries = 3
             for attempt in range(max_retries):
                 try:
                     self.embeddings = OpenAIEmbeddings()
-                    # Test embeddings with a simple query and shorter timeout
+                    # Test embeddings with a simple query
                     test_embedding = await asyncio.wait_for(
                         self.embeddings.embed_text("test"),
-                        timeout=6.0  # IMPROVED: Reduced from 10.0 for less latency
+                        timeout=10.0
                     )
                     logger.info("✅ OpenAI embeddings initialized and tested")
                     break
@@ -193,40 +192,40 @@ class VoiceAIAgent:
                     if attempt == max_retries - 1:
                         raise Exception(f"Failed to initialize OpenAI embeddings after {max_retries} attempts: {e}")
                     logger.warning(f"Embeddings init attempt {attempt + 1} failed: {e}")
-                    await asyncio.sleep(1.0)  # IMPROVED: Reduced backoff
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
             
-            # STEP 3: Initialize Pinecone with retry logic
+            # CRITICAL FIX: 3. Initialize Pinecone with retry logic
             logger.info("Step 3: Initializing Pinecone index...")
             for attempt in range(max_retries):
                 try:
                     self.index_manager = IndexManager(embedding_model=self.embeddings)
-                    await asyncio.wait_for(self.index_manager.init(), timeout=15.0)  # IMPROVED: Reduced from 30.0
+                    await asyncio.wait_for(self.index_manager.init(), timeout=30.0)
                     logger.info("✅ Pinecone index initialized")
                     break
                 except Exception as e:
                     if attempt == max_retries - 1:
                         raise Exception(f"Failed to initialize Pinecone after {max_retries} attempts: {e}")
                     logger.warning(f"Pinecone init attempt {attempt + 1} failed: {e}")
-                    await asyncio.sleep(1.0)  # IMPROVED: Reduced backoff
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
             
-            # STEP 4: Initialize OpenAI LLM with timeout and improved config
+            # CRITICAL FIX: 4. Initialize OpenAI LLM with timeout and proper config
             logger.info("Step 4: Initializing OpenAI LLM...")
             from knowledge_base.config import get_openai_config
             openai_config = get_openai_config()
             openai_config["model"] = self.openai_model
             openai_config["temperature"] = self.llm_temperature
-            openai_config["max_tokens"] = 100  # IMPROVED: Increased for better responses
+            openai_config["max_tokens"] = 50  # CRITICAL: Very short responses for telephony
             
             self.llm = OpenAILLM(config=openai_config)
             
-            # Test LLM with a simple query and shorter timeout
+            # Test LLM with a simple query
             test_response = await asyncio.wait_for(
                 self.llm.generate_response("Hello"),
-                timeout=8.0  # IMPROVED: Reduced from 15.0
+                timeout=15.0
             )
             logger.info(f"✅ OpenAI LLM initialized and tested: {test_response[:50]}...")
             
-            # STEP 5: Initialize query engine with optimized timeouts
+            # CRITICAL FIX: 5. Initialize query engine with timeouts
             logger.info("Step 5: Initializing Query Engine...")
             self.query_engine = QueryEngine(
                 index_manager=self.index_manager,
@@ -235,18 +234,18 @@ class VoiceAIAgent:
             await self.query_engine.init()
             logger.info("✅ Query Engine initialized")
             
-            # STEP 6: Initialize conversation manager (optimized for telephony)
+            # CRITICAL FIX: 6. Initialize conversation manager (optimized for telephony)
             logger.info("Step 6: Initializing Conversation Manager...")
             self.conversation_manager = ConversationManager(
                 query_engine=self.query_engine,
                 skip_greeting=True,      # Better for telephony
-                max_history_turns=2,     # IMPROVED: Even shorter for faster processing
-                context_window_tokens=512  # IMPROVED: Smaller context for even faster speed
+                max_history_turns=3,     # CRITICAL: Shorter for telephony
+                context_window_tokens=1024  # CRITICAL: Smaller context for speed
             )
             await self.conversation_manager.init()
             logger.info("✅ Conversation Manager initialized")
             
-            # STEP 7: Initialize Google Cloud TTS last
+            # CRITICAL FIX: 7. Initialize Google Cloud TTS last
             logger.info("Step 7: Initializing Google Cloud TTS...")
             try:
                 self.tts_client = GoogleCloudTTS(
@@ -260,10 +259,10 @@ class VoiceAIAgent:
                     voice_type="NEURAL2"
                 )
                 
-                # Test TTS with a simple phrase and shorter timeout
+                # Test TTS with a simple phrase
                 test_audio = await asyncio.wait_for(
                     self.tts_client.synthesize("Hello"),
-                    timeout=6.0  # IMPROVED: Reduced from 10.0
+                    timeout=10.0
                 )
                 logger.info(f"✅ Google Cloud TTS initialized and tested ({len(test_audio)} bytes)")
                 
@@ -275,7 +274,7 @@ class VoiceAIAgent:
             self._initialized = True
             logger.info("🎉 Voice AI Agent initialization complete with OpenAI + Pinecone")
             
-            # Log final status
+            # CRITICAL FIX: Log final status
             await self._log_initialization_status()
             
         except Exception as e:
@@ -305,16 +304,16 @@ class VoiceAIAgent:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        IMPROVED: Process audio with optimized handling and reduced timeouts.
+        CRITICAL FIX: Process audio with better error handling and timeouts.
         """
         if not self.initialized:
             raise RuntimeError("Voice AI Agent not initialized. Call init() first.")
         
         try:
-            # Pass audio directly to STT with reduced timeout
+            # Pass audio directly to STT with no modifications
             result = await asyncio.wait_for(
                 self.stt_integration.transcribe_audio_data(audio_data, callback=callback),
-                timeout=15.0  # IMPROVED: Reduced from 30.0
+                timeout=30.0  # CRITICAL: Add timeout
             )
             
             # Only process valid transcriptions
@@ -322,26 +321,25 @@ class VoiceAIAgent:
                 transcription = result["transcription"]
                 logger.info(f"Valid transcription: {transcription}")
                 
-                # Process through conversation manager with reduced timeout
+                # Process through conversation manager with timeout
                 response = await asyncio.wait_for(
                     self.conversation_manager.handle_user_input(transcription),
-                    timeout=12.0  # IMPROVED: Reduced from 25.0
+                    timeout=25.0  # CRITICAL: Add timeout
                 )
                 
-                # Generate speech using Google Cloud TTS with reduced timeout
+                # Generate speech using Google Cloud TTS
                 if response and response.get("response"):
                     try:
                         speech_audio = await asyncio.wait_for(
                             self.tts_client.synthesize(response["response"]),
-                            timeout=5.0  # IMPROVED: Reduced from 10.0
+                            timeout=10.0  # CRITICAL: Add TTS timeout
                         )
                         return {
                             "transcription": transcription,
                             "response": response.get("response", ""),
                             "speech_audio": speech_audio,
                             "status": "success",
-                            "engine": "openai_pinecone",
-                            "total_latency": round(time.time() - result.get("start_time", time.time()), 3)  # IMPROVED: Track latency
+                            "engine": "openai_pinecone"
                         }
                     except asyncio.TimeoutError:
                         logger.error("TTS synthesis timed out")
@@ -405,24 +403,24 @@ class VoiceAIAgent:
         doc_store = DocumentStore()
         documents = doc_store.load_documents_from_directory(documents_directory)
         
-        # Add to Pinecone index with reduced timeout
+        # Add to Pinecone index with timeout
         doc_ids = await asyncio.wait_for(
             self.index_manager.add_documents(documents),
-            timeout=60.0  # IMPROVED: Reduced from 120.0
+            timeout=120.0  # 2 minutes for document indexing
         )
         
         logger.info(f"Added {len(doc_ids)} documents to OpenAI + Pinecone knowledge base")
         return doc_ids
     
     async def get_knowledge_base_stats(self) -> Dict[str, Any]:
-        """Get knowledge base statistics with reduced timeout."""
+        """Get knowledge base statistics with error handling."""
         if not self.initialized:
             return {"error": "Not initialized"}
         
         try:
             stats = await asyncio.wait_for(
                 self.query_engine.get_stats(),
-                timeout=5.0  # IMPROVED: Reduced from 10.0
+                timeout=10.0
             )
             stats["engine_type"] = "openai_pinecone"
             stats["initialization_status"] = "completed"

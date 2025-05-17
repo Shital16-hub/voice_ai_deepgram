@@ -9,17 +9,17 @@ from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-# CRITICAL: OpenAI Configuration - Updated for better quality responses
+# CRITICAL: OpenAI Configuration - Ultra-optimized for telephony speed
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # FASTEST model
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))  # Increased from 0.0 for better responses
-OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "100"))      # Increased from 30 for better responses
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.0"))  # CRITICAL: Zero for maximum speed
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "30"))       # CRITICAL: Very short responses
 
-# CRITICAL: Optimized timeout settings for ultra-fast performance
-OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "3.0"))          # Reduced from 4s to 3s
-PINECONE_TIMEOUT = float(os.getenv("PINECONE_TIMEOUT", "3.0"))      # Reduced from 4s to 3s
-EMBEDDINGS_TIMEOUT = float(os.getenv("EMBEDDINGS_TIMEOUT", "3.0"))  # Reduced from 4s to 3s
+# CRITICAL: Timeout settings for ultra-fast performance
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "4.0"))           # CRITICAL: Reduced to 4s
+PINECONE_TIMEOUT = float(os.getenv("PINECONE_TIMEOUT", "4.0"))       # CRITICAL: Reduced to 4s
+EMBEDDINGS_TIMEOUT = float(os.getenv("EMBEDDINGS_TIMEOUT", "4.0"))   # CRITICAL: Reduced to 4s
 
 # Pinecone Configuration - Get from environment
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -34,10 +34,10 @@ MAX_DOCUMENT_SIZE_MB = int(os.getenv("MAX_DOCUMENT_SIZE_MB", "10"))
 
 # CRITICAL: Retrieval settings optimized for ULTRA-FAST responses
 DEFAULT_RETRIEVE_COUNT = int(os.getenv("DEFAULT_RETRIEVE_COUNT", "1"))  # CRITICAL: Just one doc!
-MINIMUM_RELEVANCE_SCORE = float(os.getenv("MINIMUM_RELEVANCE_SCORE", "0.65"))  # Slightly reduced from 0.7 for better recall
+MINIMUM_RELEVANCE_SCORE = float(os.getenv("MINIMUM_RELEVANCE_SCORE", "0.7"))  # Higher threshold
 
 # CRITICAL: Conversation context settings for telephony
-MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "2"))  # Increased from 1 to 2 for better context
+MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "1"))  # CRITICAL: Minimal history
 CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "512"))         # CRITICAL: Tiny context
 
 # Supported file types
@@ -47,8 +47,8 @@ SUPPORTED_DOCUMENT_TYPES = [
     ".html", ".htm", ".xml",
 ]
 
-# CRITICAL: Improved system prompt for better responses
-TELEPHONY_SYSTEM_PROMPT = """You are a helpful voice assistant. Keep responses brief but conversational (under 2-3 sentences). Be friendly, helpful and engaging."""
+# CRITICAL: Ultra-short system prompt for tiny responses
+TELEPHONY_SYSTEM_PROMPT = """You are a telephony assistant. Keep ALL responses under 10 words. Be clear, direct and helpful."""
 
 # OpenAI embedding dimensions
 EMBEDDING_DIMENSIONS = {
@@ -84,13 +84,13 @@ def get_openai_config() -> Dict[str, Any]:
         "max_tokens": OPENAI_MAX_TOKENS,
         "system_prompt": TELEPHONY_SYSTEM_PROMPT,
         "embedding_dimensions": EMBEDDING_DIMENSIONS.get(OPENAI_EMBEDDING_MODEL, 1536),
-        # CRITICAL: Optimized timeout settings
+        # CRITICAL: Add timeout settings
         "timeout": OPENAI_TIMEOUT,
         "embeddings_timeout": EMBEDDINGS_TIMEOUT,
-        # CRITICAL: Tune settings for faster but better responses
-        "top_p": 0.3,             # Increased from 0.1 for more varied responses
+        # CRITICAL: Add ultra-fast settings
+        "top_p": 0.1,             # Very focused output 
         "frequency_penalty": 0.0, # No penalties for speed
-        "presence_penalty": 0.1,  # Small penalty to reduce repetition
+        "presence_penalty": 0.0,  # No penalties for speed
         "max_retries": 1,         # Minimal retries for speed
     }
 
@@ -145,25 +145,25 @@ def get_retriever_config() -> Dict[str, Any]:
 # CRITICAL: Ultra-fast performance settings for telephony
 PERFORMANCE_CONFIG = {
     # Response generation settings
-    "max_response_words": 30,         # Increased from 10 for better responses
+    "max_response_words": 10,          # CRITICAL: Extremely short responses
     "target_response_time": 1.0,       # Target 1 second total
     "streaming_chunk_size": 5,         # Small chunks for TTS
     
     # Retrieval optimization
     "max_context_words": 50,           # CRITICAL: Ultra-limited context
     "retrieval_top_k": 1,              # Only 1 most relevant doc
-    "retrieval_min_score": 0.65,       # Optimized balance for speed and relevance
+    "retrieval_min_score": 0.7,        # Higher threshold for speed
     
     # Model optimization
-    "temperature": 0.3,                # Increased from 0 for better quality
-    "top_p": 0.3,                      # Increased from 0.1 for more natural responses
+    "temperature": 0.0,                # Zero for maximum determinism
+    "top_p": 0.1,                      # Very focused generation
     "frequency_penalty": 0.0,          # No penalties for speed
-    "presence_penalty": 0.1,           # Small penalty to reduce repetition
+    "presence_penalty": 0.0,           # No penalties for speed
     
     # Timeout configuration
-    "openai_timeout": 3.0,             # 3 seconds max (reduced from 4)
-    "pinecone_timeout": 3.0,           # 3 seconds max (reduced from 4)
-    "total_response_timeout": 5.0,     # 5 seconds total (reduced from 10)
+    "openai_timeout": 4.0,             # 4 seconds max
+    "pinecone_timeout": 4.0,           # 4 seconds max
+    "total_response_timeout": 10.0,    # 10 seconds total
 }
 
 def get_performance_config() -> Dict[str, Any]:

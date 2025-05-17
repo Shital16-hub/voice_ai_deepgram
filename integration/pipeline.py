@@ -1,6 +1,6 @@
 """
 End-to-end pipeline orchestration for Voice AI Agent.
-Updated to use OpenAI + Pinecone instead of LlamaIndex with CRITICAL LATENCY FIXES.
+Updated to use OpenAI + Pinecone instead of LlamaIndex.
 
 This module provides high-level functions for running the complete
 STT -> Knowledge Base -> TTS pipeline with Google Cloud STT integration
@@ -22,7 +22,7 @@ from knowledge_base.query_engine import QueryEngine
 from integration.tts_integration import TTSIntegration
 
 # Minimum word count for a valid user query
-MIN_VALID_WORDS = 1  # REDUCED from 2 for better recognition
+MIN_VALID_WORDS = 2
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +62,6 @@ class VoiceAIAgentPipeline:
         # Determine if we're using Google Cloud STT v2
         self.using_google_cloud = isinstance(speech_recognizer, GoogleCloudStreamingSTT)
         logger.info(f"Pipeline initialized with {'Google Cloud v2' if self.using_google_cloud else 'Other'} STT and OpenAI + Pinecone")
-        
-        # IMPROVED: Add latency tracking
-        self.total_request_count = 0
-        self.total_latency = 0
-        self.recent_latencies = []
     
     async def _is_valid_transcription(self, transcription: str) -> bool:
         """
@@ -85,7 +80,7 @@ class VoiceAIAgentPipeline:
         if not cleaned_text:
             return False
             
-        # IMPROVED: More lenient check - accept even single words
+        # Check if it has enough words
         words = cleaned_text.split()
         if len(words) < MIN_VALID_WORDS:
             return False
@@ -153,9 +148,8 @@ class VoiceAIAgentPipeline:
         kb_start = time.time()
         
         try:
-            # IMPROVED: Use faster async timeout with better error handling
-            query_task = self.query_engine.query(transcription)
-            query_result = await asyncio.wait_for(query_task, timeout=5.0)  # Reduced timeout from 10s to 5s
+            # Use the query engine directly (already handles retrieval + generation)
+            query_result = await self.query_engine.query(transcription)
             response = query_result.get("response", "")
             
             if not response:
@@ -164,9 +158,6 @@ class VoiceAIAgentPipeline:
             timings["kb"] = time.time() - kb_start
             logger.info(f"Response generated: {response[:50]}...")
             
-        except asyncio.TimeoutError:
-            logger.error(f"Knowledge base query timed out for: '{transcription}'")
-            return {"error": "Knowledge base query timed out. Please try again."}
         except Exception as e:
             logger.error(f"Error in KB stage: {e}")
             return {"error": f"Knowledge base error: {str(e)}"}
@@ -176,9 +167,8 @@ class VoiceAIAgentPipeline:
         tts_start = time.time()
         
         try:
-            # IMPROVED: Faster TTS with timeout
-            tts_task = self.tts_integration.text_to_speech(response)
-            speech_audio = await asyncio.wait_for(tts_task, timeout=3.0)  # Reduced from 5s to 3s
+            # Convert response to speech using Google Cloud TTS
+            speech_audio = await self.tts_integration.text_to_speech(response)
             
             # Save speech audio if output file specified
             if output_speech_file:
@@ -190,13 +180,6 @@ class VoiceAIAgentPipeline:
             timings["tts"] = time.time() - tts_start
             logger.info(f"TTS completed in {timings['tts']:.2f}s, generated {len(speech_audio)} bytes")
             
-        except asyncio.TimeoutError:
-            logger.error("TTS synthesis timed out")
-            return {
-                "error": "TTS synthesis timed out",
-                "transcription": transcription,
-                "response": response
-            }
         except Exception as e:
             logger.error(f"Error in TTS stage: {e}")
             return {
@@ -208,13 +191,6 @@ class VoiceAIAgentPipeline:
         # Calculate total time
         total_time = time.time() - start_time
         logger.info(f"End-to-end pipeline completed in {total_time:.2f}s")
-        
-        # IMPROVED: Track latency
-        self.total_request_count += 1
-        self.total_latency += total_time
-        self.recent_latencies.append(total_time)
-        if len(self.recent_latencies) > 10:
-            self.recent_latencies.pop(0)
         
         # Compile results
         return {
@@ -233,7 +209,14 @@ class VoiceAIAgentPipeline:
         audio_callback: Callable[[bytes], Awaitable[None]]
     ) -> Dict[str, Any]:
         """
-        OPTIMIZED: Process audio with parallel execution for lower latency.
+        Process audio data with streaming response directly to speech.
+        
+        Args:
+            audio_data: Audio data as bytes or numpy array
+            audio_callback: Callback to handle audio data
+            
+        Returns:
+            Dictionary with stats about the process
         """
         logger.info(f"Starting streaming pipeline with audio: {type(audio_data)}")
         
@@ -267,107 +250,39 @@ class VoiceAIAgentPipeline:
             logger.error(f"Error in transcription: {e}")
             return {"error": f"Transcription error: {str(e)}"}
         
-        # IMPROVED: Stream the response with parallel processing 
+        # Stream the response with Google Cloud TTS
         try:
-            # Start generating the response immediately
-            response_results = []
-            response_start_time = time.time()
-            
-            # Use conversation manager's streaming for faster processing
-            response_task = self.conversation_manager.generate_streaming_response(transcription)
-            
-            # Process chunks as they come in
+            # Stream the response directly to TTS
             total_chunks = 0
             total_audio_bytes = 0
+            response_start_time = time.time()
             full_response = ""
             
-            # Create TTS tasks in parallel with minimal buffer
-            current_chunk = ""
-            buffered_chunks = []
-            
-            async def process_chunk_to_speech(chunk_text):
-                """Process a text chunk to speech in parallel."""
-                if not chunk_text:
-                    return None
-                    
-                # Convert to speech with 3s timeout
-                try:
-                    audio_data = await asyncio.wait_for(
-                        self.tts_integration.text_to_speech(chunk_text), 
-                        timeout=3.0
-                    )
-                    return audio_data
-                except Exception as e:
-                    logger.error(f"Error synthesizing chunk: {e}")
-                    return None
-            
-            async for chunk in response_task:
+            # Use the conversation manager's streaming method
+            async for chunk in self.conversation_manager.generate_streaming_response(transcription):
                 chunk_text = chunk.get("chunk", "")
                 
                 if chunk_text:
                     # Add to full response
                     full_response += chunk_text
-                    current_chunk += chunk_text
                     
-                    # Only process chunks that end with sentence terminators or are long enough
-                    if (any(c in current_chunk for c in ['.', '!', '?']) or 
-                        len(current_chunk.split()) > 5):
-                        
-                        # Create speech task in parallel
-                        tts_task = asyncio.create_task(process_chunk_to_speech(current_chunk))
-                        buffered_chunks.append((current_chunk, tts_task))
-                        current_chunk = ""
-                
-                # Process any completed chunks 
-                completed_chunks = []
-                for i, (text, task) in enumerate(buffered_chunks):
-                    if task.done():
-                        audio_data = task.result()
-                        if audio_data:
-                            await audio_callback(audio_data)
-                            total_chunks += 1
-                            total_audio_bytes += len(audio_data)
-                        completed_chunks.append(i)
-                
-                # Remove processed chunks
-                for i in sorted(completed_chunks, reverse=True):
-                    buffered_chunks.pop(i)
+                    # Convert to speech with Google Cloud TTS and send to callback
+                    audio_data = await self.tts_integration.text_to_speech(chunk_text)
+                    await audio_callback(audio_data)
+                    
+                    # Update stats
+                    total_chunks += 1
+                    total_audio_bytes += len(audio_data)
                 
                 # Handle completion
                 if chunk.get("done", False):
                     if chunk.get("full_response"):
                         full_response = chunk.get("full_response")
-                    
-                    # Process any remaining chunk
-                    if current_chunk:
-                        audio_data = await process_chunk_to_speech(current_chunk)
-                        if audio_data:
-                            await audio_callback(audio_data)
-                            total_chunks += 1
-                            total_audio_bytes += len(audio_data)
-                    
-                    # Process any remaining buffered chunks
-                    for _, task in buffered_chunks:
-                        if not task.done():
-                            continue
-                        audio_data = task.result()
-                        if audio_data:
-                            await audio_callback(audio_data)
-                            total_chunks += 1
-                            total_audio_bytes += len(audio_data)
-                    
                     break
             
             # Calculate stats
             response_time = time.time() - response_start_time
             total_time = time.time() - start_time
-            
-            # Update latency tracking
-            self.total_request_count += 1
-            self.total_latency += total_time
-            self.recent_latencies.append(total_time)
-            if len(self.recent_latencies) > 10:
-                self.recent_latencies.pop(0)
             
             return {
                 "transcription": transcription,
@@ -377,8 +292,7 @@ class VoiceAIAgentPipeline:
                 "total_chunks": total_chunks,
                 "total_audio_bytes": total_audio_bytes,
                 "full_response": full_response,
-                "engine": "openai_pinecone",
-                "avg_latency": sum(self.recent_latencies) / len(self.recent_latencies) if self.recent_latencies else 0
+                "engine": "openai_pinecone"
             }
             
         except Exception as e:
@@ -411,7 +325,7 @@ class VoiceAIAgentPipeline:
     
     async def _transcribe_audio_google_cloud(self, audio: np.ndarray) -> tuple[str, float]:
         """
-        IMPROVED: Transcribe audio using Google Cloud STT v2 with better error handling.
+        Transcribe audio using Google Cloud STT v2.
         
         Args:
             audio: Audio data as numpy array
@@ -428,10 +342,6 @@ class VoiceAIAgentPipeline:
             else:
                 audio_bytes = audio.tobytes()
             
-            # IMPROVED: Ensure clean session
-            if hasattr(self.speech_recognizer, 'is_streaming') and self.speech_recognizer.is_streaming:
-                await self.speech_recognizer.stop_streaming()
-                
             # Start a streaming session
             await self.speech_recognizer.start_streaming()
             
@@ -443,8 +353,8 @@ class VoiceAIAgentPipeline:
                 if result.is_final:
                     final_results.append(result)
             
-            # IMPROVED: Process audio in smaller chunks for faster processing
-            chunk_size = 2048  # ~0.25s at 8kHz (reduced from 4096)
+            # Process audio in chunks
+            chunk_size = 4096  # ~0.5s at 8kHz
             for i in range(0, len(audio_bytes), chunk_size):
                 chunk = audio_bytes[i:i+chunk_size]
                 result = await self.speech_recognizer.process_audio_chunk(chunk, collect_result)
@@ -503,14 +413,3 @@ class VoiceAIAgentPipeline:
         except Exception as e:
             logger.error(f"Error in generic transcription: {e}", exc_info=True)
             return "", len(audio) / 8000
-    
-    def get_latency_stats(self) -> Dict[str, Any]:
-        """Get latency statistics for monitoring."""
-        return {
-            "request_count": self.total_request_count,
-            "avg_latency": self.total_latency / max(1, self.total_request_count),
-            "recent_latency": sum(self.recent_latencies) / max(1, len(self.recent_latencies)),
-            "min_latency": min(self.recent_latencies) if self.recent_latencies else 0,
-            "max_latency": max(self.recent_latencies) if self.recent_latencies else 0,
-            "target_latency": 2.0
-        }
