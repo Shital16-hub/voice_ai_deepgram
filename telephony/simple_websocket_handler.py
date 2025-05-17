@@ -1,7 +1,7 @@
-# telephony/simple_websocket_handler.py - Enhanced debugging
+# telephony/simple_websocket_handler.py - CRITICAL FIXES
 
 """
-Enhanced WebSocket handler with improved speech detection and debugging.
+CRITICAL FIXES for WebSocket handler to resolve speech detection and response issues.
 """
 import json
 import asyncio
@@ -45,34 +45,34 @@ class SessionState:
 
 class SimpleWebSocketHandler:
     """
-    Enhanced WebSocket handler with improved speech detection and debugging.
+    FIXED WebSocket handler with critical improvements for speech detection and response.
     """
     
-    # FIXED: More lenient configuration for speech detection
+    # CRITICAL FIX: More lenient configuration
     MIN_TRANSCRIPTION_LENGTH = 1  # Accept even single words
-    RESPONSE_TIMEOUT = 3.0  # Increased timeout
-    SILENCE_TIMEOUT = 5.0   # Increased silence timeout
+    RESPONSE_TIMEOUT = 5.0        # Increased timeout
+    SILENCE_TIMEOUT = 8.0         # CRITICAL: Increased for better detection
     
     def __init__(self, call_sid: str, pipeline):
-        """Initialize with enhanced debugging and speech detection."""
+        """Initialize with CRITICAL FIXES for speech detection."""
         self.call_sid = call_sid
         self.pipeline = pipeline
         
-        # Get project ID with minimal processing
+        # Get project ID
         self.project_id = self._get_project_id()
         
-        # FIXED: Initialize Google Cloud STT v2 with fixed settings
+        # CRITICAL FIX: Initialize Google Cloud STT v2 with FIXED settings
         credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         self.stt_client = GoogleCloudStreamingSTT(
             language="en-US",
             sample_rate=8000,
             encoding="MULAW",
             channels=1,
-            interim_results=True,  # FIXED: Enable interim results for debugging
+            interim_results=True,  # CRITICAL: Enable for better debugging
             project_id=self.project_id,
             location="global",
             credentials_file=credentials_file,
-            enable_vad=True,  # FIXED: Keep VAD enabled but properly configured
+            enable_vad=True,      # Keep VAD but with proper configuration
             enable_echo_suppression=False
         )
         
@@ -94,22 +94,27 @@ class SimpleWebSocketHandler:
         # WebSocket reference for response sending
         self._ws = None
         
-        # Response tracking
+        # CRITICAL FIX: Better response tracking
         self.last_response_text = ""
+        self.response_in_progress = False
         
         # Error tracking
         self.error_count = 0
         
-        # FIXED: Enable debug flags by default for troubleshooting
+        # CRITICAL FIX: Enable debug flags
         self.enable_audio_debug = True
         self.stt_debug = True
         
+        # CRITICAL FIX: Track conversation state for second call issue
+        self.conversation_started = False
+        self.first_response_sent = False
+        
         logger.info(f"FIXED WebSocket handler initialized - Call: {call_sid}")
-        logger.info(f"FIXED: Interim results enabled, improved VAD configuration")
+        logger.info(f"CRITICAL FIXES: Interim results enabled, improved VAD, better timeouts")
     
     def _get_project_id(self) -> str:
         """Get project ID with minimal overhead."""
-        # Try environment variable first (fastest)
+        # Try environment variable first
         project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
         if project_id:
             return project_id
@@ -118,20 +123,21 @@ class SimpleWebSocketHandler:
         return "my-tts-project-458404"
     
     async def _handle_audio(self, data: Dict[str, Any], ws):
-        """FIXED: Enhanced audio handling with detailed debugging."""
+        """CRITICAL FIX: Enhanced audio handling with proper echo prevention."""
         # Skip if call ended
         if self.state.call_ended:
             return
         
-        # FIXED: More lenient echo prevention
-        if self.state.is_speaking:
-            # Allow audio processing sooner after TTS (even more lenient)
+        # CRITICAL FIX: More sophisticated echo prevention
+        if self.response_in_progress:
+            # Allow audio processing during response generation but be conservative
             if (self.state.last_tts_time and 
-                (time.time() - self.state.last_tts_time) > 0.5):  # Reduced from 1.0s
+                (time.time() - self.state.last_tts_time) > 1.0):  # Wait 1 second
+                self.response_in_progress = False
                 self.state.is_speaking = False
             else:
-                if self.enable_audio_debug:
-                    logger.debug(f"Skipping audio - TTS active (last TTS: {time.time() - self.state.last_tts_time:.2f}s ago)")
+                if self.enable_audio_debug and self.state.audio_received % 100 == 0:
+                    logger.debug(f"Skipping audio - Response in progress (last TTS: {time.time() - self.state.last_tts_time:.2f}s ago)")
                 return
         
         media = data.get('media', {})
@@ -146,8 +152,8 @@ class SimpleWebSocketHandler:
             self.state.audio_received += 1
             self.state.audio_bytes_total += len(audio_data)
             
-            # FIXED: More frequent audio debugging
-            if self.enable_audio_debug and self.state.audio_received % 50 == 0:  # Every 50 packets instead of 100
+            # CRITICAL FIX: Debug audio reception
+            if self.enable_audio_debug and self.state.audio_received % 50 == 0:
                 logger.info(f"AUDIO DEBUG - Packets: {self.state.audio_received}, "
                           f"Total bytes: {self.state.audio_bytes_total}, "
                           f"Last packet size: {len(audio_data)} bytes")
@@ -156,9 +162,9 @@ class SimpleWebSocketHandler:
             logger.error(f"Error decoding audio: {e}")
             return
         
-        # Start STT if not already started
+        # CRITICAL FIX: Start STT immediately if not started
         if not self.stt_client.is_streaming:
-            logger.info("Starting FIXED STT streaming with enhanced speech detection")
+            logger.info("Starting STT streaming with FIXED speech detection")
             await self.stt_client.start_streaming()
         
         # Process audio with enhanced error handling
@@ -172,7 +178,7 @@ class SimpleWebSocketHandler:
             self.error_count += 1
     
     async def _handle_transcription_result_enhanced(self, result: StreamingTranscriptionResult):
-        """FIXED: Enhanced transcription handling with detailed logging."""
+        """CRITICAL FIX: Enhanced transcription handling with better validation."""
         if result is None:
             return
             
@@ -193,7 +199,7 @@ class SimpleWebSocketHandler:
             
             self.state.last_transcription_time = time.time()
             
-            # FIXED: More lenient validation
+            # CRITICAL FIX: Much more lenient validation
             if self._is_valid_transcription_enhanced(transcription, confidence):
                 await self._process_final_transcription(transcription)
             else:
@@ -201,51 +207,52 @@ class SimpleWebSocketHandler:
                 logger.debug(f"REJECTED transcription: '{transcription}' (confidence: {confidence:.2f})")
     
     def _is_valid_transcription_enhanced(self, transcription: str, confidence: float) -> bool:
-        """FIXED: Much more lenient validation with detailed logging."""
+        """CRITICAL FIX: Very lenient validation with detailed logging."""
         # Basic length check - very lenient
         word_count = len(transcription.split())
         if word_count < self.MIN_TRANSCRIPTION_LENGTH:
             logger.debug(f"REJECT: Too short ({word_count} words)")
             return False
         
-        # FIXED: Much more lenient confidence threshold
+        # CRITICAL FIX: Accept very low confidence scores
         if confidence < 0.0:  # Only reject clearly invalid results
-            logger.debug(f"REJECT: Low confidence ({confidence:.2f})")
+            logger.debug(f"REJECT: Invalid confidence ({confidence:.2f})")
             return False
         
-        # FIXED: More lenient echo check (reduced timeout)
+        # CRITICAL FIX: More lenient echo check
         if (self.state.last_tts_time and 
-            (time.time() - self.state.last_tts_time) < 0.3):  # Reduced from 0.5s
+            (time.time() - self.state.last_tts_time) < 0.5):  # Reduced from 1.0s
             # Only reject if it's exactly the same
-            if transcription.lower() == self.last_response_text.lower():
+            if transcription.lower().strip() == self.last_response_text.lower().strip():
                 logger.debug(f"REJECT: Echo detected")
                 return False
         
-        # Skip common noise patterns but be more lenient
-        noise_patterns = ['hmm', 'uh', 'um', 'ah', 'mm']
+        # Skip only obvious noise patterns
+        noise_patterns = ['hmm', 'uh', 'um', 'ah']
         if transcription.lower().strip() in noise_patterns:
             logger.debug(f"REJECT: Noise pattern")
             return False
         
+        # CRITICAL FIX: Accept everything else
         logger.info(f"ACCEPT: '{transcription}' (confidence: {confidence:.2f})")
         return True
     
     async def _process_final_transcription(self, transcription: str):
-        """Enhanced transcription processing with better timeout handling."""
+        """CRITICAL FIX: Enhanced transcription processing with better error handling."""
         self.state.transcriptions += 1
-        self.state.is_speaking = True  # Prevent echo during processing
+        self.response_in_progress = True  # CRITICAL FIX: Set flag to prevent echo
         
         logger.info(f"PROCESSING: '{transcription}'")
         
         try:
-            # Use asyncio.wait_for with increased timeout
+            # CRITICAL FIX: Use OpenAI + Pinecone with increased timeout
             response_task = self._get_knowledge_response(transcription)
             response = await asyncio.wait_for(response_task, timeout=self.RESPONSE_TIMEOUT)
             
             if response:
                 await self._send_response(response)
             else:
-                await self._send_response("I couldn't find an answer to that.")
+                await self._send_response("I couldn't find an answer to that. Could you please try again?")
                     
         except asyncio.TimeoutError:
             logger.error(f"Timeout processing: {transcription}")
@@ -256,24 +263,33 @@ class SimpleWebSocketHandler:
             await self._send_response("I encountered an error. Please try again.")
             self.error_count += 1
         finally:
-            # FIXED: Shorter delay before allowing new speech
-            await asyncio.sleep(0.3)  # Reduced from 0.5s
-            self.state.is_speaking = False
+            # CRITICAL FIX: Ensure response flag is cleared
+            # Don't clear immediately, wait a bit
+            await asyncio.sleep(0.5)
+            self.response_in_progress = False
     
     async def _get_knowledge_response(self, transcription: str) -> Optional[str]:
-        """Get response from knowledge base with enhanced error handling."""
+        """CRITICAL FIX: Get response from knowledge base with better error handling."""
         try:
             if hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
                 result = await self.pipeline.query_engine.query(transcription)
-                return result.get("response", "")
+                response_text = result.get("response", "")
+                
+                # CRITICAL FIX: Validate response
+                if response_text and response_text.strip():
+                    return response_text.strip()
+                else:
+                    logger.warning("Empty response from knowledge base")
+                    return None
             else:
+                logger.error("No query engine available")
                 return "I'm sorry, my knowledge base is not available."
         except Exception as e:
             logger.error(f"Knowledge base error: {e}")
             return None
     
     async def _send_response(self, text: str, ws=None):
-        """Enhanced response sending with better timing."""
+        """CRITICAL FIX: Enhanced response sending with better timing."""
         if not text.strip() or self.state.call_ended:
             return
         
@@ -293,10 +309,18 @@ class SimpleWebSocketHandler:
             audio_data = await self.tts_client.synthesize(text)
             
             if audio_data:
+                # CRITICAL FIX: Mark when we start sending audio
+                self.state.last_tts_time = time.time()
+                self.response_in_progress = True
+                
                 # Send audio
                 await self._send_audio_fast(audio_data, ws)
                 self.state.responses_sent += 1
-                self.state.last_tts_time = time.time()
+                
+                # CRITICAL FIX: Mark first response sent
+                if not self.first_response_sent:
+                    self.first_response_sent = True
+                
                 logger.info(f"SENT response ({len(audio_data)} bytes)")
             else:
                 logger.error("No audio generated")
@@ -305,25 +329,28 @@ class SimpleWebSocketHandler:
             logger.error(f"Error sending response: {e}")
             self.error_count += 1
         finally:
-            # Minimal delay before allowing new speech
-            await asyncio.sleep(0.3)  # Reduced delay
+            # CRITICAL FIX: Ensure STT continues after response
+            await asyncio.sleep(1.0)  # Wait for audio to finish
             
-            # Ensure STT continues with better error handling
+            # CRITICAL FIX: Restart STT for second call issue
             if not self.stt_client.is_streaming and self.state.conversation_active:
                 try:
                     logger.info("Restarting STT after response")
                     await self.stt_client.start_streaming()
                 except Exception as e:
                     logger.error(f"Error restarting STT: {e}")
+            
+            # Clear the response flag
+            self.response_in_progress = False
     
     async def _send_audio_fast(self, audio_data: bytes, ws):
-        """Send audio with optimized chunking."""
+        """CRITICAL FIX: Send audio with proper chunking and timing."""
         if not self.state.stream_sid or not ws:
             logger.warning("Cannot send audio: missing stream_sid or websocket")
             return
         
-        # Optimized chunk size for Twilio
-        chunk_size = 1600  # 200ms chunks
+        # Optimized chunk size for Twilio MULAW
+        chunk_size = 800  # 100ms chunks at 8kHz MULAW
         
         for i in range(0, len(audio_data), chunk_size):
             chunk = audio_data[i:i+chunk_size]
@@ -340,8 +367,8 @@ class SimpleWebSocketHandler:
                 # Send immediately
                 await self._send_ws_message_fast(ws, message)
                 
-                # Optimized delay
-                delay = chunk_size / 8000 * 0.8
+                # CRITICAL FIX: Proper delay for MULAW at 8kHz
+                delay = chunk_size / 8000  # Real-time playback
                 await asyncio.sleep(delay)
                 
             except Exception as e:
@@ -362,22 +389,25 @@ class SimpleWebSocketHandler:
             raise
     
     async def start_conversation(self, ws):
-        """Enhanced conversation startup with better speech detection."""
+        """CRITICAL FIX: Enhanced conversation startup."""
         # Store WebSocket reference
         self._ws = ws
         self.state.stream_sid = getattr(self, 'stream_sid', None)
         
-        # Start STT immediately with enhanced settings
+        # CRITICAL FIX: Mark conversation as started
+        self.conversation_started = True
+        
+        # Start STT immediately
         if not self.stt_client.is_streaming:
             logger.info("Starting STT for conversation with FIXED speech detection")
             await self.stt_client.start_streaming()
         
-        # Send welcome message with slight delay for better audio setup
-        await asyncio.sleep(0.2)
+        # Send welcome message with proper delay
+        await asyncio.sleep(0.5)  # Increased delay for better setup
         await self._send_response("Hello! How can I help you?", ws)
     
     async def _cleanup(self):
-        """Enhanced cleanup with detailed statistics."""
+        """CRITICAL FIX: Enhanced cleanup with better statistics."""
         try:
             self.state.call_ended = True
             self.state.conversation_active = False
@@ -399,12 +429,13 @@ class SimpleWebSocketHandler:
                        f"Invalid: {self.state.speech_detected_but_invalid}")
             logger.info(f"Responses: {self.state.responses_sent}, "
                        f"Errors: {self.error_count}")
+            logger.info(f"First response sent: {self.first_response_sent}")
                        
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get enhanced stats with debugging information."""
+        """CRITICAL FIX: Get enhanced stats with more debugging information."""
         duration = time.time() - self.state.start_time
         
         return {
@@ -424,6 +455,11 @@ class SimpleWebSocketHandler:
             "responses_sent": self.state.responses_sent,
             "error_count": self.error_count,
             
+            # CRITICAL: Conversation state tracking
+            "conversation_started": self.conversation_started,
+            "first_response_sent": self.first_response_sent,
+            "response_in_progress": self.response_in_progress,
+            
             # Performance metrics
             "detection_rate": round(
                 (self.state.speech_detected / max(self.state.audio_received, 1)) * 100, 2
@@ -439,6 +475,9 @@ class SimpleWebSocketHandler:
             
             # Enhanced features
             "interim_results_enabled": True,
-            "fixed_configuration": True,
-            "debug_enabled": self.stt_debug and self.enable_audio_debug
+            "critical_fixes_applied": True,
+            "debug_enabled": self.stt_debug and self.enable_audio_debug,
+            
+            # STT client stats
+            "stt_stats": self.stt_client.get_stats() if self.stt_client else {}
         }

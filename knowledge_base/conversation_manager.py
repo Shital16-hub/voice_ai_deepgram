@@ -1,6 +1,8 @@
+# knowledge_base/conversation_manager.py - FIXED VERSION
+
 """
 Conversation manager optimized for OpenAI and telephony conversations.
-Enhanced with OpenAI-specific optimizations and telephony-focused features.
+CRITICAL FIXES: Session management, timeout protection, and second call issues.
 """
 import logging
 import asyncio
@@ -78,6 +80,7 @@ class ConversationTurn:
 class ConversationManager:
     """
     Manage conversation state and flow optimized for OpenAI and telephony.
+    CRITICAL FIXES: Session management, timeout protection, second call support.
     """
     
     def __init__(
@@ -85,10 +88,10 @@ class ConversationManager:
         query_engine: Optional[QueryEngine] = None,
         session_id: Optional[str] = None,
         skip_greeting: bool = True,
-        max_history_turns: int = 6,  # Shorter for telephony
-        context_window_tokens: int = 2048  # Optimized for telephony
+        max_history_turns: int = 4,  # Reduced for telephony
+        context_window_tokens: int = 1024  # Optimized for telephony
     ):
-        """Initialize ConversationManager for telephony."""
+        """Initialize ConversationManager for telephony with CRITICAL fixes."""
         self.query_engine = query_engine
         self.session_id = session_id or f"session_{int(time.time())}"
         self.skip_greeting = skip_greeting
@@ -105,10 +108,15 @@ class ConversationManager:
         self.turn_count = 0
         self.topic_context = []
         
+        # CRITICAL FIX: Session state tracking for second call issue
+        self.session_active = True
+        self.last_response_time = None
+        self.response_count = 0
+        
         logger.info(f"Initialized ConversationManager for OpenAI telephony - Session: {self.session_id}")
     
     async def init(self):
-        """Initialize dependencies."""
+        """Initialize dependencies with error handling."""
         # Initialize query engine if provided
         if self.query_engine and not self.query_engine.is_initialized:
             await self.query_engine.init()
@@ -116,10 +124,21 @@ class ConversationManager:
         logger.info("ConversationManager initialized with OpenAI")
     
     async def handle_user_input(self, user_input: str) -> Dict[str, Any]:
-        """Process user input optimized for telephony conversations."""
+        """Process user input optimized for telephony conversations with CRITICAL fixes."""
         start_time = time.time()
         self.last_activity = time.time()
         self.turn_count += 1
+        
+        # CRITICAL FIX: Validate session state
+        if not self.session_active:
+            logger.warning("Attempted to process input on inactive session")
+            return {
+                "response": "I'm sorry, there was an issue. Please try again.",
+                "state": ConversationState.ENDED,
+                "requires_human": False,
+                "context": None,
+                "error": "Session inactive"
+            }
         
         # Create new turn
         turn = ConversationTurn(
@@ -161,6 +180,10 @@ class ConversationManager:
             
             # Update current state
             self.current_state = response["state"]
+            
+            # CRITICAL FIX: Track response for session management
+            self.last_response_time = time.time()
+            self.response_count += 1
             
             return response
             
@@ -210,7 +233,7 @@ class ConversationManager:
         }
     
     async def _handle_query(self, turn: ConversationTurn) -> Dict[str, Any]:
-        """Handle user query with OpenAI and telephony optimization."""
+        """Handle user query with OpenAI and telephony optimization with CRITICAL fixes."""
         query = turn.query
         
         # Check for human handoff request
@@ -222,22 +245,36 @@ class ConversationManager:
                 "context": None
             }
         
+        # CRITICAL FIX: Validate query engine
+        if not self.query_engine:
+            logger.error("No query engine available")
+            return {
+                "response": "I'm having trouble accessing my knowledge base. Please try again.",
+                "state": ConversationState.CONTINUOUS,
+                "requires_human": False,
+                "context": None,
+                "error": "No query engine"
+            }
+        
         # Retrieve relevant documents if query engine available
         context = None
-        if self.query_engine:
+        try:
             turn.state = ConversationState.RETRIEVING
             
-            try:
-                # Get relevant documents
-                retrieval_results = await self.query_engine.retrieve_with_sources(query)
-                turn.retrieved_context = retrieval_results["results"]
-                
-                # Format context for OpenAI
-                context = self.query_engine.format_retrieved_context(turn.retrieved_context)
-                
-            except Exception as e:
-                logger.error(f"Error retrieving documents: {e}")
-                context = None
+            # CRITICAL FIX: Add timeout to retrieval
+            retrieval_task = self.query_engine.retrieve_with_sources(query)
+            retrieval_results = await asyncio.wait_for(retrieval_task, timeout=10.0)
+            turn.retrieved_context = retrieval_results["results"]
+            
+            # Format context for OpenAI
+            context = self.query_engine.format_retrieved_context(turn.retrieved_context)
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout retrieving context for: {query}")
+            context = None
+        except Exception as e:
+            logger.error(f"Error retrieving documents: {e}")
+            context = None
         
         # Generate response with OpenAI
         turn.state = ConversationState.GENERATING_RESPONSE
@@ -246,13 +283,14 @@ class ConversationManager:
             # Get conversation history for context
             conversation_history = self._format_conversation_history()
             
-            # Use OpenAI directly for telephony-optimized response
+            # CRITICAL FIX: Add timeout to response generation
             if self.query_engine and self.query_engine.llm:
-                response_text = await self.query_engine.llm.generate_response(
+                generation_task = self.query_engine.llm.generate_response(
                     query=query,
                     context=context,
                     chat_history=conversation_history
                 )
+                response_text = await asyncio.wait_for(generation_task, timeout=15.0)
             else:
                 # Fallback response
                 response_text = "I understand your question, but I'm having trouble accessing my knowledge base right now. Could you please try again?"
@@ -262,6 +300,9 @@ class ConversationManager:
             
             logger.info(f"Generated response: {response_text[:100]}...")
             
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout generating response for: {query}")
+            response_text = "I'm taking a bit longer than usual. Could you please repeat your question?"
         except Exception as e:
             logger.error(f"Error generating response: {e}", exc_info=True)
             response_text = "I'm sorry, I'm having trouble processing that right now. Could you rephrase your question?"
@@ -286,11 +327,16 @@ class ConversationManager:
         response = re.sub(r'^\s*[-*]\s*', '', response, flags=re.MULTILINE)
         response = re.sub(r'^\s*\d+\.\s*', '', response, flags=re.MULTILINE)
         
-        # Simplify for telephony - keep it under 30 words when possible
+        # CRITICAL FIX: Ensure short responses for telephony
         sentences = response.split('. ')
-        if len(sentences) > 2:
-            # For telephony, keep responses shorter
-            response = '. '.join(sentences[:2]) + '.'
+        if len(sentences) > 1:
+            # For telephony, keep responses very short
+            response = sentences[0] + '.'
+        
+        # CRITICAL FIX: Enforce word limit
+        words = response.split()
+        if len(words) > 15:
+            response = ' '.join(words[:15]) + '.'
         
         # Replace complex terms with simpler alternatives
         replacements = {
@@ -359,8 +405,8 @@ class ConversationManager:
         """Format conversation history for OpenAI."""
         formatted_history = []
         
-        # Include recent turns for context
-        recent_turns = self.history[-4:] if len(self.history) >= 4 else self.history
+        # CRITICAL FIX: Include minimal history for telephony speed
+        recent_turns = self.history[-2:] if len(self.history) >= 2 else self.history
         
         for turn in recent_turns:
             if turn.query:
@@ -421,9 +467,13 @@ class ConversationManager:
         return "\n".join(summary_parts)
     
     async def generate_streaming_response(self, user_input: str) -> AsyncIterator[Dict[str, Any]]:
-        """Generate streaming response optimized for telephony."""
+        """Generate streaming response optimized for telephony with CRITICAL fixes."""
         self.last_activity = time.time()
         self.turn_count += 1
+        
+        # CRITICAL FIX: Clean up previous session state
+        if hasattr(self, '_previous_incomplete_response'):
+            delattr(self, '_previous_incomplete_response')
         
         # Create turn for tracking
         turn = ConversationTurn(
@@ -450,6 +500,17 @@ class ConversationManager:
             yield result
             return
         
+        # CRITICAL FIX: Better session validation
+        if not hasattr(self, 'query_engine') or not self.query_engine:
+            yield {
+                "chunk": "I'm having trouble with my knowledge system. Please try again.",
+                "done": True,
+                "requires_human": False,
+                "state": ConversationState.CONTINUOUS,
+                "error": "No query engine available"
+            }
+            return
+        
         # Use query engine with streaming for real-time response
         full_response = ""
         
@@ -457,16 +518,41 @@ class ConversationManager:
             # Get conversation history
             conversation_history = self._format_conversation_history()
             
-            # Stream response using query engine
-            if self.query_engine:
+            # CRITICAL FIX: Add timeout to streaming response
+            async def stream_with_timeout():
                 async for chunk in self.query_engine.query_with_streaming(
                     user_input, 
                     chat_history=conversation_history
                 ):
+                    yield chunk
+            
+            # Stream response using query engine with timeout
+            stream_iter = stream_with_timeout()
+            
+            try:
+                async for chunk in asyncio.wait_for(stream_iter, timeout=25.0):
                     chunk_text = chunk.get("chunk", "")
                     
                     if chunk_text:
                         full_response += chunk_text
+                        
+                        # CRITICAL FIX: Limit response length for telephony
+                        word_count = len(full_response.split())
+                        if word_count >= 15:
+                            # Truncate and end stream early
+                            sentences = full_response.split('.')
+                            if sentences:
+                                full_response = sentences[0] + '.'
+                            
+                            yield {
+                                "chunk": "",
+                                "full_response": full_response,
+                                "done": True,
+                                "requires_human": False,
+                                "state": ConversationState.CONTINUOUS,
+                                "truncated": True
+                            }
+                            break
                         
                         # Yield each chunk for real-time TTS
                         yield {
@@ -497,22 +583,22 @@ class ConversationManager:
                         turn.state = ConversationState.CONTINUOUS
                         self._add_to_history(turn)
                         self.current_state = ConversationState.CONTINUOUS
+                        
+                        # CRITICAL FIX: Update session tracking
+                        self.last_response_time = time.time()
+                        self.response_count += 1
                         return
-            else:
-                # Fallback if no query engine
-                fallback_response = "I understand your question, but I'm having trouble accessing my knowledge base right now."
-                
+                        
+            except asyncio.TimeoutError:
+                logger.error("Streaming response timed out")
                 yield {
-                    "chunk": fallback_response,
+                    "chunk": "I'm taking longer than usual. Could you please repeat your question?",
                     "done": True,
                     "requires_human": False,
-                    "state": ConversationState.CONTINUOUS
+                    "state": ConversationState.CONTINUOUS,
+                    "error": "Timeout"
                 }
-                
-                turn.response = fallback_response
-                turn.state = ConversationState.CONTINUOUS
-                self._add_to_history(turn)
-        
+            
         except Exception as e:
             logger.error(f"Error generating streaming response: {e}", exc_info=True)
             
@@ -531,7 +617,7 @@ class ConversationManager:
             self._add_to_history(turn)
     
     def get_conversation_metrics(self) -> Dict[str, Any]:
-        """Get detailed conversation metrics."""
+        """Get detailed conversation metrics with CRITICAL fixes."""
         if not self.history:
             return {"error": "No conversation history"}
         
@@ -549,7 +635,11 @@ class ConversationManager:
             "avg_processing_time": avg_processing_time,
             "current_state": self.current_state,
             "last_activity": self.last_activity,
-            "session_health": "active" if time.time() - self.last_activity < 60 else "idle"
+            "session_health": "active" if time.time() - self.last_activity < 60 else "idle",
+            # CRITICAL FIX: Additional session tracking
+            "session_active": self.session_active,
+            "response_count": self.response_count,
+            "last_response_time": self.last_response_time
         }
     
     def get_history(self) -> List[Dict[str, Any]]:
@@ -564,7 +654,7 @@ class ConversationManager:
         return None
     
     def reset(self):
-        """Reset conversation state."""
+        """Reset conversation state with CRITICAL fixes."""
         self.current_state = ConversationState.CONTINUOUS if self.skip_greeting else ConversationState.GREETING
         self.history = []
         self.topic_context = []
@@ -573,6 +663,15 @@ class ConversationManager:
         self.conversation_started = time.time()
         self.last_activity = time.time()
         self.turn_count = 0
+        
+        # CRITICAL FIX: Reset session tracking
+        self.session_active = True
+        self.last_response_time = None
+        self.response_count = 0
+        
+        # CRITICAL FIX: Clear any incomplete response state
+        if hasattr(self, '_previous_incomplete_response'):
+            delattr(self, '_previous_incomplete_response')
         
         logger.info(f"Reset conversation for session: {self.session_id}")
     
@@ -586,5 +685,7 @@ class ConversationManager:
             "last_query": self.history[-1].query if self.history else None,
             "last_response": self.history[-1].response if self.history else None,
             "recent_context": self.get_latest_context(),
-            "full_history": [turn.to_dict() for turn in self.history[-5:]]  # Last 5 turns
+            "full_history": [turn.to_dict() for turn in self.history[-5:]],  # Last 5 turns
+            "session_active": self.session_active,
+            "response_count": self.response_count
         }
