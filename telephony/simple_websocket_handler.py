@@ -1,7 +1,6 @@
-# telephony/simple_websocket_handler.py - CRITICAL FIXES
-
 """
-CRITICAL FIXES for WebSocket handler to resolve speech detection and response issues.
+Enhanced WebSocket handler with proper session management, echo prevention,
+and robust error handling for continuous conversation.
 """
 import json
 import asyncio
@@ -9,171 +8,124 @@ import logging
 import base64
 import time
 import os
-from typing import Dict, Any, Optional, Union
-from dataclasses import dataclass, field
+from typing import Dict, Any, Optional
 
-# Use the enhanced STT implementation
+# Use the fixed STT implementation
 from speech_to_text.google_cloud_stt import GoogleCloudStreamingSTT, StreamingTranscriptionResult
 
-# Use the enhanced TTS implementation
+# Use the fixed TTS implementation
 from text_to_speech.google_cloud_tts import GoogleCloudTTS
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class SessionState:
-    """Enhanced session state with debugging info."""
-    call_sid: str
-    stream_sid: Optional[str] = None
-    start_time: float = field(default_factory=time.time)
-    conversation_active: bool = True
-    is_speaking: bool = False
-    call_ended: bool = False
-    
-    # Enhanced metrics with debugging
-    audio_received: int = 0
-    transcriptions: int = 0
-    responses_sent: int = 0
-    last_transcription_time: float = field(default_factory=time.time)
-    last_tts_time: Optional[float] = None
-    
-    # Debug metrics
-    audio_bytes_total: int = 0
-    speech_detected: int = 0
-    speech_detected_but_invalid: int = 0
-    interim_results_received: int = 0
-
 class SimpleWebSocketHandler:
     """
-    FIXED WebSocket handler with critical improvements for speech detection and response.
+    Enhanced WebSocket handler with robust session management and echo prevention.
+    Optimized for continuous conversation with proper error handling and cleanup.
     """
     
-    # CRITICAL FIX: More lenient configuration
-    MIN_TRANSCRIPTION_LENGTH = 1  # Accept even single words
-    RESPONSE_TIMEOUT = 3.0        # UPDATED: Reduced timeout for faster responses
-    SILENCE_TIMEOUT = 5.0         # CRITICAL: Reduced for faster detection
-    
-    # Update the initialization section in __init__ method:
-    
     def __init__(self, call_sid: str, pipeline):
-        """Initialize with infinite streaming for uninterrupted speech recognition."""
+        """Initialize with enhanced conversation support and echo prevention."""
         self.call_sid = call_sid
+        self.stream_sid = None
         self.pipeline = pipeline
         
-        # Get project ID
+        # Get project ID dynamically with better error handling
         self.project_id = self._get_project_id()
         
-        # CRITICAL FIX: Set credentials_file here to avoid unbound variable error
-        self.credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        # Initialize Google Cloud STT v2 with enhanced settings
+        credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        self.stt_client = GoogleCloudStreamingSTT(
+            language="en-US",
+            sample_rate=8000,
+            encoding="MULAW",
+            channels=1,
+            interim_results=False,  # Only final results to avoid noise
+            project_id=self.project_id,
+            location="global",
+            credentials_file=credentials_file
+        )
         
-        # UPDATED: Use existing STT from pipeline if available, otherwise create new one
-        if hasattr(pipeline, 'speech_recognizer') and pipeline.speech_recognizer:
-            self.stt_client = pipeline.speech_recognizer
-            logger.info("Using STT client from pipeline")
-        else:
-            # UPDATED: Initialize with infinite streaming STT
-            from speech_to_text.infinite_streaming_stt import InfiniteStreamingSTT
-            self.stt_client = InfiniteStreamingSTT(
-                project_id=self.project_id,
-                language="en-US",
-                sample_rate=8000,
-                encoding="MULAW",
-                channels=1,
-                interim_results=True,
-                location="global",
-                credentials_file=self.credentials_file,
-                # UPDATED: Configure for entire call duration
-                session_max_duration=240,    # 4 minutes per session
-                session_overlap_seconds=30   # 30 second overlap
-            )
-            logger.info(f"Created new infinite streaming STT client")
+        # Initialize Google Cloud TTS with enhanced settings
+        self.tts_client = GoogleCloudTTS(
+            credentials_file=credentials_file,
+            voice_name="en-US-Neural2-C",
+            voice_gender=None,  # Don't set gender for Neural2 voices
+            language_code="en-US",
+            container_format="mulaw",
+            sample_rate=8000,
+            enable_caching=True,
+            voice_type="NEURAL2"
+        )
         
-        # CRITICAL FIX: Initialize TTS client safely
-        if hasattr(pipeline, 'tts_client') and pipeline.tts_client:
-            self.tts_client = pipeline.tts_client
-            logger.info("Using TTS client from pipeline")
-        elif hasattr(pipeline, 'tts_integration') and pipeline.tts_integration and hasattr(pipeline.tts_integration, 'tts_client'):
-            self.tts_client = pipeline.tts_integration.tts_client
-            logger.info("Using TTS client from pipeline integration")
-        else:
-            # Initialize Google Cloud TTS (same as before)
-            self.tts_client = GoogleCloudTTS(
-                credentials_file=self.credentials_file,
-                voice_name="en-US-Neural2-C",
-                voice_gender=None,
-                language_code="en-US",
-                container_format="mulaw",
-                sample_rate=8000,
-                enable_caching=True,
-                voice_type="NEURAL2"
-            )
-            logger.info("Created new TTS client")
+        # Enhanced conversation state management
+        self.conversation_active = True
+        self.is_speaking = False
+        self.expecting_speech = True
+        self.call_ended = False
         
-        # Enhanced state management (same as before)
-        self.state = SessionState(call_sid=call_sid)
+        # Audio processing with flow control
+        self.audio_buffer = bytearray()
+        self.chunk_size = 800  # 100ms at 8kHz
+        self.min_chunk_size = 160  # 20ms minimum
+        
+        # Enhanced session management
+        self.session_start_time = time.time()
+        self.last_transcription_time = time.time()
+        self.last_audio_time = time.time()
+        self.last_tts_time = None
+        
+        # Response tracking for echo prevention
+        self.waiting_for_response = False
+        self.last_response_time = time.time()
+        self.last_response_text = ""
+        
+        # Enhanced stats tracking
+        self.audio_received = 0
+        self.transcriptions = 0
+        self.responses_sent = 0
+        self.echo_detections = 0
+        self.invalid_transcriptions = 0
         
         # WebSocket reference for response sending
         self._ws = None
         
-        # UPDATED: No forced restarts
-        self.last_response_text = ""
-        self.response_in_progress = False
-        self.error_count = 0
-        self.enable_audio_debug = True
-        self.stt_debug = True
-        self.conversation_started = False
-        self.first_response_sent = False
-        
-        # UPDATED: Remove health check and forced restart timers
-        # Only keep a health check timer for monitoring, not forced restarts
-        self._last_health_check = time.time()
-        self._health_check_interval = 30  # Check health every 30 seconds
-        self._last_forced_restart = time.time()
-        self._forced_restart_interval = 120  # For stats tracking
-        
-        logger.info(f"INFINITE STREAMING WebSocket handler initialized - Call: {call_sid}")
-        logger.info(f"Infinite streaming ensures uninterrupted speech recognition for entire call")
+        logger.info(f"Enhanced WebSocket handler initialized - Call: {call_sid}, Project: {self.project_id}")
     
     def _get_project_id(self) -> str:
-        """Get project ID with minimal overhead."""
+        """Get project ID with enhanced error handling."""
         # Try environment variable first
         project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
         if project_id:
             return project_id
         
-        # Fallback to known project ID
+        # Try to extract from credentials file
+        credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if credentials_file and os.path.exists(credentials_file):
+            try:
+                import json
+                with open(credentials_file, 'r') as f:
+                    creds_data = json.load(f)
+                    project_id = creds_data.get('project_id')
+                    if project_id:
+                        logger.info(f"Extracted project ID from credentials: {project_id}")
+                        return project_id
+            except Exception as e:
+                logger.error(f"Error reading credentials: {e}")
+        
+        # Fallback (should be configured properly)
+        logger.warning("Using fallback project ID - this should be configured properly")
         return "my-tts-project-458404"
     
-    # Replace the _handle_audio method with this version:
-
     async def _handle_audio(self, data: Dict[str, Any], ws):
-        """Process audio with infinite streaming for uninterrupted experience."""
-        # Skip if call ended
-        if self.state.call_ended:
+        """Handle audio with enhanced flow control and echo prevention."""
+        # Skip audio processing if call has ended
+        if self.call_ended:
             return
         
-        # UPDATED: Simplified health check without forced restarts
-        now = time.time()
-        if (self._last_health_check + self._health_check_interval < now):
-            self._last_health_check = now
-            await self._check_streaming_health()
-        
-        # UPDATED: No forced restarts, just ensure streaming is active
-        if not self.stt_client.is_streaming:
-            logger.info("STT not streaming - starting infinite streaming session")
-            await self.stt_client.start_streaming()
-        
-        # Echo prevention with safe timeout (same as before)
-        if self.response_in_progress:
-            if (self.state.last_tts_time and 
-                (time.time() - self.state.last_tts_time) > 0.2):
-                self.response_in_progress = False
-                self.state.is_speaking = False
-                logger.debug("Cleared response_in_progress flag after echo delay timeout")
-            else:
-                if self.enable_audio_debug and self.state.audio_received % 100 == 0:
-                    logger.debug(f"Skipping audio - Response in progress (last TTS: {time.time() - self.state.last_tts_time:.2f}s ago)")
-                return
+        # Skip audio while we're sending a response to prevent echo
+        if self.waiting_for_response:
+            return
         
         media = data.get('media', {})
         payload = media.get('payload')
@@ -181,430 +133,325 @@ class SimpleWebSocketHandler:
         if not payload:
             return
         
-        # Enhanced audio processing with debugging (same as before)
+        # Decode audio with error handling
         try:
             audio_data = base64.b64decode(payload)
-            self.state.audio_received += 1
-            self.state.audio_bytes_total += len(audio_data)
-            
-            # Debug audio reception
-            if self.enable_audio_debug and self.state.audio_received % 50 == 0:
-                logger.info(f"AUDIO DEBUG - Packets: {self.state.audio_received}, "
-                          f"Total bytes: {self.state.audio_bytes_total}, "
-                          f"Last packet size: {len(audio_data)} bytes")
-                
+            self.audio_received += 1
+            self.last_audio_time = time.time()
         except Exception as e:
             logger.error(f"Error decoding audio: {e}")
             return
         
-        # UPDATED: Process audio with infinite streaming
+        # Enhanced check: Skip audio if we just sent TTS to prevent immediate echo
+        if self.last_tts_time and (time.time() - self.last_tts_time) < 2.0:
+            logger.debug("Skipping audio - too close to TTS output")
+            return
+        
+        # Start STT if not already started
+        if not self.stt_client.is_streaming and self.conversation_active:
+            logger.info("Starting STT streaming for conversation")
+            await self.stt_client.start_streaming()
+        
+        # Process audio chunks with enhanced error handling
         try:
             await self.stt_client.process_audio_chunk(
                 audio_data, 
-                callback=self._handle_transcription_result_enhanced
+                callback=self._handle_transcription_result
             )
         except Exception as e:
-            logger.error(f"Error processing audio: {e}")
-            self.error_count += 1
-        
-    async def _ensure_streaming_health(self):
-        """CRITICAL FIX: Ensure streaming session is healthy."""
-        if not self.stt_client:
-            return
-            
-        # Check if we need to restart streaming
-        if not self.stt_client.is_streaming:
-            logger.info("STT not streaming, restarting")
-            await self.stt_client.start_streaming()
-            return
-            
-        # Check if session is getting too old
-        if hasattr(self.stt_client, '_last_streaming_start') and self.stt_client._last_streaming_start:
-            streaming_duration = time.time() - self.stt_client._last_streaming_start
-            # Google Speech typically limits streaming to around 5 minutes, restart before that
-            if streaming_duration > 120:  # UPDATED: Reduced to 2 minutes to avoid session issues
-                logger.info(f"Streaming session active for {streaming_duration}s, preemptively restarting")
-                await self.stt_client.stop_streaming()
-                await asyncio.sleep(0.2)  # Add small delay between stop and start
-                await self.stt_client.start_streaming()
+            logger.error(f"Error processing audio chunk: {e}")
     
-    async def _handle_transcription_result_enhanced(self, result: StreamingTranscriptionResult):
-        """CRITICAL FIX: Enhanced transcription handling with better validation."""
-        if result is None:
-            return
-            
-        # Handle interim results for debugging
-        if not result.is_final and result.text.strip():
-            self.state.interim_results_received += 1
-            self.state.speech_detected += 1
-            if self.stt_debug:
-                logger.info(f"INTERIM #{self.state.interim_results_received}: '{result.text.strip()}' "
-                           f"(confidence: {result.confidence:.2f})")
-        
-        # Process final results
+    async def _handle_transcription_result(self, result: StreamingTranscriptionResult):
+        """Handle transcription results with enhanced echo detection and validation."""
         if result.is_final and result.text.strip():
             transcription = result.text.strip()
             confidence = result.confidence
             
-            logger.info(f"FINAL TRANSCRIPTION: '{transcription}' (confidence: {confidence:.2f})")
+            logger.info(f"Final transcription (session {result.session_id}): '{transcription}' (confidence: {confidence:.2f})")
+            self.last_transcription_time = time.time()
             
-            self.state.last_transcription_time = time.time()
-            
-            # CRITICAL FIX: Clear any response_in_progress flag to allow new speech processing
-            # This ensures we can process a new query immediately
-            self.response_in_progress = False
-            
-            # CRITICAL FIX: Much more lenient validation
-            if self._is_valid_transcription_enhanced(transcription, confidence):
-                await self._process_final_transcription(transcription)
+            # Enhanced validation and echo detection
+            if self._is_valid_transcription(transcription, confidence):
+                await self._process_final_transcription(transcription, None)
             else:
-                self.state.speech_detected_but_invalid += 1
-                logger.debug(f"REJECTED transcription: '{transcription}' (confidence: {confidence:.2f})")
+                self.invalid_transcriptions += 1
+                logger.debug(f"Invalid transcription rejected: '{transcription}' (conf: {confidence:.2f})")
     
-    def _is_valid_transcription_enhanced(self, transcription: str, confidence: float) -> bool:
-        """CRITICAL FIX: Very lenient validation with detailed logging."""
-        # Basic length check - very lenient
-        word_count = len(transcription.split())
-        if word_count < self.MIN_TRANSCRIPTION_LENGTH:
-            logger.debug(f"REJECT: Too short ({word_count} words)")
+    def _is_valid_transcription(self, transcription: str, confidence: float) -> bool:
+        """Enhanced transcription validation with echo detection."""
+        # Basic length check
+        if len(transcription) < 2:
             return False
         
-        # CRITICAL FIX: Accept very low confidence scores
-        if confidence < 0.0:  # Only reject clearly invalid results
-            logger.debug(f"REJECT: Invalid confidence ({confidence:.2f})")
+        # Confidence threshold (lower for telephony)
+        if confidence < 0.3:
+            logger.debug(f"Low confidence transcription: {confidence:.2f}")
             return False
         
-        # CRITICAL FIX: More lenient echo check
-        if (self.state.last_tts_time and 
-            (time.time() - self.state.last_tts_time) < 0.3):  # Reduced from 0.5s to 0.3s
-            # Only reject if it's exactly the same
-            if transcription.lower().strip() == self.last_response_text.lower().strip():
-                logger.debug(f"REJECT: Echo detected")
-                return False
-        
-        # Skip only obvious noise patterns
-        noise_patterns = ['hmm', 'uh', 'um', 'ah']
-        if transcription.lower().strip() in noise_patterns:
-            logger.debug(f"REJECT: Noise pattern")
+        # Enhanced echo detection
+        if self._is_likely_echo(transcription):
+            self.echo_detections += 1
+            logger.debug(f"Echo detected: '{transcription}'")
             return False
         
-        # CRITICAL FIX: Accept everything else
-        logger.info(f"ACCEPT: '{transcription}' (confidence: {confidence:.2f})")
+        # Skip common filler words and short responses
+        transcription_lower = transcription.lower().strip()
+        skip_patterns = [
+            # Common filler words
+            'um', 'uh', 'mmm', 'hmm', 'ah', 'er', 'oh',
+            # Single words that might be misheard
+            'only', 'series', 'okay', 'ok', 'yes', 'no',
+            # Partial echo patterns (from our TTS responses)
+            'ready to help', 'what would you like', 'how can i',
+            'voice assist', 'features', 'pricing', 'plan'
+        ]
+        
+        # Check if transcription is just a skip pattern
+        if transcription_lower in skip_patterns:
+            logger.debug(f"Skipping pattern: '{transcription}'")
+            return False
+        
+        # Check for word-for-word matches with recent response
+        if self.last_response_text:
+            # Simple word overlap check
+            response_words = set(self.last_response_text.lower().split())
+            transcription_words = set(transcription_lower.split())
+            
+            if len(transcription_words) > 0:
+                overlap_ratio = len(response_words & transcription_words) / len(transcription_words)
+                if overlap_ratio > 0.8:  # 80% overlap indicates echo
+                    logger.debug(f"High word overlap with last response: {overlap_ratio:.2f}")
+                    return False
+        
         return True
     
-    async def _process_final_transcription(self, transcription: str):
-        """CRITICAL FIX: Enhanced transcription processing with better error handling."""
-        self.state.transcriptions += 1
-        # CRITICAL FIX: Set flag at beginning of processing
-        self.response_in_progress = True
+    def _is_likely_echo(self, transcription: str) -> bool:
+        """Enhanced echo detection using multiple heuristics."""
+        # Check timing - if transcription comes too soon after TTS, likely echo
+        if self.last_tts_time and (time.time() - self.last_tts_time) < 3.0:
+            # Check for substring matches with recent TTS output
+            if hasattr(self.stt_client, 'last_spoken_texts'):
+                for spoken_text, timestamp in self.stt_client.last_spoken_texts:
+                    if time.time() - timestamp < 5.0:  # Within 5 seconds
+                        if (transcription.lower() in spoken_text.lower() or 
+                            spoken_text.lower() in transcription.lower()):
+                            return True
         
-        logger.info(f"PROCESSING: '{transcription}'")
+        # Check against specific system phrases
+        system_phrases = [
+            "i'm ready to help",
+            "what would you like to know",
+            "voice assist offers",
+            "voice assist features",
+            "pricing plans"
+        ]
         
-        try:
-            # CRITICAL FIX: Use OpenAI + Pinecone with reduced timeout
-            response_task = self._get_knowledge_response(transcription)
-            response = await asyncio.wait_for(response_task, timeout=self.RESPONSE_TIMEOUT)
-            
-            if response:
-                await self._send_response(response)
-            else:
-                await self._send_response("I couldn't find an answer to that. Could you please try again?")
-                    
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout processing: {transcription}")
-            await self._send_response("I'm processing that. Could you repeat your question?")
-            self.error_count += 1
-        except Exception as e:
-            logger.error(f"Error processing transcription: {e}")
-            await self._send_response("I encountered an error. Please try again.")
-            self.error_count += 1
-        finally:
-            # CRITICAL FIX: Small delay before clearing flag to avoid echo
-            await asyncio.sleep(0.2)  # Reduced from 0.5
-            self.response_in_progress = False
-            logger.debug("Cleared response_in_progress flag after processing")
+        for phrase in system_phrases:
+            if phrase in transcription.lower():
+                return True
+        
+        return False
     
-    async def _get_knowledge_response(self, transcription: str) -> Optional[str]:
-        """FIXED: Get response from knowledge base with better error handling."""
+    async def _process_final_transcription(self, transcription: str, ws=None):
+        """Process transcription with enhanced error handling and response management."""
+        # Update state
+        self.transcriptions += 1
+        self.waiting_for_response = True
+        
+        logger.info(f"Processing transcription: '{transcription}'")
+        
         try:
-            # CRITICAL FIX: Try QueryEngineAPI first
-            if hasattr(self.pipeline, 'query_engine_api') and self.pipeline.query_engine_api:
-                logger.info("Using QueryEngineAPI for response generation")
-                result = await self.pipeline.query_engine_api.query(transcription)
-                response_text = result.get("response", "")
-                
-                # CRITICAL FIX: Validate response
-                if response_text and response_text.strip():
-                    return response_text.strip()
-                else:
-                    logger.warning("Empty response from knowledge base API")
-                    return "I couldn't find a specific answer to that. Could you try asking in a different way?"
-                    
-            # CRITICAL FIX: Check query_engine attribute directly next
-            elif hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
-                logger.info("Using direct query_engine for response generation")
+            # Query knowledge base through pipeline
+            if hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
                 result = await self.pipeline.query_engine.query(transcription)
                 response_text = result.get("response", "")
                 
-                # CRITICAL FIX: Validate response
-                if response_text and response_text.strip():
-                    return response_text.strip()
+                if response_text:
+                    await self._send_response(response_text)
                 else:
-                    logger.warning("Empty response from knowledge base")
-                    return "I couldn't find a specific answer to that. Could you try asking in a different way?"
-            # CRITICAL FIX: If not found directly, try accessing via conversation_manager
-            elif hasattr(self.pipeline, 'conversation_manager') and self.pipeline.conversation_manager:
-                logger.info("Using conversation_manager for response generation")
-                if hasattr(self.pipeline.conversation_manager, 'query_engine') and self.pipeline.conversation_manager.query_engine:
-                    # Use conversation manager's query engine
-                    response = await self.pipeline.conversation_manager.handle_user_input(transcription)
-                    if response and response.get("response"):
-                        return response.get("response")
-                    else:
-                        logger.warning("Empty response from conversation manager")
-                        return "I'm processing that, but couldn't generate a response. Could you rephrase?"
-                else:
-                    logger.error("No query engine available in conversation manager")
-                    return "I'm sorry, my knowledge base is not properly connected."
+                    logger.warning("No response generated from knowledge base")
+                    await self._send_response("I'm sorry, I couldn't find an answer to that question.")
             else:
-                logger.error("No query engine or conversation manager available in pipeline")
-                return "I'm sorry, my knowledge base is not available."
+                logger.error("Pipeline or query engine not available")
+                await self._send_response("I'm sorry, there's an issue with my knowledge base.")
+                
         except Exception as e:
-            logger.error(f"Knowledge base error: {e}")
-            return f"I encountered an issue processing that. Please try again."
+            logger.error(f"Error processing transcription: {e}", exc_info=True)
+            await self._send_response("I'm sorry, I encountered an error processing your request.")
+        finally:
+            self.waiting_for_response = False
     
     async def _send_response(self, text: str, ws=None):
-        """CRITICAL FIX: Enhanced response sending with better timing."""
-        if not text.strip() or self.state.call_ended:
+        """Send TTS response with enhanced error handling and echo prevention."""
+        if not text.strip() or self.call_ended:
             return
         
         # Use stored WebSocket if not provided
         if ws is None:
             ws = getattr(self, '_ws', None)
             if ws is None:
-                logger.error("No WebSocket available")
+                logger.error("No WebSocket available for sending response")
                 return
         
         try:
+            # Set response state
+            self.is_speaking = True
+            self.last_response_time = time.time()
             self.last_response_text = text
             
-            logger.info(f"SENDING RESPONSE: '{text}'")
+            logger.info(f"Sending response: '{text}'")
             
-            # TTS synthesis with timeout
-            audio_data = await asyncio.wait_for(
-                self.tts_client.synthesize(text),
-                timeout=3.0  # Reduced timeout
-            )
+            # Inform STT client about TTS output for echo detection
+            if hasattr(self.stt_client, 'add_tts_text'):
+                self.stt_client.add_tts_text(text)
             
-            if audio_data:
-                # CRITICAL FIX: Mark when we start sending audio
-                self.state.last_tts_time = time.time()
-                self.response_in_progress = True
+            # Convert to speech with error handling
+            try:
+                audio_data = await self.tts_client.synthesize(text)
+                self.last_tts_time = time.time()
                 
-                # Send audio
-                await self._send_audio_fast(audio_data, ws)
-                self.state.responses_sent += 1
-                
-                # CRITICAL FIX: Mark first response sent
-                if not self.first_response_sent:
-                    self.first_response_sent = True
-                
-                logger.info(f"SENT response ({len(audio_data)} bytes)")
-                
-                # CRITICAL NEW FIX: Force STT restart after sending response
+                if audio_data:
+                    # Send audio in chunks with proper pacing
+                    await self._send_audio_chunks(audio_data, ws)
+                    self.responses_sent += 1
+                    logger.info(f"Successfully sent response ({len(audio_data)} bytes)")
+                else:
+                    logger.error("No audio data generated from TTS")
+            except Exception as e:
+                logger.error(f"Error synthesizing speech: {e}")
+                # Don't re-raise - just continue without audio response
+            
+        except Exception as e:
+            logger.error(f"Error sending response: {e}", exc_info=True)
+        finally:
+            # Clear speaking flag
+            self.is_speaking = False
+            
+            # Small delay to ensure audio playback completes
+            await asyncio.sleep(0.8)
+            
+            # Ensure STT is still running for continuous conversation
+            if not self.stt_client.is_streaming and self.conversation_active and not self.call_ended:
+                logger.info("Restarting STT for continuous conversation")
                 try:
-                    logger.info("Forcing STT restart after response")
-                    if self.stt_client.is_streaming:
-                        await self.stt_client.stop_streaming()
-                    await asyncio.sleep(0.2)  # Short delay to ensure clean restart
                     await self.stt_client.start_streaming()
-                    logger.info("STT restarted successfully")
                 except Exception as e:
                     logger.error(f"Error restarting STT: {e}")
-                
-            else:
-                logger.error("No audio generated")
-                
-        except asyncio.TimeoutError:
-            logger.error("TTS synthesis timed out")
-            self.error_count += 1
-        except Exception as e:
-            logger.error(f"Error sending response: {e}")
-            self.error_count += 1
-        finally:
-            # CRITICAL FIX: Ensure STT continues after response - shorter delay
-            await asyncio.sleep(0.3)  # Reduced from 1.0 for faster response
             
-            # CRITICAL FIX: Clear the response flag
-            self.response_in_progress = False
-            logger.info("Response flag cleared")
+            logger.debug("Ready for next utterance")
     
-    async def _send_audio_fast(self, audio_data: bytes, ws):
-        """CRITICAL FIX: Send audio with proper chunking and timing."""
-        if not self.state.stream_sid or not ws:
+    async def _send_audio_chunks(self, audio_data: bytes, ws):
+        """Send audio data with proper chunking and error handling."""
+        if not self.stream_sid or not ws:
             logger.warning("Cannot send audio: missing stream_sid or websocket")
             return
         
-        # Optimized chunk size for Twilio MULAW
-        chunk_size = 800  # 100ms chunks at 8kHz MULAW
+        chunk_size = 400  # 50ms chunks for smooth playback
+        total_chunks = len(audio_data) // chunk_size + (1 if len(audio_data) % chunk_size else 0)
         
         for i in range(0, len(audio_data), chunk_size):
             chunk = audio_data[i:i+chunk_size]
+            chunk_num = i // chunk_size + 1
             
             try:
                 audio_base64 = base64.b64encode(chunk).decode('utf-8')
                 
                 message = {
                     "event": "media",
-                    "streamSid": self.state.stream_sid,
+                    "streamSid": self.stream_sid,
                     "media": {"payload": audio_base64}
                 }
                 
-                # Send immediately
-                await self._send_ws_message_fast(ws, message)
+                ws.send(json.dumps(message))
                 
-                # CRITICAL FIX: Faster delay for MULAW at 8kHz
-                # UPDATED: Even faster playback rate
-                delay = chunk_size / 8000 * 0.85  # 85% of real-time for faster playback
-                await asyncio.sleep(delay)
+                # Dynamic delay based on chunk size
+                await asyncio.sleep(0.025)  # 25ms delay
                 
             except Exception as e:
-                logger.error(f"Error sending audio chunk: {e}")
+                logger.error(f"Error sending audio chunk {chunk_num}/{total_chunks}: {e}")
                 break
-    
-    async def _send_ws_message_fast(self, ws, message):
-        """Send WebSocket message with error handling."""
-        try:
-            if hasattr(ws, 'send_text'):
-                # FastAPI WebSocket
-                await ws.send_text(json.dumps(message))
-            else:
-                # Other WebSocket implementations
-                await ws.send(json.dumps(message))
-        except Exception as e:
-            logger.error(f"Error sending WebSocket message: {e}")
-            raise
+        
+        logger.debug(f"Sent {total_chunks} audio chunks")
     
     async def start_conversation(self, ws):
-        """CRITICAL FIX: Enhanced conversation startup."""
+        """Start conversation with enhanced initialization."""
         # Store WebSocket reference
         self._ws = ws
-        self.state.stream_sid = getattr(self, 'stream_sid', None)
         
-        # CRITICAL FIX: Mark conversation as started
-        self.conversation_started = True
-        
-        # Start STT immediately
+        # Start STT streaming
         if not self.stt_client.is_streaming:
-            logger.info("Starting STT for conversation with FIXED speech detection")
+            logger.info("Starting STT streaming for conversation")
             await self.stt_client.start_streaming()
         
-        # Send welcome message with proper delay
-        await asyncio.sleep(0.5)  # Increased delay for better setup
-        await self._send_response("Hello! How can I help you today?", ws)
+        # Send welcome message with delay to ensure connection is stable
+        await asyncio.sleep(0.1)
+        await self._send_response("I'm ready to help. What would you like to know?", ws)
     
-    # Replace the cleanup method:
-
     async def _cleanup(self):
-        """Enhanced cleanup with better status reporting."""
+        """Enhanced cleanup with proper session management."""
         try:
-            self.state.call_ended = True
-            self.state.conversation_active = False
+            self.call_ended = True
+            self.conversation_active = False
             
-            logger.info("Stopping infinite streaming session")
+            # Check if we should keep the session alive
+            session_duration = time.time() - self.session_start_time
+            time_since_last_transcription = time.time() - self.last_transcription_time
+            
+            # More aggressive cleanup since call ended
+            logger.info("Call ended - stopping STT session")
             if self.stt_client.is_streaming:
                 await self.stt_client.stop_streaming()
+                await self.stt_client.cleanup()
             
-            # Calculate enhanced stats
-            duration = time.time() - self.state.start_time
+            # Calculate final statistics
+            duration = time.time() - self.session_start_time
             
-            logger.info(f"FINAL SESSION STATS - Duration: {duration:.2f}s")
-            logger.info(f"Audio packets: {self.state.audio_received}, "
-                       f"Total bytes: {self.state.audio_bytes_total}")
-            
-            if hasattr(self.stt_client, 'get_stats'):
-                stats = self.stt_client.get_stats()
-                logger.info(f"STT stats: {stats.get('total_results', 0)} total results, "
-                           f"{stats.get('successful_transcriptions', 0)} transcriptions")
-            
-            logger.info(f"Responses: {self.state.responses_sent}, "
-                       f"Errors: {self.error_count}")
-            logger.info(f"First response sent: {self.first_response_sent}")
-                   
+            # Enhanced logging with conversation metrics
+            logger.info(f"Session cleanup completed. Stats: "
+                       f"Duration: {duration:.2f}s, "
+                       f"Audio packets: {self.audio_received}, "
+                       f"Valid transcriptions: {self.transcriptions}, "
+                       f"Invalid/Echo: {self.invalid_transcriptions + self.echo_detections}, "
+                       f"Responses: {self.responses_sent}, "
+                       f"Echo detections: {self.echo_detections}")
+                       
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-
-    # Replace the health check method with this version:
-
-    async def _check_streaming_health(self):
-        """Monitor streaming health without interrupting the continuous stream."""
-        if not self.stt_client:
-            return
-            
-        # Get streaming stats
-        stats = self.stt_client.get_stats()
-        
-        # Log health status
-        logger.info(f"Streaming health check: {stats.get('active_sessions', 0)} active sessions, "
-                   f"is_streaming={stats.get('is_streaming', False)}")
-        
-        # Only start streaming if not already active
-        if not stats.get('is_streaming', False):
-            logger.info("STT not streaming, starting infinite streaming session")
-            await self.stt_client.start_streaming()
+            logger.error(f"Error during cleanup: {e}", exc_info=True)
     
     def get_stats(self) -> Dict[str, Any]:
-        """CRITICAL FIX: Get enhanced stats with more debugging information."""
-        duration = time.time() - self.state.start_time
+        """Get comprehensive session statistics."""
+        duration = time.time() - self.session_start_time
         
-        return {
+        stats = {
             "call_sid": self.call_sid,
-            "stream_sid": self.state.stream_sid,
+            "stream_sid": self.stream_sid,
             "duration": round(duration, 2),
-            "conversation_active": self.state.conversation_active,
-            "call_ended": self.state.call_ended,
-            
-            # Enhanced metrics
-            "audio_received": self.state.audio_received,
-            "audio_bytes_total": self.state.audio_bytes_total,
-            "interim_results_received": self.state.interim_results_received,
-            "speech_detected": self.state.speech_detected,
-            "transcriptions": self.state.transcriptions,
-            "speech_detected_but_invalid": self.state.speech_detected_but_invalid,
-            "responses_sent": self.state.responses_sent,
-            "error_count": self.error_count,
-            
-            # CRITICAL: Conversation state tracking
-            "conversation_started": self.conversation_started,
-            "first_response_sent": self.first_response_sent,
-            "response_in_progress": self.response_in_progress,
-            
-            # Performance metrics
-            "detection_rate": round(
-                (self.state.speech_detected / max(self.state.audio_received, 1)) * 100, 2
-            ),
-            "transcription_rate": round(
-                (self.state.transcriptions / max(self.state.speech_detected, 1)) * 100, 2
-            ),
-            
-            # States
-            "is_speaking": self.state.is_speaking,
+            "audio_received": self.audio_received,
+            "transcriptions": self.transcriptions,
+            "invalid_transcriptions": self.invalid_transcriptions,
+            "echo_detections": self.echo_detections,
+            "responses_sent": self.responses_sent,
+            "is_speaking": self.is_speaking,
+            "conversation_active": self.conversation_active,
+            "call_ended": self.call_ended,
+            "expecting_speech": self.expecting_speech,
             "project_id": self.project_id,
-            "session_start": self.state.start_time,
-            
-            # Enhanced features
-            "interim_results_enabled": True,
-            "critical_fixes_applied": True,
-            "debug_enabled": self.stt_debug and self.enable_audio_debug,
-            
-            # STT client stats
-            "stt_stats": self.stt_client.get_stats() if self.stt_client else {},
-            
-            # CRITICAL NEW: Health check status
-            "last_health_check": self._last_health_check,
-            "health_check_interval": self._health_check_interval,
-            "next_health_check_in": max(0, self._last_health_check + self._health_check_interval - time.time()),
-            "last_forced_restart": self._last_forced_restart,
-            "forced_restart_interval": self._forced_restart_interval,
-            "next_forced_restart_in": max(0, self._last_forced_restart + self._forced_restart_interval - time.time())
+            "session_start_time": self.session_start_time,
+            "last_transcription_time": self.last_transcription_time,
+            "last_audio_time": self.last_audio_time,
+            "waiting_for_response": self.waiting_for_response,
+            # Add quality metrics
+            "transcription_rate": round(self.transcriptions / max(duration / 60, 1), 2),  # per minute
+            "response_rate": round(self.responses_sent / max(duration / 60, 1), 2),      # per minute
+            "echo_rate": round(self.echo_detections / max(self.audio_received, 1) * 100, 2),  # percentage
         }
+        
+        # Add STT stats if available
+        if hasattr(self.stt_client, 'get_stats'):
+            stats["stt_stats"] = self.stt_client.get_stats()
+        
+        # Add TTS stats if available
+        if hasattr(self.tts_client, 'get_stats'):
+            stats["tts_stats"] = self.tts_client.get_stats()
+        
+        return stats

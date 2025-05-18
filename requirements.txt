@@ -1,91 +1,72 @@
-# Updated Requirements for OpenAI + Pinecone Integration
-# Replace the existing requirements.txt with this updated version
+# requirements.txt
 
-# Core FastAPI and server
-fastapi
-uvicorn[standard]
-python-multipart
-websockets
+# Core dependencies
+aiohttp>=3.8.0
+aiohttp-retry>=2.8.3
+asyncio
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+flask>=2.3.0
+flask-sockets>=0.2.1
+gevent>=22.10.0
+gevent-websocket>=0.10.1
+simple-websocket>=0.10.0
 
-# Async support and performance
-aiohttp
-uvloop
+# Audio processing
+audioread>=3.0.0
+librosa>=0.10.0
+soundfile>=0.12.0
+numpy>=1.24.0
+scipy>=1.10.0
 
-# Google Cloud APIs (STT and TTS)
-google-cloud-speech>=2.21.0,<3.0.0
-google-cloud-texttospeech>=2.14.0,<3.0.0
-google-auth
-google-api-core
-google-cloud-core
-grpcio
-grpcio-status
-protobuf
-google-auth-oauthlib
+# AI/ML components
+llama-index>=0.10.0
+llama-index-core>=0.10.0
+llama-index-embeddings-huggingface>=0.2.0
+llama-index-vector-stores-chroma>=0.1.0
+llama-index-llms-ollama>=0.1.0
+llama-index-readers-file>=0.1.0
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+transformers>=4.30.0
+torch>=2.0.0
 
-# OpenAI and Pinecone (replacing Ollama and Chroma)
-openai>=1.0.0
-pinecone[grpc]>=3.0.0
+# Language processing
+spacy>=3.6.0
+nltk>=3.8.0
+langdetect>=1.0.9
 
-# Audio Processing
-librosa
-soundfile
-numpy
-scipy
-webrtcvad
+# Twilio integration
+twilio>=8.8.0
 
-# Document Processing
-beautifulsoup4
-pdfplumber
-PyMuPDF
-pypdf
-python-docx
-openpyxl
-lxml
+# Google Cloud Speech API - Updated for v2 API with proper protobuf support
+google-cloud-speech>=2.27.0
+google-auth>=2.23.0
+google-api-core>=2.11.0
+google-cloud-core>=2.3.2
+grpcio>=1.56.0
+protobuf>=4.25.0,<5.0.0  # Ensure compatible protobuf version
 
-# Twilio Integration
-twilio
+# Google Cloud TTS
+google-cloud-texttospeech>=2.16.0 
 
-# Data Handling and Utilities
-pydantic
-pydantic-settings
-python-dotenv
-requests
-pandas
-typing-extensions
+# Document processing
+beautifulsoup4>=4.12.0
+pdfplumber>=0.7.0
+PyMuPDF>=1.23.0
+pypdf>=3.12.0
+python-docx>=0.8.11
+openpyxl>=3.1.0
+lxml>=4.9.0
 
-# Caching and Session Management
-redis
-
-# Monitoring and Logging
-structlog
-prometheus-client
-
-# Development and Testing
-pytest
-pytest-asyncio
-
-# Language Processing
-spacy
-nltk
-langdetect
-
-# System and Performance Monitoring
-psutil
-
-# Authentication and Security
-cryptography
-pyjwt
-
-# Additional Utilities
-colorama
-tqdm
-click
-pyaudio
-Pillow
-
-# Optimizations
-ujson
-orjson
-
-# For memory optimization
-memory-profiler
+# Utilities
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+websockets>=11.0.0
+websocket-client>=1.6.0
+pandas>=2.0.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+typing-extensions>=4.7.0
