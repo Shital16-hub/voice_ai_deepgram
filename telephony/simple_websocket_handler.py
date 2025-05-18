@@ -53,30 +53,40 @@ class SimpleWebSocketHandler:
     RESPONSE_TIMEOUT = 3.0        # UPDATED: Reduced timeout for faster responses
     SILENCE_TIMEOUT = 5.0         # CRITICAL: Reduced for faster detection
     
+    # Update the initialization section in __init__ method:
+    
     def __init__(self, call_sid: str, pipeline):
-        """Initialize with CRITICAL FIXES for speech detection."""
+        """Initialize with infinite streaming for uninterrupted speech recognition."""
         self.call_sid = call_sid
         self.pipeline = pipeline
         
         # Get project ID
         self.project_id = self._get_project_id()
         
-        # CRITICAL FIX: Initialize Google Cloud STT v2 with FIXED settings
-        credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        self.stt_client = GoogleCloudStreamingSTT(
-            language="en-US",
-            sample_rate=8000,
-            encoding="MULAW",
-            channels=1,
-            interim_results=True,  # CRITICAL: Enable for better debugging
-            project_id=self.project_id,
-            location="global",
-            credentials_file=credentials_file,
-            enable_vad=True,      # Keep VAD but with proper configuration
-            enable_echo_suppression=False
-        )
+        # UPDATED: Use existing STT from pipeline if available, otherwise create new one
+        if hasattr(pipeline, 'speech_recognizer') and pipeline.speech_recognizer:
+            self.stt_client = pipeline.speech_recognizer
+            logger.info("Using STT client from pipeline")
+        else:
+            # UPDATED: Initialize with infinite streaming STT
+            from speech_to_text.infinite_streaming_stt import InfiniteStreamingSTT
+            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            self.stt_client = InfiniteStreamingSTT(
+                project_id=self.project_id,
+                language="en-US",
+                sample_rate=8000,
+                encoding="MULAW",
+                channels=1,
+                interim_results=True,
+                location="global",
+                credentials_file=credentials_file,
+                # UPDATED: Configure for entire call duration
+                session_max_duration=240,    # 4 minutes per session
+                session_overlap_seconds=30   # 30 second overlap
+            )
+            logger.info(f"Created new infinite streaming STT client")
         
-        # Initialize Google Cloud TTS
+        # Initialize Google Cloud TTS (same as before)
         self.tts_client = GoogleCloudTTS(
             credentials_file=credentials_file,
             voice_name="en-US-Neural2-C",
@@ -88,37 +98,30 @@ class SimpleWebSocketHandler:
             voice_type="NEURAL2"
         )
         
-        # Enhanced state management
+        # Enhanced state management (same as before)
         self.state = SessionState(call_sid=call_sid)
         
         # WebSocket reference for response sending
         self._ws = None
         
-        # CRITICAL FIX: Better response tracking
+        # UPDATED: No forced restarts
         self.last_response_text = ""
         self.response_in_progress = False
-        
-        # Error tracking
         self.error_count = 0
-        
-        # CRITICAL FIX: Enable debug flags
         self.enable_audio_debug = True
         self.stt_debug = True
-        
-        # CRITICAL FIX: Track conversation state for second call issue
         self.conversation_started = False
         self.first_response_sent = False
         
-        # CRITICAL FIX: Health check timer
+        # UPDATED: Remove health check and forced restart timers
+        # Only keep a health check timer for monitoring, not forced restarts
         self._last_health_check = time.time()
-        self._health_check_interval = 10  # UPDATED: Check health more frequently (10 seconds)
-        
-        # CRITICAL NEW FIX: Add forced restart timer
+        self._health_check_interval = 30  # Check health every 30 seconds
         self._last_forced_restart = time.time()
-        self._forced_restart_interval = 30  # Force STT restart every 30 seconds
+        self._forced_restart_interval = 120  # For stats tracking
         
-        logger.info(f"FIXED WebSocket handler initialized - Call: {call_sid}")
-        logger.info(f"CRITICAL FIXES: Interim results enabled, improved VAD, better timeouts")
+        logger.info(f"INFINITE STREAMING WebSocket handler initialized - Call: {call_sid}")
+        logger.info(f"Infinite streaming ensures uninterrupted speech recognition for entire call")
     
     def _get_project_id(self) -> str:
         """Get project ID with minimal overhead."""
@@ -130,38 +133,29 @@ class SimpleWebSocketHandler:
         # Fallback to known project ID
         return "my-tts-project-458404"
     
+    # Replace the _handle_audio method with this version:
+
     async def _handle_audio(self, data: Dict[str, Any], ws):
-        """CRITICAL FIX: Enhanced audio handling with proper echo prevention."""
+        """Process audio with infinite streaming for uninterrupted experience."""
         # Skip if call ended
         if self.state.call_ended:
             return
         
-        # CRITICAL FIX: Add stream renewal based on Google's examples
+        # UPDATED: Simplified health check without forced restarts
         now = time.time()
         if (self._last_health_check + self._health_check_interval < now):
             self._last_health_check = now
-            await self._ensure_streaming_health()
+            await self._check_streaming_health()
         
-        # CRITICAL NEW FIX: Force restart every X seconds to prevent session staleness
-        if (self._last_forced_restart + self._forced_restart_interval < now):
-            self._last_forced_restart = now
-            logger.info("Performing periodic forced restart of STT session")
-            if self.stt_client.is_streaming:
-                await self.stt_client.stop_streaming()
-            await asyncio.sleep(0.2)  # Short delay
-            await self.stt_client.start_streaming()
-            logger.info("Periodic STT restart completed")
-        
-        # CRITICAL FIX: Always ensure STT is running before processing audio
+        # UPDATED: No forced restarts, just ensure streaming is active
         if not self.stt_client.is_streaming:
-            logger.info("STT not streaming - restarting STT session")
+            logger.info("STT not streaming - starting infinite streaming session")
             await self.stt_client.start_streaming()
         
-        # CRITICAL FIX: Echo prevention with safe timeout
+        # Echo prevention with safe timeout (same as before)
         if self.response_in_progress:
-            # Allow audio processing during response generation but only wait up to 0.2 seconds
             if (self.state.last_tts_time and 
-                (time.time() - self.state.last_tts_time) > 0.2):  # UPDATED: Reduced delay for faster responses
+                (time.time() - self.state.last_tts_time) > 0.2):
                 self.response_in_progress = False
                 self.state.is_speaking = False
                 logger.debug("Cleared response_in_progress flag after echo delay timeout")
@@ -176,13 +170,13 @@ class SimpleWebSocketHandler:
         if not payload:
             return
         
-        # Enhanced audio processing with debugging
+        # Enhanced audio processing with debugging (same as before)
         try:
             audio_data = base64.b64decode(payload)
             self.state.audio_received += 1
             self.state.audio_bytes_total += len(audio_data)
             
-            # CRITICAL FIX: Debug audio reception
+            # Debug audio reception
             if self.enable_audio_debug and self.state.audio_received % 50 == 0:
                 logger.info(f"AUDIO DEBUG - Packets: {self.state.audio_received}, "
                           f"Total bytes: {self.state.audio_bytes_total}, "
@@ -192,7 +186,7 @@ class SimpleWebSocketHandler:
             logger.error(f"Error decoding audio: {e}")
             return
         
-        # Process audio with enhanced error handling
+        # UPDATED: Process audio with infinite streaming
         try:
             await self.stt_client.process_audio_chunk(
                 audio_data, 
@@ -201,7 +195,7 @@ class SimpleWebSocketHandler:
         except Exception as e:
             logger.error(f"Error processing audio: {e}")
             self.error_count += 1
-    
+        
     async def _ensure_streaming_health(self):
         """CRITICAL FIX: Ensure streaming session is healthy."""
         if not self.stt_client:
@@ -469,16 +463,17 @@ class SimpleWebSocketHandler:
         await asyncio.sleep(0.5)  # Increased delay for better setup
         await self._send_response("Hello! How can I help you today?", ws)
     
+    # Replace the cleanup method:
+
     async def _cleanup(self):
-        """CRITICAL FIX: Enhanced cleanup with better statistics."""
+        """Enhanced cleanup with better status reporting."""
         try:
             self.state.call_ended = True
             self.state.conversation_active = False
             
-            logger.info("Stopping STT session")
+            logger.info("Stopping infinite streaming session")
             if self.stt_client.is_streaming:
                 await self.stt_client.stop_streaming()
-                await self.stt_client.cleanup()
             
             # Calculate enhanced stats
             duration = time.time() - self.state.start_time
@@ -486,16 +481,37 @@ class SimpleWebSocketHandler:
             logger.info(f"FINAL SESSION STATS - Duration: {duration:.2f}s")
             logger.info(f"Audio packets: {self.state.audio_received}, "
                        f"Total bytes: {self.state.audio_bytes_total}")
-            logger.info(f"Interim results: {self.state.interim_results_received}")
-            logger.info(f"Speech detected: {self.state.speech_detected}, "
-                       f"Valid transcriptions: {self.state.transcriptions}, "
-                       f"Invalid: {self.state.speech_detected_but_invalid}")
+            
+            if hasattr(self.stt_client, 'get_stats'):
+                stats = self.stt_client.get_stats()
+                logger.info(f"STT stats: {stats.get('total_results', 0)} total results, "
+                           f"{stats.get('successful_transcriptions', 0)} transcriptions")
+            
             logger.info(f"Responses: {self.state.responses_sent}, "
                        f"Errors: {self.error_count}")
             logger.info(f"First response sent: {self.first_response_sent}")
-                       
+                   
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
+
+    # Replace the health check method with this version:
+
+    async def _check_streaming_health(self):
+        """Monitor streaming health without interrupting the continuous stream."""
+        if not self.stt_client:
+            return
+            
+        # Get streaming stats
+        stats = self.stt_client.get_stats()
+        
+        # Log health status
+        logger.info(f"Streaming health check: {stats.get('active_sessions', 0)} active sessions, "
+                   f"is_streaming={stats.get('is_streaming', False)}")
+        
+        # Only start streaming if not already active
+        if not stats.get('is_streaming', False):
+            logger.info("STT not streaming, starting infinite streaming session")
+            await self.stt_client.start_streaming()
     
     def get_stats(self) -> Dict[str, Any]:
         """CRITICAL FIX: Get enhanced stats with more debugging information."""

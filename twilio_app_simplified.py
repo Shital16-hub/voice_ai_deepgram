@@ -53,10 +53,10 @@ base_url = None
 active_calls = {}
 
 async def initialize_system():
-    """Initialize the Voice AI system with OpenAI + Pinecone."""
+    """Initialize the Voice AI system with OpenAI + Pinecone and infinite streaming."""
     global voice_ai_pipeline, base_url
     
-    logger.info("Initializing Voice AI with OpenAI + Pinecone for ultra low latency...")
+    logger.info("Initializing Voice AI with OpenAI + Pinecone and infinite streaming...")
     
     # Validate required environment variables
     base_url = os.getenv('BASE_URL')
@@ -76,12 +76,14 @@ async def initialize_system():
     
     logger.info(f"Using BASE_URL: {base_url}")
     
-    # Initialize Voice AI Agent with OpenAI + Pinecone
+    # Initialize Voice AI Agent with OpenAI + Pinecone and infinite streaming
     agent = VoiceAIAgent(
         storage_dir='./storage',
         openai_model='gpt-4o-mini',  # Fast OpenAI model
-        llm_temperature=0.7,  # UPDATED: Increased for more conversational responses
-        credentials_file=google_creds
+        llm_temperature=0.7,  # For more conversational responses
+        credentials_file=google_creds,
+        # UPDATED: Enable infinite streaming
+        use_infinite_streaming=True
     )
     await agent.init()
     
@@ -95,7 +97,7 @@ async def initialize_system():
     )
     await tts.init()
     
-    # Create pipeline with OpenAI + Pinecone components
+    # Create pipeline with OpenAI + Pinecone components and infinite streaming
     voice_ai_pipeline = VoiceAIAgentPipeline(
         speech_recognizer=agent.speech_recognizer,
         conversation_manager=agent.conversation_manager,
@@ -103,8 +105,7 @@ async def initialize_system():
         tts_integration=tts
     )
     
-    logger.info("Ultra low latency system initialization completed with OpenAI + Pinecone")
-
+    logger.info("System initialization completed with infinite streaming for uninterrupted calls")
 async def cleanup_system():
     """Cleanup system resources."""
     logger.info("Cleaning up system resources...")

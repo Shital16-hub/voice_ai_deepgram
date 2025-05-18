@@ -36,19 +36,21 @@ class VoiceAIAgent:
     def __init__(
         self,
         storage_dir: str = './storage',
-        openai_model: str = 'gpt-4o-mini',  # Fast OpenAI model
-        llm_temperature: float = 0.7,  # UPDATED: Increased for more engaging responses
+        openai_model: str = 'gpt-4o-mini',
+        llm_temperature: float = 0.7,
         credentials_file: Optional[str] = None,
+        use_infinite_streaming: bool = True,  # UPDATED: Add infinite streaming option
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with CRITICAL FIXES.
+        Initialize the Voice AI Agent with infinite streaming support.
         """
         self.storage_dir = storage_dir
         self.openai_model = openai_model
         self.llm_temperature = llm_temperature
+        self.use_infinite_streaming = use_infinite_streaming  # UPDATED: Store option
         
-        # Credentials handling
+        # Credentials handling (same as before)
         self.credentials_file = credentials_file
         if not self.credentials_file:
             # Try common locations
@@ -93,7 +95,7 @@ class VoiceAIAgent:
         self._initialized = False
         self._initialization_error = None
         
-        logger.info("VoiceAIAgent initialized for telephony with OpenAI + Pinecone")
+        logger.info(f"VoiceAIAgent initialized with {'infinite streaming' if use_infinite_streaming else 'standard STT'}")
     
     def _verify_api_keys(self):
         """CRITICAL FIX: Verify API keys with proper error messages."""
@@ -142,11 +144,11 @@ class VoiceAIAgent:
         )
     
     async def init(self):
-        """CRITICAL FIX: Initialize with proper order, retry logic, and error handling."""
+        """UPDATED: Initialize with infinite streaming support."""
         if self._initialized:
             return
         
-        logger.info("Initializing Voice AI Agent with OpenAI + Pinecone...")
+        logger.info(f"Initializing Voice AI Agent with {'infinite streaming' if self.use_infinite_streaming else 'standard STT'}...")
         
         try:
             # Set the environment variable for Google Cloud clients
@@ -154,18 +156,38 @@ class VoiceAIAgent:
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_file
                 logger.info(f"Set GOOGLE_APPLICATION_CREDENTIALS to: {self.credentials_file}")
             
-            # CRITICAL FIX: 1. Initialize speech recognizer first (fastest)
+            # UPDATED: Initialize speech recognizer based on mode
             logger.info("Step 1: Initializing Google Cloud STT...")
-            self.speech_recognizer = GoogleCloudStreamingSTT(
-                language=self.stt_language,
-                sample_rate=8000,
-                encoding="MULAW",
-                channels=1,
-                interim_results=True,  # CRITICAL: Enable for debugging
-                project_id=self.project_id,
-                location="global",
-                credentials_file=self.credentials_file
-            )
+            
+            if self.use_infinite_streaming:
+                # Use infinite streaming implementation
+                from speech_to_text.infinite_streaming_stt import InfiniteStreamingSTT
+                self.speech_recognizer = InfiniteStreamingSTT(
+                    project_id=self.project_id,
+                    language=self.stt_language,
+                    sample_rate=8000,
+                    encoding="MULAW",
+                    channels=1,
+                    interim_results=True,
+                    location="global",
+                    credentials_file=self.credentials_file,
+                    session_max_duration=240,    # 4 minutes per session
+                    session_overlap_seconds=30   # 30 second overlap
+                )
+                logger.info("✅ Infinite streaming STT initialized")
+            else:
+                # Use standard implementation
+                self.speech_recognizer = GoogleCloudStreamingSTT(
+                    language=self.stt_language,
+                    sample_rate=8000,
+                    encoding="MULAW",
+                    channels=1,
+                    interim_results=True,  # CRITICAL: Enable for debugging
+                    project_id=self.project_id,
+                    location="global",
+                    credentials_file=self.credentials_file
+                )
+                logger.info("✅ Standard Google Cloud STT initialized")
             
             # Initialize STT integration
             self.stt_integration = STTIntegration(
@@ -173,7 +195,7 @@ class VoiceAIAgent:
                 language=self.stt_language
             )
             await self.stt_integration.init(project_id=self.project_id)
-            logger.info("✅ Google Cloud STT initialized")
+            logger.info("✅ STT integration initialized")
             
             # CRITICAL FIX: 2. Initialize embeddings with retry
             logger.info("Step 2: Initializing OpenAI embeddings...")
@@ -272,7 +294,7 @@ class VoiceAIAgent:
             
             # Mark as initialized
             self._initialized = True
-            logger.info("🎉 Voice AI Agent initialization complete with OpenAI + Pinecone")
+            logger.info(f"🎉 Voice AI Agent initialization complete with {'infinite streaming' if self.use_infinite_streaming else 'standard STT'}")
             
             # CRITICAL FIX: Log final status
             await self._log_initialization_status()
@@ -293,6 +315,7 @@ class VoiceAIAgent:
             logger.info(f"  - Documents in knowledge base: {doc_count}")
             logger.info(f"  - OpenAI model: {self.openai_model}")
             logger.info(f"  - TTS voice: {self.tts_voice_name}")
+            logger.info(f"  - Streaming mode: {'Infinite' if self.use_infinite_streaming else 'Standard'}")
             logger.info(f"  - Ready for telephony calls")
             
         except Exception as e:
@@ -424,13 +447,15 @@ class VoiceAIAgent:
             )
             stats["engine_type"] = "openai_pinecone"
             stats["initialization_status"] = "completed"
+            stats["streaming_mode"] = "infinite" if self.use_infinite_streaming else "standard"
             return stats
         except Exception as e:
             logger.error(f"Error getting KB stats: {e}")
             return {
                 "error": str(e),
                 "engine_type": "openai_pinecone",
-                "initialization_status": "error"
+                "initialization_status": "error",
+                "streaming_mode": "infinite" if self.use_infinite_streaming else "standard"
             }
     
     @property
