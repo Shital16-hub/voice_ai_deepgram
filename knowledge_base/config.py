@@ -4,16 +4,12 @@ Configuration settings for the knowledge base component.
 import os
 from typing import Dict, Any, List, Optional
 
-# Vector database settings
-VECTOR_DB_HOST = os.getenv("VECTOR_DB_HOST", "localhost")
-VECTOR_DB_PORT = int(os.getenv("VECTOR_DB_PORT", "6333"))
-VECTOR_DB_GRPC_PORT = int(os.getenv("VECTOR_DB_GRPC_PORT", "6334"))
-VECTOR_DB_COLLECTION = os.getenv("VECTOR_DB_COLLECTION", "company_knowledge")
-VECTOR_DIMENSION = 384  # For sentence-transformers/all-MiniLM-L6-v2
+# Vector database settings - Updated for Pinecone
+VECTOR_DIMENSION = 1536  # For OpenAI embeddings (text-embedding-ada-002)
 
-# Embedding model settings
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2")  # Smaller model
-EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")  # Set to "cuda" for GPU
+# Embedding model settings - Updated for OpenAI
+EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002")
+EMBEDDING_DEVICE = "cpu"  # OpenAI is cloud-based, but keeping this for compatibility
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 
 # Document processing settings
@@ -95,11 +91,16 @@ def get_vector_db_config() -> Dict[str, Any]:
     Returns:
         Dictionary with vector database configuration
     """
+    # Import Pinecone config for consistency
+    from knowledge_base.openai_pinecone_config import get_pinecone_config
+    pinecone_config = get_pinecone_config()
+    
+    # Combine configurations
     return {
-        "host": VECTOR_DB_HOST,
-        "port": VECTOR_DB_PORT,
-        "grpc_port": VECTOR_DB_GRPC_PORT,
-        "collection_name": VECTOR_DB_COLLECTION,
+        "api_key": pinecone_config["api_key"],
+        "environment": pinecone_config["environment"],
+        "index_name": pinecone_config["index_name"],
+        "namespace": pinecone_config["namespace"],
         "vector_size": VECTOR_DIMENSION
     }
 

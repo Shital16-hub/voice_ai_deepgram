@@ -1,5 +1,5 @@
 """
-Query engine for retrieving and generating information using LlamaIndex.
+Query engine for retrieving and generating information using LlamaIndex with OpenAI.
 """
 import logging
 import asyncio
@@ -15,14 +15,15 @@ from llama_index.core import Settings
 from knowledge_base.config import get_retriever_config
 from knowledge_base.llama_index.index_manager import IndexManager
 from knowledge_base.llama_index.schema import Document
-from knowledge_base.llama_index.llm_setup import get_ollama_llm, format_system_prompt, create_chat_messages
+from knowledge_base.llama_index.llm_setup import get_openai_llm, format_system_prompt, create_chat_messages
+from knowledge_base.openai_pinecone_config import get_openai_config
 
 logger = logging.getLogger(__name__)
 
 
 class QueryEngine:
     """
-    Retrieve and generate information from the knowledge base using LlamaIndex.
+    Retrieve and generate information from the knowledge base using LlamaIndex with OpenAI.
     """
 
     def __init__(
@@ -34,12 +35,12 @@ class QueryEngine:
         llm_max_tokens: int = 1024
     ):
         """
-        Initialize QueryEngine.
+        Initialize QueryEngine with OpenAI.
 
         Args:
             index_manager: IndexManager instance
             config: Optional configuration dictionary
-            llm_model_name: Optional LLM model name
+            llm_model_name: Optional OpenAI model name
             llm_temperature: Temperature for sampling
             llm_max_tokens: Maximum tokens to generate
         """
@@ -47,7 +48,10 @@ class QueryEngine:
         self.config = config or get_retriever_config()
         self.top_k = self.config["top_k"]
         self.min_score = self.config["min_score"]
-        self.llm_model_name = llm_model_name
+        
+        # Get OpenAI config
+        openai_config = get_openai_config()
+        self.llm_model_name = llm_model_name or openai_config["model"]
         self.llm_temperature = llm_temperature
         self.llm_max_tokens = llm_max_tokens
 
@@ -56,17 +60,18 @@ class QueryEngine:
         self.llm = None
         self.is_initialized = False
 
-        logger.info(f"Initialized QueryEngine with top_k={self.top_k}, min_score={self.min_score}")
+        logger.info(f"Initialized QueryEngine with OpenAI - top_k={self.top_k}, min_score={self.min_score}")
 
     async def init(self):
-        """Initialize the query engine."""
+        """Initialize the query engine with OpenAI."""
         if self.is_initialized:
             return
 
         if not self.index_manager.is_initialized:
             await self.index_manager.init()
 
-        self.llm = get_ollama_llm(
+        # Initialize OpenAI LLM
+        self.llm = get_openai_llm(
             model_name=self.llm_model_name,
             temperature=self.llm_temperature,
             max_tokens=self.llm_max_tokens
@@ -93,7 +98,7 @@ class QueryEngine:
         )
 
         self.is_initialized = True
-        logger.info("Query engine initialized with LlamaIndex LLM integration")
+        logger.info("Query engine initialized with OpenAI LLM integration")
 
     async def retrieve(
         self,
@@ -103,7 +108,7 @@ class QueryEngine:
         filter_metadata: Optional[Dict[str, Any]] = None
     ) -> List[Document]:
         """
-        Retrieve relevant documents for a query.
+        Retrieve relevant documents for a query using Pinecone.
         """
         if not self.is_initialized:
             await self.init()
@@ -218,7 +223,7 @@ class QueryEngine:
 
     async def query(self, query_text: str) -> Dict[str, Any]:
         """
-        Query the knowledge base using LlamaIndex LLM.
+        Query the knowledge base using OpenAI LLM.
         """
         if not self.is_initialized:
             await self.init()
@@ -267,7 +272,7 @@ class QueryEngine:
         chat_history: Optional[List[Dict[str, str]]] = None
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Query the knowledge base with streaming response.
+        Query the knowledge base with streaming response using OpenAI.
         Optimized for real-time word-by-word output to TTS.
         """
         if not self.is_initialized:
@@ -298,18 +303,23 @@ class QueryEngine:
 
             try:
                 # Stream response in smallest possible chunks for immediate TTS processing
+                # Use OpenAI streaming capabilities
                 streaming_response = await self.llm.astream_chat(messages)
                 
                 async for chunk in streaming_response:
-                    # Get just the text delta/chunk - this is typically word by word or smaller
-                    chunk_text = chunk.delta if hasattr(chunk, 'delta') else chunk.content
+                    # Get just the text delta/chunk
+                    chunk_text = ""
+                    if hasattr(chunk, 'delta'):
+                        if hasattr(chunk.delta, 'content') and chunk.delta.content:
+                            chunk_text = chunk.delta.content
+                    elif hasattr(chunk, 'content') and chunk.content:
+                        chunk_text = chunk.content
                     
                     # Only process non-empty chunks
                     if chunk_text:
                         full_response += chunk_text
                         
                         # Immediately yield each chunk for real-time TTS processing
-                        # No batching or delaying of chunks
                         yield {
                             "chunk": chunk_text,
                             "done": False,

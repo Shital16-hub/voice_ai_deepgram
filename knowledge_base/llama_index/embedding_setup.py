@@ -1,18 +1,20 @@
 """
-Embedding model setup for LlamaIndex.
+Embedding model setup for LlamaIndex with OpenAI.
 """
 import logging
+import os
 from typing import Dict, Optional, Any
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core.embeddings import BaseEmbedding
 
 from knowledge_base.config import get_embedding_config
+from knowledge_base.openai_pinecone_config import get_openai_config
 
 logger = logging.getLogger(__name__)
 
 def get_embedding_model(config: Optional[Dict[str, Any]] = None) -> BaseEmbedding:
     """
-    Get the embedding model for document indexing and querying.
+    Get the OpenAI embedding model for document indexing and querying.
     
     Args:
         config: Optional configuration dictionary
@@ -24,21 +26,30 @@ def get_embedding_model(config: Optional[Dict[str, Any]] = None) -> BaseEmbeddin
     if config is None:
         config = get_embedding_config()
     
-    model_name = config["model_name"]
-    device = config["device"]
+    # Get OpenAI configuration
+    openai_config = get_openai_config()
+    
+    # Use OpenAI config for embedding model
+    embed_model_name = openai_config["embedding_model"]
+    api_key = openai_config["api_key"]
+    
+    if not api_key:
+        raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable.")
     
     try:
-        logger.info(f"Initializing embedding model: {model_name} on {device}")
+        logger.info(f"Initializing OpenAI embedding model: {embed_model_name}")
         
-        # Create the HuggingFace embedding model
-        embed_model = HuggingFaceEmbedding(
-            model_name=model_name,
-            device=device,
-            cache_folder=None,  # Use default cache
-            embed_batch_size=config.get("batch_size", 32)
+        # Create the OpenAI embedding model
+        embed_model = OpenAIEmbedding(
+            model=embed_model_name,
+            api_key=api_key,
+            dimensions=config.get("vector_size", 1536),
+            api_base=openai_config.get("api_base"),
+            api_type=openai_config.get("api_type"),
+            api_version=openai_config.get("api_version")
         )
         
-        logger.info(f"Successfully initialized embedding model: {model_name}")
+        logger.info(f"Successfully initialized OpenAI embedding model: {embed_model_name}")
         return embed_model
         
     except ImportError as e:

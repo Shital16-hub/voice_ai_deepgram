@@ -1,126 +1,122 @@
 """
-LLM setup for LlamaIndex integration with Ollama.
+LLM setup for LlamaIndex integration with OpenAI.
 """
 import logging
 import os
 from typing import Dict, Any, Optional, List
 
-from llama_index.llms.ollama import Ollama
+from llama_index.llms.openai import OpenAI
 from llama_index.core import Settings
 from llama_index.core.llms import ChatMessage, MessageRole
 
+from knowledge_base.openai_pinecone_config import get_openai_config
+
 logger = logging.getLogger(__name__)
 
-# Default model configuration
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b-instruct-v0.2-q4_0")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "60"))  # Increased to 60 seconds
-
-# LLM parameters
-DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-DEFAULT_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
-DEFAULT_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "4096"))
-
-# Add parallel processing flag
-PARALLEL_PROCESSING = os.getenv("PARALLEL_PROCESSING", "True").lower() == "true"
-
-def check_ollama_availability(base_url: str = OLLAMA_BASE_URL) -> bool:
+def check_openai_availability(api_key: Optional[str] = None) -> bool:
     """
-    Check if Ollama is running and accessible.
+    Check if OpenAI API is accessible and properly configured.
     
     Args:
-        base_url: Ollama API base URL
+        api_key: OpenAI API key
         
     Returns:
-        True if Ollama is available
+        True if OpenAI API is available
     """
-    import requests
+    import openai
+    
     try:
-        response = requests.get(f"{base_url}/api/tags")
-        return response.status_code == 200
+        # Set up API key
+        local_api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not local_api_key:
+            logger.error("OpenAI API key not provided")
+            return False
+        
+        # Create a simple client to test API access
+        client = openai.OpenAI(api_key=local_api_key)
+        models = client.models.list()
+        
+        return len(models.data) > 0
     except Exception as e:
-        logger.error(f"Ollama not available: {e}")
+        logger.error(f"OpenAI not available: {e}")
         return False
 
-def get_ollama_llm(
+def get_openai_llm(
     model_name: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     **kwargs
-) -> Ollama:
+) -> OpenAI:
     """
-    Get Ollama LLM for LlamaIndex integration.
+    Get OpenAI LLM for LlamaIndex integration.
     
     Args:
-        model_name: Model name to use (defaults to environment or mistral:7b-instruct)
+        model_name: Model name to use (defaults to environment or gpt-3.5-turbo)
         temperature: Sampling temperature (0.0 to 1.0)
         max_tokens: Maximum tokens to generate
-        **kwargs: Additional parameters to pass to Ollama
+        **kwargs: Additional parameters to pass to OpenAI
         
     Returns:
-        Configured Ollama LLM
+        Configured OpenAI LLM
     """
-    # Get parameters, with fallbacks to defaults
-    model = model_name or DEFAULT_MODEL
-    base_url = kwargs.pop("base_url", OLLAMA_BASE_URL)
-    request_timeout = kwargs.pop("request_timeout", OLLAMA_TIMEOUT)
+    # Get OpenAI config
+    openai_config = get_openai_config()
+    
+    # Get parameters with fallbacks to config values
+    model = model_name or openai_config["model"]
+    api_key = kwargs.pop("api_key", openai_config["api_key"])
+    api_base = kwargs.pop("api_base", openai_config["api_base"])
+    api_type = kwargs.pop("api_type", openai_config["api_type"])
+    api_version = kwargs.pop("api_version", openai_config["api_version"])
 
-    # Check if Ollama is available
-    if not check_ollama_availability(base_url):
-        raise ValueError(f"Ollama not available at {base_url}. Please ensure Ollama is running.")
+    # Check if OpenAI is available
+    if not check_openai_availability(api_key):
+        raise ValueError(f"OpenAI API not available. Please check your API key and connection.")
     
     # Build parameters
     params = {
-        "temperature": temperature if temperature is not None else DEFAULT_TEMPERATURE,
-        "max_tokens": max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS,
+        "temperature": temperature if temperature is not None else openai_config["temperature"],
+        "max_tokens": max_tokens if max_tokens is not None else openai_config["max_tokens"],
         **kwargs
     }
     
     try:
-        # Check if model exists
-        import requests
-        model_check = requests.post(f"{base_url}/api/show", json={"name": model})
-        if model_check.status_code != 200:
-            # Model doesn't exist, try to pull it
-            logger.warning(f"Model {model} not found locally. Attempting to pull...")
-            pull_response = requests.post(f"{base_url}/api/pull", json={"name": model})
-            if pull_response.status_code != 200:
-                raise ValueError(f"Failed to pull model {model}. Please pull it manually.")
-            
-        # Initialize Ollama LLM
-        ollama_llm = Ollama(
+        # Initialize OpenAI LLM
+        openai_llm = OpenAI(
             model=model,
-            base_url=base_url,
-            request_timeout=request_timeout,  # Pass the timeout explicitly
+            api_key=api_key,
+            api_base=api_base if api_base else None,
+            api_type=api_type,
+            api_version=api_version,
             **params
         )
         
-        logger.info(f"Initialized Ollama LLM with model: {model}, timeout: {request_timeout}s")
-        return ollama_llm
+        logger.info(f"Initialized OpenAI LLM with model: {model}")
+        return openai_llm
         
     except Exception as e:
-        logger.error(f"Error initializing Ollama LLM: {e}")
+        logger.error(f"Error initializing OpenAI LLM: {e}")
         raise
 
-def setup_global_llm(model_name: Optional[str] = None, **kwargs) -> Ollama:
+def setup_global_llm(model_name: Optional[str] = None, **kwargs) -> OpenAI:
     """
-    Set up LlamaIndex to use Ollama LLM globally.
+    Set up LlamaIndex to use OpenAI LLM globally.
     
     Args:
         model_name: Model name to use
-        **kwargs: Additional parameters to pass to Ollama
+        **kwargs: Additional parameters to pass to OpenAI
         
     Returns:
-        The configured Ollama LLM instance
+        The configured OpenAI LLM instance
     """
-    # Get Ollama LLM
-    ollama_llm = get_ollama_llm(model_name, **kwargs)
+    # Get OpenAI LLM
+    openai_llm = get_openai_llm(model_name, **kwargs)
     
     # Set as global LLM
-    Settings.llm = ollama_llm
+    Settings.llm = openai_llm
     
-    logger.info(f"Set Ollama LLM as global LlamaIndex LLM with model: {ollama_llm.model}")
-    return ollama_llm
+    logger.info(f"Set OpenAI LLM as global LlamaIndex LLM with model: {openai_llm.model}")
+    return openai_llm
 
 def format_system_prompt(
     base_prompt: str,

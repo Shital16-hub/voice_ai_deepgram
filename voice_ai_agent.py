@@ -1,6 +1,5 @@
 """
-Voice AI Agent main class updated to pass credentials file to STT component.
-This ensures both STT and TTS use the same credentials handling approach.
+Voice AI Agent main class updated to use OpenAI and Pinecone.
 """
 import os
 import logging
@@ -20,32 +19,56 @@ from knowledge_base.llama_index.query_engine import QueryEngine
 # Google Cloud TTS imports
 from text_to_speech.google_cloud_tts import GoogleCloudTTS
 
-# Ensure project ID is set
-if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
-    os.environ["GOOGLE_CLOUD_PROJECT"] = "my-tts-project-458404"
+# Import OpenAI and Pinecone configurations
+from knowledge_base.openai_pinecone_config import get_openai_config, get_pinecone_config
 
 logger = logging.getLogger(__name__)
 
 class VoiceAIAgent:
-    """Main Voice AI Agent class optimized for telephony with consistent credentials handling."""
+    """Main Voice AI Agent class using OpenAI and Pinecone with Google Cloud services."""
     
     def __init__(
         self,
         storage_dir: str = './storage',
-        model_name: str = 'mistral:7b-instruct-v0.2-q4_0',
+        model_name: Optional[str] = None,  # OpenAI model name
         llm_temperature: float = 0.7,
-        credentials_file: Optional[str] = None,  # Added credentials_file parameter
+        credentials_file: Optional[str] = None,  # For Google Cloud services
+        openai_api_key: Optional[str] = None,
+        pinecone_api_key: Optional[str] = None,
         **kwargs
     ):
         """
-        Initialize the Voice AI Agent with Google Cloud STT v2 and TTS.
-        Both components now use the same credentials handling approach.
+        Initialize the Voice AI Agent with OpenAI, Pinecone, and Google Cloud services.
+        
+        Args:
+            storage_dir: Directory for local storage
+            model_name: OpenAI model name (defaults to config)
+            llm_temperature: Temperature for sampling
+            credentials_file: Path to Google Cloud credentials file
+            openai_api_key: OpenAI API key (defaults to environment)
+            pinecone_api_key: Pinecone API key (defaults to environment)
+            **kwargs: Additional parameters
         """
         self.storage_dir = storage_dir
-        self.model_name = model_name
+        
+        # Get OpenAI config
+        openai_config = get_openai_config()
+        self.model_name = model_name or openai_config.get("model")
         self.llm_temperature = llm_temperature
         
-        # Credentials handling - find the file if not provided
+        # Set API keys if provided
+        if openai_api_key:
+            os.environ["OPENAI_API_KEY"] = openai_api_key
+        if pinecone_api_key:
+            os.environ["PINECONE_API_KEY"] = pinecone_api_key
+        
+        # Validate API keys
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable.")
+        if not os.environ.get("PINECONE_API_KEY"):
+            raise ValueError("Pinecone API key is required. Set PINECONE_API_KEY environment variable.")
+        
+        # Google Cloud credentials handling
         self.credentials_file = credentials_file
         if not self.credentials_file:
             # Try common locations
@@ -68,7 +91,7 @@ class VoiceAIAgent:
         self.tts_voice_gender = kwargs.get('tts_voice_gender', os.getenv('TTS_VOICE_GENDER', 'NEUTRAL'))
         self.tts_language_code = kwargs.get('tts_language_code', os.getenv('TTS_LANGUAGE_CODE', 'en-US'))
         
-        # Get project ID from environment or credentials file
+        # Get project ID from environment or credentials file for Google Cloud services
         self.project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
         
         # If not in environment, try to extract from credentials file
@@ -84,10 +107,10 @@ class VoiceAIAgent:
             except Exception as e:
                 logger.error(f"Error reading credentials file: {e}")
         
+        # Validate Google Cloud project ID
         if not self.project_id:
             raise ValueError(
-                "Google Cloud project ID is required. Set GOOGLE_CLOUD_PROJECT environment variable "
-                "or ensure your credentials file contains a project_id field."
+                "Google Cloud project ID is required for STT/TTS. Set GOOGLE_CLOUD_PROJECT environment variable."
             )
         
         # Set the environment variable for Google Cloud clients
@@ -102,11 +125,11 @@ class VoiceAIAgent:
         self.query_engine = None
         self.tts_client = None
         
-        logger.info("VoiceAIAgent initialized for telephony with consistent credentials handling")
+        logger.info("VoiceAIAgent initialized with OpenAI, Pinecone, and Google Cloud services")
         
     async def init(self):
-        """Initialize all components with optimal telephony settings and consistent credentials."""
-        logger.info("Initializing Voice AI Agent components with Google Cloud STT v2 and TTS...")
+        """Initialize all components with OpenAI, Pinecone, and Google Cloud services."""
+        logger.info("Initializing Voice AI Agent components...")
         
         # Initialize speech recognizer with Google Cloud v2 and explicit credentials
         self.speech_recognizer = GoogleCloudStreamingSTT(
@@ -127,23 +150,23 @@ class VoiceAIAgent:
         )
         await self.stt_integration.init(project_id=self.project_id)
         
-        # Initialize document store and index manager
+        # Initialize document store and index manager with Pinecone
         doc_store = DocumentStore()
         index_manager = IndexManager(storage_dir=self.storage_dir)
         await index_manager.init()
         
-        # Initialize query engine
+        # Initialize query engine with OpenAI
         self.query_engine = QueryEngine(
             index_manager=index_manager, 
-            llm_model_name=self.model_name,
+            llm_model_name=self.model_name,  # OpenAI model name
             llm_temperature=self.llm_temperature
         )
         await self.query_engine.init()
         
-        # Initialize conversation manager (skip greeting for telephony)
+        # Initialize conversation manager with OpenAI
         self.conversation_manager = ConversationManager(
             query_engine=self.query_engine,
-            llm_model_name=self.model_name,
+            llm_model_name=self.model_name,  # OpenAI model name
             llm_temperature=self.llm_temperature,
             skip_greeting=True  # Better for telephony
         )
@@ -170,7 +193,7 @@ class VoiceAIAgent:
         
         # Mark as initialized
         self._initialized = True
-        logger.info("Voice AI Agent initialization complete (optimized for telephony)")
+        logger.info("Voice AI Agent initialization complete with OpenAI, Pinecone, and Google Cloud services")
         
     async def process_audio(
         self,
@@ -178,7 +201,7 @@ class VoiceAIAgent:
         callback: Optional[Callable[[Any], Awaitable[None]]] = None
     ) -> Dict[str, Any]:
         """
-        Process audio data with ZERO preprocessing - pass directly to Google Cloud STT v2.
+        Process audio data with Google Cloud STT and OpenAI for response generation.
         """
         if not self.initialized:
             raise RuntimeError("Voice AI Agent not initialized")
@@ -191,7 +214,7 @@ class VoiceAIAgent:
             transcription = result["transcription"]
             logger.info(f"Valid transcription: {transcription}")
             
-            # Process through conversation manager
+            # Process through conversation manager (using OpenAI)
             response = await self.conversation_manager.handle_user_input(transcription)
             
             # Generate speech using Google Cloud TTS
