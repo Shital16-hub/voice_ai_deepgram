@@ -1,6 +1,8 @@
 """
 Infinite streaming implementation for Google Cloud Speech-to-Text v2.
 Provides uninterrupted streaming for entire call duration without session restarts.
+
+FIXED VERSION: Properly handles event loop in threading context
 """
 import os
 import asyncio
@@ -127,6 +129,9 @@ class InfiniteStreamingSTT:
         self.session_starts = 0
         self.session_ends = 0
         
+        # CRITICAL FIX: Store main event loop reference for thread safety
+        self._main_event_loop = None
+        
         logger.info(f"Initialized InfiniteStreamingSTT with {session_max_duration}s sessions and {session_overlap_seconds}s overlap")
     
     def _initialize_client(self):
@@ -220,6 +225,20 @@ class InfiniteStreamingSTT:
         logger.info("Starting infinite streaming session")
         self.is_streaming = True
         self.stop_event.clear()
+        
+        # CRITICAL FIX: Store reference to current event loop for thread safety
+        try:
+            self._main_event_loop = asyncio.get_running_loop()
+            logger.info("Captured main event loop for thread safety")
+        except RuntimeError:
+            logger.warning("Could not get running event loop, async operations from threads may fail")
+            # Try to get or create an event loop as fallback
+            try:
+                self._main_event_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                # If we're not in the main thread, this might still fail
+                logger.error("Failed to get event loop - async operations from threads will fail")
+                self._main_event_loop = None
         
         # Reset metrics
         self.total_audio_chunks = 0
@@ -371,10 +390,13 @@ class InfiniteStreamingSTT:
                         session_info["results_received"] += 1
                         
                         # Add to result queue for processing
-                        asyncio.run_coroutine_threadsafe(
-                            self.result_queue.put(streaming_result),
-                            asyncio.get_event_loop()
-                        )
+                        if self._main_event_loop:
+                            asyncio.run_coroutine_threadsafe(
+                                self.result_queue.put(streaming_result),
+                                self._main_event_loop
+                            )
+                        else:
+                            logger.error("Cannot put result in queue - no event loop available")
                 
                 # Process voice activity events (for debugging)
                 if hasattr(response, 'speech_event_type') and response.speech_event_type:
@@ -391,11 +413,14 @@ class InfiniteStreamingSTT:
             session_info["active"] = False
             self.session_ends += 1
             
-            # Remove session after a delay to ensure smooth transition
-            asyncio.run_coroutine_threadsafe(
-                self._cleanup_session(session_id), 
-                asyncio.get_event_loop()
-            )
+            # CRITICAL FIX: Use stored event loop reference for cleanup
+            if self._main_event_loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._cleanup_session(session_id), 
+                    self._main_event_loop
+                )
+            else:
+                logger.error(f"Cannot clean up session {session_id} - no event loop available")
     
     async def _cleanup_session(self, session_id: str) -> None:
         """Clean up completed session after delay to ensure smooth transition."""
@@ -646,7 +671,8 @@ class InfiniteStreamingSTT:
                     "last_result": time.time() - (s["last_result_time"] or time.time())
                 }
                 for s in self.active_sessions
-            ]
+            ],
+            "event_loop_available": self._main_event_loop is not None
         }
         
         # Add timing information

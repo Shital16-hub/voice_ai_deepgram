@@ -314,8 +314,9 @@ class SimpleWebSocketHandler:
             logger.debug("Cleared response_in_progress flag after processing")
     
     async def _get_knowledge_response(self, transcription: str) -> Optional[str]:
-        """CRITICAL FIX: Get response from knowledge base with better error handling."""
+        """FIXED: Get response from knowledge base with better error handling."""
         try:
+            # FIXED: Properly access query_engine through the pipeline
             if hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
                 result = await self.pipeline.query_engine.query(transcription)
                 response_text = result.get("response", "")
@@ -327,7 +328,7 @@ class SimpleWebSocketHandler:
                     logger.warning("Empty response from knowledge base")
                     return None
             else:
-                logger.error("No query engine available")
+                logger.error("No query engine available in pipeline")
                 return "I'm sorry, my knowledge base is not available."
         except Exception as e:
             logger.error(f"Knowledge base error: {e}")
