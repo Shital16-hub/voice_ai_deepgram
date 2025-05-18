@@ -63,6 +63,9 @@ class SimpleWebSocketHandler:
         # Get project ID
         self.project_id = self._get_project_id()
         
+        # CRITICAL FIX: Set credentials_file here to avoid unbound variable error
+        self.credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        
         # UPDATED: Use existing STT from pipeline if available, otherwise create new one
         if hasattr(pipeline, 'speech_recognizer') and pipeline.speech_recognizer:
             self.stt_client = pipeline.speech_recognizer
@@ -70,7 +73,6 @@ class SimpleWebSocketHandler:
         else:
             # UPDATED: Initialize with infinite streaming STT
             from speech_to_text.infinite_streaming_stt import InfiniteStreamingSTT
-            credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
             self.stt_client = InfiniteStreamingSTT(
                 project_id=self.project_id,
                 language="en-US",
@@ -79,24 +81,33 @@ class SimpleWebSocketHandler:
                 channels=1,
                 interim_results=True,
                 location="global",
-                credentials_file=credentials_file,
+                credentials_file=self.credentials_file,
                 # UPDATED: Configure for entire call duration
                 session_max_duration=240,    # 4 minutes per session
                 session_overlap_seconds=30   # 30 second overlap
             )
             logger.info(f"Created new infinite streaming STT client")
         
-        # Initialize Google Cloud TTS (same as before)
-        self.tts_client = GoogleCloudTTS(
-            credentials_file=credentials_file,
-            voice_name="en-US-Neural2-C",
-            voice_gender=None,
-            language_code="en-US",
-            container_format="mulaw",
-            sample_rate=8000,
-            enable_caching=True,
-            voice_type="NEURAL2"
-        )
+        # CRITICAL FIX: Initialize TTS client safely
+        if hasattr(pipeline, 'tts_client') and pipeline.tts_client:
+            self.tts_client = pipeline.tts_client
+            logger.info("Using TTS client from pipeline")
+        elif hasattr(pipeline, 'tts_integration') and pipeline.tts_integration and hasattr(pipeline.tts_integration, 'tts_client'):
+            self.tts_client = pipeline.tts_integration.tts_client
+            logger.info("Using TTS client from pipeline integration")
+        else:
+            # Initialize Google Cloud TTS (same as before)
+            self.tts_client = GoogleCloudTTS(
+                credentials_file=self.credentials_file,
+                voice_name="en-US-Neural2-C",
+                voice_gender=None,
+                language_code="en-US",
+                container_format="mulaw",
+                sample_rate=8000,
+                enable_caching=True,
+                voice_type="NEURAL2"
+            )
+            logger.info("Created new TTS client")
         
         # Enhanced state management (same as before)
         self.state = SessionState(call_sid=call_sid)
@@ -316,8 +327,22 @@ class SimpleWebSocketHandler:
     async def _get_knowledge_response(self, transcription: str) -> Optional[str]:
         """FIXED: Get response from knowledge base with better error handling."""
         try:
-            # FIXED: Properly access query_engine through the pipeline
-            if hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
+            # CRITICAL FIX: Try QueryEngineAPI first
+            if hasattr(self.pipeline, 'query_engine_api') and self.pipeline.query_engine_api:
+                logger.info("Using QueryEngineAPI for response generation")
+                result = await self.pipeline.query_engine_api.query(transcription)
+                response_text = result.get("response", "")
+                
+                # CRITICAL FIX: Validate response
+                if response_text and response_text.strip():
+                    return response_text.strip()
+                else:
+                    logger.warning("Empty response from knowledge base API")
+                    return "I couldn't find a specific answer to that. Could you try asking in a different way?"
+                    
+            # CRITICAL FIX: Check query_engine attribute directly next
+            elif hasattr(self.pipeline, 'query_engine') and self.pipeline.query_engine:
+                logger.info("Using direct query_engine for response generation")
                 result = await self.pipeline.query_engine.query(transcription)
                 response_text = result.get("response", "")
                 
@@ -326,13 +351,27 @@ class SimpleWebSocketHandler:
                     return response_text.strip()
                 else:
                     logger.warning("Empty response from knowledge base")
-                    return None
+                    return "I couldn't find a specific answer to that. Could you try asking in a different way?"
+            # CRITICAL FIX: If not found directly, try accessing via conversation_manager
+            elif hasattr(self.pipeline, 'conversation_manager') and self.pipeline.conversation_manager:
+                logger.info("Using conversation_manager for response generation")
+                if hasattr(self.pipeline.conversation_manager, 'query_engine') and self.pipeline.conversation_manager.query_engine:
+                    # Use conversation manager's query engine
+                    response = await self.pipeline.conversation_manager.handle_user_input(transcription)
+                    if response and response.get("response"):
+                        return response.get("response")
+                    else:
+                        logger.warning("Empty response from conversation manager")
+                        return "I'm processing that, but couldn't generate a response. Could you rephrase?"
+                else:
+                    logger.error("No query engine available in conversation manager")
+                    return "I'm sorry, my knowledge base is not properly connected."
             else:
-                logger.error("No query engine available in pipeline")
+                logger.error("No query engine or conversation manager available in pipeline")
                 return "I'm sorry, my knowledge base is not available."
         except Exception as e:
             logger.error(f"Knowledge base error: {e}")
-            return None
+            return f"I encountered an issue processing that. Please try again."
     
     async def _send_response(self, text: str, ws=None):
         """CRITICAL FIX: Enhanced response sending with better timing."""

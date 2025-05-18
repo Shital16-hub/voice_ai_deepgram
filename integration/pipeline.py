@@ -40,15 +40,26 @@ class VoiceAIAgentPipeline:
         llm_temperature: float = 0.7,
         credentials_file: Optional[str] = None,
         use_infinite_streaming: bool = True,  # UPDATED: Add infinite streaming option
+        speech_recognizer: Optional[Any] = None,
+        conversation_manager: Optional[ConversationManager] = None, 
+        query_engine: Optional[QueryEngine] = None,
+        tts_integration: Optional[Any] = None,
         **kwargs
     ):
         """
         Initialize the Voice AI Agent with infinite streaming support.
+        UPDATED: Now accepts pre-initialized components
         """
         self.storage_dir = storage_dir
         self.openai_model = openai_model
         self.llm_temperature = llm_temperature
         self.use_infinite_streaming = use_infinite_streaming  # UPDATED: Store option
+        
+        # Accept pre-initialized components
+        self.speech_recognizer = speech_recognizer
+        self.conversation_manager = conversation_manager
+        self.query_engine = query_engine  # CRITICAL FIX: Store query_engine parameter
+        self.tts_integration = tts_integration
         
         # Credentials handling (same as before)
         self.credentials_file = credentials_file
@@ -65,8 +76,9 @@ class VoiceAIAgentPipeline:
                     logger.info(f"Found credentials file: {path}")
                     break
         
-        # CRITICAL FIX: Verify required API keys with retry
-        self._verify_api_keys()
+        # CRITICAL FIX: Verify required API keys with retry if we're not using pre-initialized components
+        if not (self.speech_recognizer and self.conversation_manager and self.query_engine):
+            self._verify_api_keys()
         
         # STT Parameters
         self.stt_language = kwargs.get('language', 'en-US')
@@ -79,11 +91,8 @@ class VoiceAIAgentPipeline:
         # Get project ID from environment or credentials file
         self.project_id = self._get_project_id()
         
-        # Component placeholders
-        self.speech_recognizer = None
+        # Remaining component placeholders
         self.stt_integration = None
-        self.conversation_manager = None
-        self.query_engine = None
         self.tts_client = None
         
         # OpenAI + Pinecone components
@@ -94,6 +103,11 @@ class VoiceAIAgentPipeline:
         # CRITICAL FIX: Initialization state tracking
         self._initialized = False
         self._initialization_error = None
+        
+        # CRITICAL FIX: If we have all pre-initialized components, we're already initialized
+        if self.speech_recognizer and self.conversation_manager and self.query_engine and self.tts_integration:
+            self._initialized = True
+            logger.info("Pipeline initialized with pre-initialized components")
         
         logger.info(f"VoiceAIAgent initialized with {'infinite streaming' if use_infinite_streaming else 'standard STT'}")
     
@@ -159,43 +173,54 @@ class VoiceAIAgentPipeline:
             # UPDATED: Initialize speech recognizer based on mode
             logger.info("Step 1: Initializing Google Cloud STT...")
             
-            if self.use_infinite_streaming:
-                # Use infinite streaming implementation
-                from speech_to_text.infinite_streaming_stt import InfiniteStreamingSTT
-                self.speech_recognizer = InfiniteStreamingSTT(
-                    project_id=self.project_id,
-                    language=self.stt_language,
-                    sample_rate=8000,
-                    encoding="MULAW",
-                    channels=1,
-                    interim_results=True,
-                    location="global",
-                    credentials_file=self.credentials_file,
-                    session_max_duration=240,    # 4 minutes per session
-                    session_overlap_seconds=30   # 30 second overlap
-                )
-                logger.info("✅ Infinite streaming STT initialized")
+            if not self.speech_recognizer:
+                if self.use_infinite_streaming:
+                    # Use infinite streaming implementation
+                    from speech_to_text.infinite_streaming_stt import InfiniteStreamingSTT
+                    self.speech_recognizer = InfiniteStreamingSTT(
+                        project_id=self.project_id,
+                        language=self.stt_language,
+                        sample_rate=8000,
+                        encoding="MULAW",
+                        channels=1,
+                        interim_results=True,
+                        location="global",
+                        credentials_file=self.credentials_file,
+                        session_max_duration=240,    # 4 minutes per session
+                        session_overlap_seconds=30   # 30 second overlap
+                    )
+                    logger.info("✅ Infinite streaming STT initialized")
+                else:
+                    # Use standard implementation
+                    self.speech_recognizer = GoogleCloudStreamingSTT(
+                        language=self.stt_language,
+                        sample_rate=8000,
+                        encoding="MULAW",
+                        channels=1,
+                        interim_results=True,  # CRITICAL: Enable for debugging
+                        project_id=self.project_id,
+                        location="global",
+                        credentials_file=self.credentials_file
+                    )
+                    logger.info("✅ Standard Google Cloud STT initialized")
             else:
-                # Use standard implementation
-                self.speech_recognizer = GoogleCloudStreamingSTT(
-                    language=self.stt_language,
-                    sample_rate=8000,
-                    encoding="MULAW",
-                    channels=1,
-                    interim_results=True,  # CRITICAL: Enable for debugging
-                    project_id=self.project_id,
-                    location="global",
-                    credentials_file=self.credentials_file
-                )
-                logger.info("✅ Standard Google Cloud STT initialized")
+                logger.info("✅ Using provided STT instance")
             
             # Initialize STT integration
-            self.stt_integration = STTIntegration(
-                speech_recognizer=self.speech_recognizer,
-                language=self.stt_language
-            )
-            await self.stt_integration.init(project_id=self.project_id)
-            logger.info("✅ STT integration initialized")
+            if not self.stt_integration:
+                self.stt_integration = STTIntegration(
+                    speech_recognizer=self.speech_recognizer,
+                    language=self.stt_language
+                )
+                await self.stt_integration.init(project_id=self.project_id)
+                logger.info("✅ STT integration initialized")
+            
+            # CRITICAL FIX: Skip the remaining initialization if we have all components
+            if self.conversation_manager and self.query_engine and self.tts_integration:
+                self._initialized = True
+                logger.info("✅ Using provided components, skipping remaining initialization")
+                await self._log_initialization_status()
+                return
             
             # CRITICAL FIX: 2. Initialize embeddings with retry
             logger.info("Step 2: Initializing OpenAI embeddings...")

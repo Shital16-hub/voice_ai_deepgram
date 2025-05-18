@@ -12,6 +12,8 @@ import time
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
+from telephony.query_engine_api import QueryEngineAPI
+
 # FastAPI imports
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import Response, JSONResponse
@@ -105,7 +107,15 @@ async def initialize_system():
         tts_integration=tts
     )
     
+    # CRITICAL FIX: Add QueryEngineAPI to pipeline
+    from telephony.query_engine_api import QueryEngineAPI
+    query_engine_api = QueryEngineAPI(agent.query_engine)
+    voice_ai_pipeline.query_engine_api = query_engine_api
+    logger.info("QueryEngineAPI attached to pipeline")
+    
     logger.info("System initialization completed with infinite streaming for uninterrupted calls")
+
+
 async def cleanup_system():
     """Cleanup system resources."""
     logger.info("Cleaning up system resources...")
